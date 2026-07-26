@@ -39,6 +39,15 @@ describe('validateTool', () => {
     )
   })
 
+  it('accepts a no-argument tool, which Effect emits as anyOf rather than an object', () => {
+    // Schema.Struct({}) genuinely matches both an object and an array, so Effect emits
+    // `anyOf: [{type:"object"},{type:"array"}]`. MCP requires a root type of "object" and would
+    // reject it, for a reason that has nothing to do with the tool.
+    const schema = validateTool(tool({ name: 'no_args', input: Schema.Struct({}) }))
+    expect(schema.type).toBe('object')
+    expect(schema.additionalProperties).toBe(false)
+  })
+
   it('rejects a name MCP would not accept', () => {
     expect(() => validateTool(tool({ name: 'Not-Valid' }))).toThrow(/Not-Valid/)
     expect(() => validateTool(tool({ name: '' }))).toThrow(ToolRegistrationError)

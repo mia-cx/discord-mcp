@@ -8,6 +8,9 @@
       "path": "./packages/persistence"
     },
     {
+      "path": "./packages/discord-gateway"
+    },
+    {
       "path": "./packages/discord-api"
     },
     {

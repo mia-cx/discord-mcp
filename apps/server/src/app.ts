@@ -6,6 +6,7 @@ import {
   type Principal,
   type RegistrySelection,
   type Scope,
+  type ToolGate,
 } from '@discord-mcp/core'
 import {
   apiTools,
@@ -13,12 +14,14 @@ import {
   guildGet,
   messageTools,
   OperationCatalog,
+  operatorTools,
   PreviewTokens,
   permissionsExplain,
   RateGuard,
   templateTools,
 } from '@discord-mcp/discord-api'
 import { blueprintTools } from '@discord-mcp/discord-blueprints'
+import { DiscordGateway, gatewayTools } from '@discord-mcp/discord-gateway'
 import { PersistenceLayer } from '@discord-mcp/persistence'
 import { Effect, Layer } from 'effect'
 import type { ServerConfig } from './config.ts'
@@ -27,8 +30,10 @@ import type { ServerConfig } from './config.ts'
 export const allTools: ReadonlyArray<AnyToolDef> = [
   guildGet,
   permissionsExplain,
+  ...operatorTools,
   ...messageTools,
   ...blueprintTools,
+  ...gatewayTools,
   ...templateTools,
   ...apiTools,
 ]
@@ -69,19 +74,33 @@ export const stdioAuthorize: Authorize = authorizeWithPrincipal((_request: McpRe
 
 export const selectionFor = (config: ServerConfig): RegistrySelection => ({
   toolsets: config.toolsets,
-  // Gateway and workflows arrive in phases 5 and 9; their tools stay unregistered until then.
-  enabledGates: new Set(['always'] as const),
+  // A gated tool is registered only when its subsystem exists. Hiding a tool the server cannot
+  // honour is better than advertising one that always fails.
+  enabledGates: new Set<ToolGate>(
+    config.gateway.mode === 'off' ? ['always'] : ['always', 'gateway'],
+  ),
 })
 
 /**
  * The application layer. Every service a tool handler can require must be constructible from here,
  * which is what makes the union of handler `R` types a compile-time proof of completeness.
  */
-export const AppLayer = (config: ServerConfig) =>
-  Layer.mergeAll(
-    DiscordRest.layer(config.rest).pipe(Layer.provide(RateGuard.layer())),
+export const AppLayer = (config: ServerConfig) => {
+  const rest = DiscordRest.layer(config.rest).pipe(Layer.provide(RateGuard.layer()))
+
+  return Layer.mergeAll(
+    rest,
     OperationCatalog.layer,
     PreviewTokens.layer,
+    // A misspelled intent is a configuration error, not a runtime one: Discord would close the
+    // connection with 4013 and the server would look broken. Dying here names the variable.
+    Layer.orDie(
+      Layer.tapError(DiscordGateway.layer(config.gateway), (cause) =>
+        Effect.logError(
+          `DISCORD_MCP_GATEWAY_INTENTS is not usable: ${cause.message} ${cause.suggestion}`,
+        ),
+      ),
+    ).pipe(Layer.provide(rest)),
     // A migration failure is fatal and an operator problem, so it becomes a defect with a readable
     // message rather than riding in the runtime's error channel, where every tool call would then
     // have to account for an error that can only happen once, at startup.
@@ -93,3 +112,4 @@ export const AppLayer = (config: ServerConfig) =>
       ),
     ),
   )
+}

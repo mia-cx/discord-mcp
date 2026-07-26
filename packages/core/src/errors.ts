@@ -86,6 +86,14 @@ export class RateGuardTrippedError extends Schema.TaggedErrorClass<RateGuardTrip
   },
 ) {}
 
+export class DiscordGatewayError extends Schema.TaggedErrorClass<DiscordGatewayError>()(
+  'DiscordGatewayError',
+  {
+    message: Schema.String,
+    suggestion: Schema.String,
+  },
+) {}
+
 export class PersistenceError extends Schema.TaggedErrorClass<PersistenceError>()(
   'PersistenceError',
   {
@@ -106,3 +114,4 @@ export type DomainError =
   | OperationNotFoundError
   | RateGuardTrippedError
   | PersistenceError
+  | DiscordGatewayError

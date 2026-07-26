@@ -243,6 +243,13 @@ const renderDomainError = (e: DomainError): ToolErrorPayload => {
         retryable: false,
         suggestion: e.suggestion,
       }
+    case 'DiscordGatewayError':
+      return {
+        code: e._tag,
+        message: e.message,
+        retryable: false,
+        suggestion: e.suggestion,
+      }
     case 'PersistenceError':
       return {
         code: e._tag,

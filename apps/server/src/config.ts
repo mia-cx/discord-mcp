@@ -39,6 +39,12 @@ const toConfigurationError = (cause: Config.ConfigError): ConfigurationError => 
 export interface ServerConfig {
   readonly transport: 'stdio' | 'http'
   readonly databasePath: string
+  readonly gateway: {
+    readonly mode: 'off' | 'lazy' | 'eager'
+    readonly intents: ReadonlyArray<string>
+    readonly bufferSize: number
+    readonly maxWaitMs: number
+  }
   readonly toolsets: ReadonlySet<Toolset>
   readonly rest: typeof restConfig extends Config.Config<infer A> ? A : never
 }
@@ -46,6 +52,15 @@ export interface ServerConfig {
 const raw = Config.all({
   transport: Config.string('MCP_TRANSPORT').pipe(Config.withDefault('stdio')),
   databasePath: Config.string('DATABASE_PATH').pipe(Config.withDefault('./discord-mcp.sqlite')),
+  // lazy by default: REST-only operation opens no WebSocket, so the common case pays nothing.
+  gatewayMode: Config.string('DISCORD_MCP_GATEWAY_MODE').pipe(Config.withDefault('lazy')),
+  // Privileged intents are absent by default; Discord refuses the connection outright for one
+  // that is not enabled in the Developer Portal.
+  gatewayIntents: Config.string('DISCORD_MCP_GATEWAY_INTENTS').pipe(
+    Config.withDefault('Guilds,GuildMessages'),
+  ),
+  gatewayBufferSize: Config.int('DISCORD_MCP_GATEWAY_BUFFER_SIZE').pipe(Config.withDefault(1000)),
+  gatewayMaxWaitMs: Config.int('DISCORD_MCP_GATEWAY_MAX_WAIT_MS').pipe(Config.withDefault(120_000)),
   toolsets,
   rest: restConfig,
 })
@@ -79,9 +94,28 @@ export const loadServerConfig: Effect.Effect<ServerConfig, ConfigurationError> =
       )
     }
 
+    const gatewayModes = ['off', 'lazy', 'eager'] as const
+    if (!gatewayModes.includes(decoded.gatewayMode as (typeof gatewayModes)[number])) {
+      return yield* Effect.fail(
+        new ConfigurationError({
+          variable: 'DISCORD_MCP_GATEWAY_MODE',
+          message: `Expected one of ${gatewayModes.join(', ')}, got "${decoded.gatewayMode}".`,
+        }),
+      )
+    }
+
     return {
       transport: decoded.transport,
       databasePath: decoded.databasePath,
+      gateway: {
+        mode: decoded.gatewayMode as 'off' | 'lazy' | 'eager',
+        intents: decoded.gatewayIntents
+          .split(',')
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0),
+        bufferSize: decoded.gatewayBufferSize,
+        maxWaitMs: decoded.gatewayMaxWaitMs,
+      },
       toolsets: new Set(decoded.toolsets as ReadonlyArray<Toolset>),
       rest: decoded.rest,
     }

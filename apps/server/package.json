@@ -13,7 +13,8 @@
     "@modelcontextprotocol/server": "2.0.0-beta.5",
     "effect": "4.0.0-beta.101",
     "@discord-mcp/discord-blueprints": "workspace:*",
-    "@discord-mcp/persistence": "workspace:*"
+    "@discord-mcp/persistence": "workspace:*",
+    "@discord-mcp/discord-gateway": "workspace:*"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "2.0.0-beta.5"

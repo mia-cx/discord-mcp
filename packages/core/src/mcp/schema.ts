@@ -90,10 +90,36 @@ const hoistAllOf = (node: unknown): unknown => {
  * `tools/list`, where a single bad schema breaks discovery for every tool on the server.
  */
 export const toMcpInputJsonSchema = (s: McpSchema): Record<string, unknown> =>
-  mcpToolInput(s)['~standard'].jsonSchema.input({ target: MCP_JSON_SCHEMA_TARGET }) as Record<
-    string,
-    unknown
-  >
+  normalizeEmptyStruct(
+    mcpToolInput(s)['~standard'].jsonSchema.input({ target: MCP_JSON_SCHEMA_TARGET }) as Record<
+      string,
+      unknown
+    >,
+  )
+
+/**
+ * `Schema.Struct({})` emits `anyOf: [{type:"object"},{type:"array"}]`, because an empty struct
+ * genuinely matches both. MCP requires a root `type` of `"object"` and rejects anything else, so a
+ * no-argument tool would otherwise fail registration for a reason that has nothing to do with the
+ * tool.
+ *
+ * Narrowing to the object branch is the only interpretation MCP can use, and it is what the author
+ * of a no-argument tool meant.
+ */
+const normalizeEmptyStruct = (schema: Record<string, unknown>): Record<string, unknown> => {
+  if (schema.type !== undefined) return schema
+
+  const branches = schema.anyOf
+  const isEmptyStructShape =
+    Array.isArray(branches) &&
+    branches.length === 2 &&
+    branches.some((b) => (b as { type?: string })?.type === 'object') &&
+    branches.some((b) => (b as { type?: string })?.type === 'array')
+
+  return isEmptyStructShape
+    ? { type: 'object', properties: {}, additionalProperties: false }
+    : schema
+}
 
 /**
  * What the registry actually hands to `registerTool`.
