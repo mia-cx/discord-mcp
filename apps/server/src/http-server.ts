@@ -32,6 +32,13 @@ export interface HttpConfig {
   readonly oidc: OidcConfig | undefined
 }
 
+/** The OAuth callback is read by a human in a browser, so it answers in HTML rather than JSON. */
+const html = (status: number, message: string) =>
+  new Response(
+    `<!doctype html><meta charset="utf-8"><title>discord-mcp</title><p style="font-family:system-ui;padding:2rem">${message}</p>`,
+    { status, headers: { 'content-type': 'text/html; charset=utf-8' } },
+  )
+
 const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), {
     status,
@@ -179,6 +186,10 @@ const protectedResourceMetadata = (config: HttpConfig) => ({
 
 interface HandlerDeps<R> {
   readonly config: HttpConfig
+  /** Completes a Discord OAuth2 flow. Absent when no client credentials are configured. */
+  readonly completeOAuth:
+    | ((state: string, code: string) => Effect.Effect<{ readonly name: string }, unknown, R>)
+    | undefined
   readonly verify:
     | ((token: string) => Effect.Effect<{ scopes: ReadonlyArray<string> }, AuthenticationError>)
     | undefined
@@ -222,12 +233,35 @@ const toRequest = (req: IncomingMessage, url: URL, body: Buffer): Request =>
   })
 
 const makeRequestHandler =
-  <R>(deps: HandlerDeps<R>) =>
+  <R>(deps: HandlerDeps<R | PrincipalStore>) =>
   async (req: IncomingMessage): Promise<Response> => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
 
     const open = unauthenticatedRoute(url.pathname, deps.config)
     if (open !== undefined) return open
+
+    // Discord redirects a browser here. Authentication is the state parameter and PKCE, not a
+    // bearer token: the user's browser has no credential for this server and never should.
+    if (url.pathname === '/oauth/discord/callback') {
+      const state = url.searchParams.get('state')
+      const code = url.searchParams.get('code')
+
+      if (deps.completeOAuth === undefined) {
+        return html(400, 'Discord OAuth2 is not configured on this server.')
+      }
+      if (state === null || code === null) {
+        return html(400, 'Discord did not return a state and code. Start the flow again.')
+      }
+
+      const completed = await deps.runtime.runPromiseExit(
+        deps.completeOAuth(state, code) as Effect.Effect<{ name: string }, unknown, R>,
+      )
+      return completed._tag === 'Success'
+        ? html(200, `Profile "${completed.value.name}" is authorized. You can close this window.`)
+        : // No detail: this page is reachable by anyone with a guessed state, and the failure
+          // reasons distinguish unknown from expired, which is not something to publish.
+          html(400, 'Authorization failed or expired. Start the flow again from your agent.')
+    }
 
     if (!hostAllowed(req.headers.host ?? null, deps.config.allowedHosts)) {
       return json(421, {
@@ -263,6 +297,12 @@ export const startHttpServer = <R>(options: {
   readonly config: HttpConfig
   readonly buildServer: (resolve: () => Effect.Effect<Principal, AuthenticationError>) => McpServer
   readonly runtime: ManagedRuntime.ManagedRuntime<R | PrincipalStore, never>
+  readonly completeOAuth?:
+    | ((
+        state: string,
+        code: string,
+      ) => Effect.Effect<{ readonly name: string }, unknown, R | PrincipalStore>)
+    | undefined
 }): Effect.Effect<HttpServerHandle> =>
   Effect.promise(
     () =>
@@ -290,6 +330,7 @@ export const startHttpServer = <R>(options: {
 
         const handle = makeRequestHandler({
           config,
+          completeOAuth: options.completeOAuth,
           verify,
           metadataUrl:
             config.publicBaseUrl === undefined

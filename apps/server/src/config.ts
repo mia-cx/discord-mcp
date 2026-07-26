@@ -1,7 +1,9 @@
+import { randomBytes } from 'node:crypto'
+import { decodeMasterKey } from '@discord-mcp/auth'
 import type { Toolset } from '@discord-mcp/core'
 import { ConfigurationError } from '@discord-mcp/core'
 import { restConfig } from '@discord-mcp/discord-api'
-import { Config, Effect, SchemaIssue } from 'effect'
+import { Config, Effect, Redacted, SchemaIssue } from 'effect'
 import { checkPublicExposure } from './public-exposure.ts'
 
 const ALL_TOOLSETS: ReadonlyArray<Toolset> = ['operator', 'automation', 'admin', 'api']
@@ -48,6 +50,15 @@ export interface ServerConfig {
     readonly trustProxyIdentity: boolean
     readonly trustedProxyCidrs: ReadonlyArray<string>
   }
+  /** 32 bytes. Encrypts stored OAuth2 tokens and route secrets. */
+  readonly masterKey: Buffer
+  readonly discordOAuth:
+    | {
+        readonly clientId: string
+        readonly clientSecret: Redacted.Redacted<string>
+        readonly redirectUri: string
+      }
+    | undefined
   readonly oidc:
     | { readonly issuer: string; readonly audience: string; readonly jwksUri: string }
     | undefined
@@ -73,6 +84,11 @@ const raw = Config.all({
   allowedHosts: Config.string('ALLOWED_HOSTS').pipe(Config.withDefault('')),
   trustProxyIdentity: Config.boolean('TRUST_PROXY_IDENTITY').pipe(Config.withDefault(false)),
   trustedProxyCidrs: Config.string('TRUSTED_PROXY_CIDRS').pipe(Config.withDefault('')),
+  // Optional so a stdio-only deployment that stores no secrets needs no key; a random one is
+  // generated instead, and nothing durable is encrypted under it.
+  masterKey: Config.string('DISCORD_MCP_MASTER_KEY').pipe(Config.withDefault('')),
+  discordClientId: Config.string('DISCORD_APPLICATION_ID').pipe(Config.withDefault('')),
+  discordClientSecret: Config.string('DISCORD_CLIENT_SECRET').pipe(Config.withDefault('')),
   oidcIssuer: Config.string('OIDC_ISSUER').pipe(Config.withDefault('')),
   oidcAudience: Config.string('OIDC_AUDIENCE').pipe(Config.withDefault('')),
   oidcJwksUri: Config.string('OIDC_JWKS_URI').pipe(Config.withDefault('')),
@@ -165,9 +181,35 @@ export const loadServerConfig: Effect.Effect<ServerConfig, ConfigurationError> =
       )
     }
 
+    const masterKey =
+      decoded.masterKey === ''
+        ? // Ephemeral. Anything encrypted under it is unreadable after a restart, which is correct:
+          // an operator who never set a key never intended durable secrets.
+          randomBytes(32)
+        : yield* decodeMasterKey(Redacted.make(decoded.masterKey))
+
+    const oauthConfigured = decoded.discordClientId !== '' && decoded.discordClientSecret !== ''
+    if (decoded.discordClientSecret !== '' && decoded.discordClientId === '') {
+      return yield* Effect.fail(
+        new ConfigurationError({
+          variable: 'DISCORD_APPLICATION_ID',
+          message:
+            'DISCORD_CLIENT_SECRET is set but DISCORD_APPLICATION_ID is not. Both are needed to authorize an OAuth2 profile.',
+        }),
+      )
+    }
+
     return {
       transport: decoded.transport,
       databasePath: decoded.databasePath,
+      masterKey,
+      discordOAuth: oauthConfigured
+        ? {
+            clientId: decoded.discordClientId,
+            clientSecret: Redacted.make(decoded.discordClientSecret),
+            redirectUri: `${http.publicBaseUrl ?? `http://${http.host}:${http.port}`}/oauth/discord/callback`,
+          }
+        : undefined,
       http,
       oidc:
         oidcSet === 3

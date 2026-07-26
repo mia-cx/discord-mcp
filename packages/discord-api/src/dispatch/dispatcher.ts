@@ -1,5 +1,10 @@
-import { McpRequestContext, type RiskClass, ValidationError } from '@discord-mcp/core'
-import { Effect } from 'effect'
+import {
+  type AuthMode,
+  McpRequestContext,
+  type RiskClass,
+  ValidationError,
+} from '@discord-mcp/core'
+import { Context, Effect, Layer } from 'effect'
 import { OperationCatalog } from '../catalog/service.ts'
 import type { OperationEntry } from '../catalog/types.ts'
 import { DiscordRest } from '../rest.ts'
@@ -15,22 +20,39 @@ import {
 } from './validate.ts'
 
 /**
- * The auth mode a named profile resolves to.
+ * Resolve a named auth profile to the mode it can execute under.
  *
- * Only `bot` exists until phase 7 wires OAuth2 profiles; the seam is here so the five
- * OAuth2-only operations already produce the right message rather than a bare 401.
+ * `bot` is the built-in. Any other name is a Discord OAuth2 profile, which is what makes the five
+ * bot-incompatible operations reachable at all. Resolution is injected rather than imported so
+ * `discord-api` does not depend on `auth` — the dependency would run the wrong way.
  */
+export interface AuthProfileResolver {
+  readonly resolve: (
+    name: string,
+  ) => Effect.Effect<{ readonly name: string; readonly kind: AuthMode }, ValidationError>
+}
+
+export class AuthProfiles extends Context.Service<AuthProfiles, AuthProfileResolver>()(
+  'discord-api/AuthProfiles',
+) {
+  /** Bot only. What a deployment without OAuth2 profiles configured gets. */
+  static readonly botOnly = Layer.succeed(AuthProfiles)({
+    resolve: (name) =>
+      name === 'bot'
+        ? Effect.succeed({ name, kind: 'bot' as const })
+        : Effect.fail(
+            new ValidationError({
+              message: `Unknown auth profile "${name}".`,
+              issues: [
+                'authProfile: only "bot" is configured. Create a Discord OAuth2 profile with discord_oauth_profile_authorize, then pass its name here.',
+              ],
+            }),
+          ),
+  })
+}
+
 export const resolveAuthProfile = (name: string) =>
-  name === 'bot'
-    ? Effect.succeed({ name, kind: 'bot' as const })
-    : Effect.fail(
-        new ValidationError({
-          message: `Unknown auth profile "${name}".`,
-          issues: [
-            'authProfile: only "bot" is configured. Discord OAuth2 profiles are created with discord_oauth_profile_authorize.',
-          ],
-        }),
-      )
+  Effect.flatMap(AuthProfiles, (profiles) => profiles.resolve(name))
 
 /** IDs the call will affect, so a preview token binds to targets and not just to arguments. */
 export const resolveTargets = (

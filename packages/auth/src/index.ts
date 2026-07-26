@@ -1,3 +1,5 @@
+export * from './discord-oauth.ts'
 export * from './http-identity.ts'
+export * from './oauth-tools.ts'
 export * from './principals.ts'
 export * from './secrets.ts'

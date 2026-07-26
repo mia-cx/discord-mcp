@@ -2,7 +2,7 @@ import { defineTool, type RiskClass, Snowflake } from '@discord-mcp/core'
 import { Effect, Schema } from 'effect'
 import { OperationCatalog } from '../catalog/service.ts'
 import { docsUrlFor, type OperationEntry } from '../catalog/types.ts'
-import { dispatch, preview } from '../dispatch/dispatcher.ts'
+import { type AuthProfiles, dispatch, preview } from '../dispatch/dispatcher.ts'
 import type { PreviewTokens } from '../dispatch/preview.ts'
 import type { DiscordRest } from '../rest.ts'
 
@@ -199,7 +199,7 @@ const PreviewInput = Schema.Struct({
   auditLogReason: Schema.optionalKey(Schema.String),
 })
 
-type DispatcherDeps = OperationCatalog | DiscordRest | PreviewTokens
+type DispatcherDeps = OperationCatalog | DiscordRest | PreviewTokens | AuthProfiles
 
 const makeDispatcher = (spec: {
   name: string

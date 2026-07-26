@@ -2,7 +2,7 @@ import { McpRequestContext, type Principal, type Scope } from '@discord-mcp/core
 import { Effect, Layer, ManagedRuntime } from 'effect'
 import { describe, expect, it } from 'vitest'
 import { OperationCatalog } from '../src/catalog/service.ts'
-import { dispatch, preview } from '../src/dispatch/dispatcher.ts'
+import { AuthProfiles, dispatch, preview } from '../src/dispatch/dispatcher.ts'
 import { PreviewTokens } from '../src/dispatch/preview.ts'
 import { DiscordRest } from '../src/rest.ts'
 
@@ -33,11 +33,16 @@ const harness = () => {
   // would rebuild the layer each time, giving every call its own empty preview-token store and
   // making a valid token look expired.
   const runtime = ManagedRuntime.make(
-    Layer.mergeAll(rest, OperationCatalog.layer, PreviewTokens.layer),
+    // botOnly: what a deployment with no Discord OAuth2 client credentials configured gets.
+    Layer.mergeAll(rest, OperationCatalog.layer, PreviewTokens.layer, AuthProfiles.botOnly),
   )
 
   const run = <A, E>(
-    effect: Effect.Effect<A, E, DiscordRest | OperationCatalog | PreviewTokens | McpRequestContext>,
+    effect: Effect.Effect<
+      A,
+      E,
+      DiscordRest | OperationCatalog | PreviewTokens | AuthProfiles | McpRequestContext
+    >,
   ) =>
     runtime.runPromiseExit(
       Effect.provideService(effect, McpRequestContext, {
@@ -46,7 +51,7 @@ const harness = () => {
         progressToken: undefined,
         notify: undefined,
         principal,
-      }) as Effect.Effect<A, E, DiscordRest | OperationCatalog | PreviewTokens>,
+      }) as Effect.Effect<A, E, DiscordRest | OperationCatalog | PreviewTokens | AuthProfiles>,
     )
 
   return { sent, run }

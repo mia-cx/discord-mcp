@@ -1,4 +1,4 @@
-import { PrincipalStore } from '@discord-mcp/auth'
+import { DiscordOAuth, oauthTools, PrincipalStore, SecretStore } from '@discord-mcp/auth'
 import {
   type AnyToolDef,
   type AuthenticationError,
@@ -9,8 +9,10 @@ import {
   type RegistrySelection,
   type Scope,
   type ToolGate,
+  ValidationError,
 } from '@discord-mcp/core'
 import {
+  AuthProfiles,
   apiTools,
   DiscordRest,
   guildGet,
@@ -37,6 +39,7 @@ export const allTools: ReadonlyArray<AnyToolDef> = [
   ...blueprintTools,
   ...gatewayTools,
   ...templateTools,
+  ...oauthTools,
   ...apiTools,
 ]
 
@@ -97,6 +100,41 @@ export const selectionFor = (config: ServerConfig): RegistrySelection => ({
  * The application layer. Every service a tool handler can require must be constructible from here,
  * which is what makes the union of handler `R` types a compile-time proof of completeness.
  */
+/**
+ * Resolve a named auth profile, consulting the stored Discord OAuth2 profiles.
+ *
+ * Lives here rather than in `discord-api` because the dependency would otherwise run backwards:
+ * the catalog and dispatchers must not know about credential storage.
+ */
+const authProfilesLayer = Layer.effect(AuthProfiles)(
+  Effect.map(DiscordOAuth, (oauth) => ({
+    resolve: (name: string) =>
+      name === 'bot'
+        ? Effect.succeed({ name, kind: 'bot' as const })
+        : Effect.flatMap(
+            Effect.mapError(
+              oauth.get(name),
+              () =>
+                new ValidationError({
+                  message: `Could not read the OAuth2 profile "${name}".`,
+                  issues: ['authProfile: local storage failed.'],
+                }),
+            ),
+            (profile) =>
+              profile === undefined || profile.revokedAt !== null
+                ? Effect.fail(
+                    new ValidationError({
+                      message: `No usable OAuth2 profile named "${name}".`,
+                      issues: [
+                        'authProfile: list them with discord_oauth_profile_list, or create one with discord_oauth_profile_authorize.',
+                      ],
+                    }),
+                  )
+                : Effect.succeed({ name, kind: 'oauth2' as const }),
+          ),
+  })),
+)
+
 export const AppLayer = (config: ServerConfig) => {
   const rest = DiscordRest.layer(config.rest).pipe(Layer.provide(RateGuard.layer()))
 
@@ -110,6 +148,23 @@ export const AppLayer = (config: ServerConfig) => {
       ),
     ),
   )
+
+  const secrets = SecretStore.layer(config.masterKey).pipe(Layer.provide(persistence))
+  const oauth =
+    config.discordOAuth === undefined
+      ? // No client credentials configured, so no profile can be authorized. The dispatcher still
+        // refuses non-bot profiles by name, which is the same answer with a clearer reason.
+        Layer.succeed(DiscordOAuth)({
+          authorize: () => Effect.die(new Error('Discord OAuth2 is not configured.')),
+          callback: () => Effect.die(new Error('Discord OAuth2 is not configured.')),
+          list: () => Effect.succeed([]),
+          get: () => Effect.succeed(undefined),
+          accessToken: () => Effect.die(new Error('Discord OAuth2 is not configured.')),
+          revoke: () => Effect.void,
+        })
+      : DiscordOAuth.layer(config.discordOAuth).pipe(
+          Layer.provide(Layer.merge(secrets, persistence)),
+        )
 
   return Layer.mergeAll(
     rest,
@@ -127,6 +182,9 @@ export const AppLayer = (config: ServerConfig) => {
     // Needed by the HTTP transport to turn a credential into a principal. Free to construct, so it
     // is always present rather than conditional on the transport.
     PrincipalStore.layer.pipe(Layer.provide(persistence)),
+    secrets,
+    oauth,
+    authProfilesLayer.pipe(Layer.provide(oauth)),
     persistence,
   )
 }

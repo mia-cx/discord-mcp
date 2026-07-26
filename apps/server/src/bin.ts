@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { DiscordOAuth } from '@discord-mcp/auth'
 import { NodeRuntime } from '@effect/platform-node'
 import { serveStdio } from '@modelcontextprotocol/server/stdio'
 import { Cause, Effect, Layer, Logger, ManagedRuntime } from 'effect'
@@ -47,6 +48,8 @@ const main = Effect.gen(function* () {
         buildServer: (resolve) =>
           buildMcpServer({ config, runtime, authorize: httpAuthorize(resolve) }),
         runtime,
+        completeOAuth: (state, code) =>
+          Effect.flatMap(DiscordOAuth, (oauth) => oauth.callback({ state, code })),
       }),
       (h) =>
         Effect.promise(async () => {
