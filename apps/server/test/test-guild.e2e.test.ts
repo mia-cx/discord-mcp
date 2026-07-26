@@ -11,7 +11,7 @@ import {
 } from '@discord-mcp/discord-api'
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client'
 import { createMcpHandler } from '@modelcontextprotocol/server'
-import { Effect, Layer, ManagedRuntime, Redacted } from 'effect'
+import { Layer, ManagedRuntime, Redacted } from 'effect'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { stdioAuthorize } from '../src/app.ts'
 import type { ServerConfig } from '../src/config.ts'

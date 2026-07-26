@@ -49,6 +49,7 @@ exports[`the tool surface > advertises a stable set of tools 1`] = `
   "discord_server_blueprint_publish",
   "discord_server_blueprint_update_draft",
   "discord_server_snapshot",
+  "events_tail",
   "metrics_snapshot",
   "workflow_create",
   "workflow_delete",

@@ -1,5 +1,5 @@
-import { DiscordGateway } from '@discord-mcp/discord-gateway'
-import { WorkflowDispatcher } from '@discord-mcp/workflow-runtime'
+import { DiscordGateway, type NormalizedEvent } from '@discord-mcp/discord-gateway'
+import { EventLog, WorkflowDispatcher } from '@discord-mcp/workflow-runtime'
 import { Effect, Schedule } from 'effect'
 
 /**
@@ -19,8 +19,76 @@ const PUMP_INTERVAL_MS = 250
 /** Schedules have minute resolution, so anything finer is wasted work. */
 const TICK_INTERVAL_MS = 30_000
 
+/**
+ * Record one event durably, then offer it to every workflow that wants it.
+ *
+ * Recorded first and best-effort: a workflow that fails must not lose the event that caused it, and
+ * a full disk must not stop the bot reacting.
+ */
+const handleEvent = (
+  event: NormalizedEvent,
+  log: EventLog['Service'],
+  dispatcher: WorkflowDispatcher['Service'],
+) =>
+  Effect.gen(function* () {
+    yield* Effect.ignore(
+      log.append({
+        type: event.type,
+        correlationId: event.correlationId,
+        receivedAt: Date.parse(event.receivedAt),
+        payload: event.payload,
+        ...(event.discordEventId === undefined ? {} : { discordEventId: event.discordEventId }),
+        ...(event.shardId === undefined ? {} : { shardId: event.shardId }),
+        ...(event.guildId === undefined ? {} : { guildId: event.guildId }),
+        ...(event.channelId === undefined ? {} : { channelId: event.channelId }),
+        ...(event.causationId === undefined ? {} : { causationId: event.causationId }),
+      }),
+    )
+
+    yield* dispatcher.onGatewayEvent({
+      type: event.type,
+      botAuthored: event.botAuthored,
+      correlationId: event.correlationId,
+      payload: event.payload,
+      ...(event.guildId === undefined ? {} : { guildId: event.guildId }),
+      ...(event.channelId === undefined ? {} : { channelId: event.channelId }),
+      ...(event.causationId === undefined ? {} : { causationId: event.causationId }),
+    })
+  })
+
+/**
+ * Read the Gateway forever, by cursor.
+ *
+ * Cursor-based rather than callback-based: an event that arrives while a previous batch is being
+ * dispatched is still delivered rather than dropped.
+ */
+const gatewayLoop = (
+  gateway: DiscordGateway['Service'],
+  log: EventLog['Service'],
+  dispatcher: WorkflowDispatcher['Service'],
+) =>
+  Effect.gen(function* () {
+    yield* gateway.ensureConnected
+    let cursor = (yield* gateway.status).latestCursor
+
+    while (true) {
+      const batch = yield* gateway.waitFor(
+        // `includeBotAuthored` so the dispatcher sees them and the *grant* decides. Filtering here
+        // would make `includeBotAuthoredEvents` unenforceable rather than default-off.
+        { cursor, limit: 100, includeBotAuthored: true },
+        30_000,
+      )
+
+      for (const event of batch.events) {
+        cursor = Math.max(cursor, event.sequence)
+        yield* handleEvent(event, log, dispatcher)
+      }
+    }
+  })
+
 export const startAutomation = Effect.gen(function* () {
   const dispatcher = yield* WorkflowDispatcher
+  const log = yield* EventLog
 
   // Enabled means enabled: whatever an operator turned on before the restart is running after it.
   const restored = yield* dispatcher.restore()
@@ -33,39 +101,12 @@ export const startAutomation = Effect.gen(function* () {
   // Gateway events. Subscribing here rather than inside the dispatcher keeps the runtime package
   // free of any Gateway dependency — it states what it needs and the application supplies it.
   const gateway = yield* Effect.serviceOption(DiscordGateway)
-  if (gateway._tag === 'Some' && restored.some((w) => w.manifest.gatewayEventTypes.length > 0)) {
+  // Runs whenever the Gateway is on, not only when some workflow subscribes: the durable log is
+  // what `events_tail` reads, and it is useful with no workflows at all.
+  if (gateway._tag === 'Some') {
     yield* Effect.forkDetach(
-      Effect.catchCause(
-        Effect.gen(function* () {
-          yield* gateway.value.ensureConnected
-
-          // Cursor-based rather than callback-based, so an event that arrives while a previous
-          // batch is being dispatched is still delivered rather than dropped.
-          let cursor = (yield* gateway.value.status).latestCursor
-
-          while (true) {
-            const batch = yield* gateway.value.waitFor(
-              // `includeBotAuthored` so the dispatcher sees them and the *grant* decides. Filtering
-              // here would make `includeBotAuthoredEvents` unenforceable rather than default-off.
-              { cursor, limit: 100, includeBotAuthored: true },
-              30_000,
-            )
-
-            for (const event of batch.events) {
-              cursor = Math.max(cursor, event.sequence)
-              yield* dispatcher.onGatewayEvent({
-                type: event.type,
-                botAuthored: event.botAuthored,
-                correlationId: event.correlationId,
-                payload: event.payload,
-                ...(event.guildId === undefined ? {} : { guildId: event.guildId }),
-                ...(event.channelId === undefined ? {} : { channelId: event.channelId }),
-                ...(event.causationId === undefined ? {} : { causationId: event.causationId }),
-              })
-            }
-          }
-        }),
-        (cause) => Effect.logError(`The Gateway dispatch loop stopped: ${cause}`),
+      Effect.catchCause(gatewayLoop(gateway.value, log, dispatcher), (cause) =>
+        Effect.logError(`The Gateway dispatch loop stopped: ${cause}`),
       ),
     )
   }

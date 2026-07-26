@@ -36,6 +36,7 @@ import {
   CapabilityServer,
   CapabilitySockets,
   diagnosticsTools,
+  EventLog,
   RouteRegistry,
   SandboxSupervisor,
   WorkflowDispatcher,
@@ -230,6 +231,7 @@ export const AppLayer = (config: ServerConfig) => {
     RouteRegistry.layer,
     WorkflowQueues.layer,
     AuditRepository.layer,
+    EventLog.layer,
     sandbox,
     // Shares the REST client and catalog with the MCP tools, so a workflow's calls and an
     // operator's sit in one rate-limit view rather than two that each think they have the budget.

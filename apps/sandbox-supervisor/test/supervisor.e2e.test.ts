@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { Effect, Layer, ManagedRuntime } from 'effect'
+import { Layer, ManagedRuntime } from 'effect'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { CAPABILITY_VOLUME, containerName, runtimeSpec } from '../src/container-spec.ts'
 import { DockerEngine, runArgs } from '../src/docker.ts'

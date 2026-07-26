@@ -27,11 +27,18 @@ const main = Effect.gen(function* () {
 
   // One ManagedRuntime for the process. `Runtime<R>` was removed in v4, so this is the single
   // Effect<->Promise boundary every MCP handler crosses.
-  const runtime = ManagedRuntime.make(AppLayer(config))
+  //
+  // `StderrLogging` belongs *inside* it, not only around `main`: anything run through this runtime
+  // — a tool handler, the automation loops — logs through its own context, and under stdio a log
+  // line on stdout corrupts every subsequent JSON-RPC message. The stdio-purity suite asserts it.
+  const runtime = ManagedRuntime.make(Layer.merge(AppLayer(config), StderrLogging))
 
   // Started before anything serves, so a workflow enabled before the last restart is running by
   // the time the first request arrives rather than after the first tick.
-  if (config.workflows.enabled) {
+  //
+  // Also started for a Gateway-only deployment: the durable event log is what `events_tail` reads,
+  // and it is useful with no workflows at all.
+  if (config.workflows.enabled || config.gateway.mode !== 'off') {
     yield* Effect.promise(() => runtime.runPromise(startAutomation))
   }
 

@@ -1,6 +1,7 @@
 import { defineTool, Metrics } from '@discord-mcp/core'
 import { AuditRepository } from '@discord-mcp/persistence'
 import { Effect, Schema } from 'effect'
+import { EventLog } from './event-log.ts'
 import { WorkflowQueues } from './queue.ts'
 
 /**
@@ -102,4 +103,47 @@ export const auditTail = defineTool<typeof AuditInput.Type, unknown, AuditReposi
     ),
 })
 
-export const diagnosticsTools = [metricsSnapshot, workflowQueueDepth, auditTail]
+const EventsInput = Schema.Struct({
+  cursor: Schema.optionalKey(Schema.Int).annotate({
+    description:
+      'Return events after this sequence. Pass back the cursor from the previous call; it survives a restart.',
+  }),
+  eventTypes: Schema.optionalKey(Schema.Array(Schema.String)).annotate({
+    description: 'Gateway event type names, such as MESSAGE_CREATE. Omit for every type.',
+  }),
+  guildId: Schema.optionalKey(Schema.String),
+  limit: Schema.optionalKey(
+    Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 1, maximum: 200 }))),
+  ).annotate({ description: 'Defaults to 50.' }),
+})
+
+export const eventsTail = defineTool<typeof EventsInput.Type, unknown, EventLog>({
+  name: 'events_tail',
+  title: 'Tail the persistent event log',
+  description: [
+    'Gateway events this server recorded, after a cursor. Records are durable, so a cursor still',
+    'means something after a restart and nothing is lost if the connection drops.',
+    '',
+    'This is the durable log; discord_gateway_recent_events reads the in-memory ring, which is',
+    'bounded and does not survive a restart. Events are retained for seven days.',
+    '',
+    'An event here never starts a new turn on its own — read it when the user asks.',
+  ].join('\n'),
+  toolset: 'automation',
+  gate: 'gateway',
+  risk: 'read',
+  scopes: ['mcp:read'],
+  annotations: { readOnlyHint: true, openWorldHint: false },
+  input: EventsInput,
+  handler: (args) =>
+    Effect.flatMap(EventLog, (log) =>
+      log.read({
+        limit: args.limit ?? 50,
+        ...(args.cursor === undefined ? {} : { cursor: args.cursor }),
+        ...(args.eventTypes === undefined ? {} : { eventTypes: args.eventTypes }),
+        ...(args.guildId === undefined ? {} : { guildId: args.guildId }),
+      }),
+    ),
+})
+
+export const diagnosticsTools = [metricsSnapshot, workflowQueueDepth, auditTail, eventsTail]
