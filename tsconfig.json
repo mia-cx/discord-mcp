@@ -33,6 +33,9 @@
     },
     {
       "path": "./packages/workflow-runtime"
+    },
+    {
+      "path": "./apps/sandbox-supervisor"
     }
   ]
 }

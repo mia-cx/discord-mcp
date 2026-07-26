@@ -23,6 +23,15 @@
     },
     {
       "path": "../../packages/auth"
+    },
+    {
+      "path": "../../packages/workflow-runtime"
+    },
+    {
+      "path": "../sandbox-supervisor"
+    },
+    {
+      "path": "../../packages/workflow-sdk"
     }
   ]
 }

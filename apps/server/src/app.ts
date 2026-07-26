@@ -27,8 +27,18 @@ import {
 import { blueprintTools } from '@discord-mcp/discord-blueprints'
 import { DiscordGateway, gatewayTools } from '@discord-mcp/discord-gateway'
 import { PersistenceLayer } from '@discord-mcp/persistence'
+import { SupervisorClient } from '@discord-mcp/sandbox-supervisor'
+import {
+  CapabilityBroker,
+  CapabilityServer,
+  CapabilitySockets,
+  SandboxSupervisor,
+  WorkflowRepository,
+  workflowTools,
+} from '@discord-mcp/workflow-runtime'
 import { Effect, Layer } from 'effect'
 import type { ServerConfig } from './config.ts'
+import { SandboxSupervisorLayer } from './sandbox-adapter.ts'
 
 /** Every tool the process knows how to register, before toolset and gate selection. */
 export const allTools: ReadonlyArray<AnyToolDef> = [
@@ -40,6 +50,7 @@ export const allTools: ReadonlyArray<AnyToolDef> = [
   ...gatewayTools,
   ...templateTools,
   ...oauthTools,
+  ...workflowTools,
   ...apiTools,
 ]
 
@@ -87,14 +98,15 @@ export const httpAuthorize = (
   resolve: () => Effect.Effect<Principal, AuthenticationError>,
 ): Authorize => authorizeWithPrincipal(() => Effect.orDie(resolve()))
 
-export const selectionFor = (config: ServerConfig): RegistrySelection => ({
-  toolsets: config.toolsets,
+export const selectionFor = (config: ServerConfig): RegistrySelection => {
   // A gated tool is registered only when its subsystem exists. Hiding a tool the server cannot
   // honour is better than advertising one that always fails.
-  enabledGates: new Set<ToolGate>(
-    config.gateway.mode === 'off' ? ['always'] : ['always', 'gateway'],
-  ),
-})
+  const gates: ToolGate[] = ['always']
+  if (config.gateway.mode !== 'off') gates.push('gateway')
+  if (config.workflows.enabled) gates.push('workflows')
+
+  return { toolsets: config.toolsets, enabledGates: new Set(gates) }
+}
 
 /**
  * The application layer. Every service a tool handler can require must be constructible from here,
@@ -166,9 +178,44 @@ export const AppLayer = (config: ServerConfig) => {
           Layer.provide(Layer.merge(secrets, persistence)),
         )
 
+  // Workflows run arbitrary code, so they are off unless an operator turned them on and pointed at
+  // a supervisor. When off, the tools are not registered at all and the port explains why rather
+  // than failing obscurely at the first call.
+  const sandbox = config.workflows.enabled
+    ? SandboxSupervisorLayer.pipe(
+        Layer.provide(
+          SupervisorClient.layer({
+            socketPath: config.workflows.supervisorSocket,
+            serviceCredential: config.workflows.supervisorCredential,
+            timeoutMs: config.workflows.supervisorTimeoutMs,
+          }),
+        ),
+      )
+    : SandboxSupervisor.unavailable(
+        'Workflows are disabled. Set DISCORD_MCP_WORKFLOWS_ENABLED=true and configure DISCORD_MCP_SUPERVISOR_SOCKET to run them.',
+      )
+
   return Layer.mergeAll(
     rest,
     OperationCatalog.layer,
+    sandbox,
+    CapabilityBroker.layer,
+    CapabilitySockets.layer({ directory: config.workflows.capabilityDirectory }),
+    // The broker's acting end. It shares the REST client and catalog with the MCP tools, so a
+    // workflow's calls and an operator's sit in the same rate-limit view.
+    CapabilityServer.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          CapabilityBroker.layer,
+          OperationCatalog.layer,
+          PreviewTokens.layer,
+          rest,
+          authProfilesLayer.pipe(Layer.provide(oauth)),
+          persistence,
+        ),
+      ),
+    ),
+    WorkflowRepository.layer.pipe(Layer.provide(persistence)),
     PreviewTokens.layer,
     // A misspelled intent is a configuration error, not a runtime one: Discord would close the
     // connection with 4013 and the server would look broken. Dying here names the variable.

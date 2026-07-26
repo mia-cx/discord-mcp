@@ -102,6 +102,18 @@ export class PersistenceError extends Schema.TaggedErrorClass<PersistenceError>(
   },
 ) {}
 
+/**
+ * A sandbox build, start, or policy failure.
+ *
+ * `phase` is what an operator needs first: a build that failed to compile is a workflow author's
+ * problem, an engine failure is the operator's.
+ */
+export class SandboxError extends Schema.TaggedErrorClass<SandboxError>()('SandboxError', {
+  message: Schema.String,
+  phase: Schema.Literals(['engine', 'build', 'start', 'protocol', 'policy']),
+  diagnostics: Schema.optionalKey(Schema.Array(Schema.String)),
+}) {}
+
 /** Errors the tool boundary knows how to render into an actionable `CallToolResult`. */
 export type DomainError =
   | ConfigurationError
@@ -115,3 +127,4 @@ export type DomainError =
   | RateGuardTrippedError
   | PersistenceError
   | DiscordGatewayError
+  | SandboxError

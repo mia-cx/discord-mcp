@@ -1,0 +1,6 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "rootDir": "src", "outDir": "dist" },
+  "include": ["src/**/*", "../../types/globals.d.ts"],
+  "references": [{ "path": "../../packages/core" }, { "path": "../../packages/workflow-sdk" }]
+}

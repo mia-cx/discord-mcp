@@ -15,7 +15,10 @@
     "@discord-mcp/discord-blueprints": "workspace:*",
     "@discord-mcp/persistence": "workspace:*",
     "@discord-mcp/discord-gateway": "workspace:*",
-    "@discord-mcp/auth": "workspace:*"
+    "@discord-mcp/auth": "workspace:*",
+    "@discord-mcp/workflow-runtime": "workspace:*",
+    "@discord-mcp/sandbox-supervisor": "workspace:*",
+    "@discord-mcp/workflow-sdk": "workspace:*"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "2.0.0-beta.5"

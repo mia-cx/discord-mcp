@@ -265,5 +265,40 @@ const renderDomainError = (e: DomainError): ToolErrorPayload => {
         retryable: false,
         suggestion: 'Do not retry; this is a server configuration problem the user must fix.',
       }
+    case 'SandboxError':
+      return {
+        code: e._tag,
+        message: e.message,
+        retryable: false,
+        suggestion: sandboxSuggestion(e.phase, e.diagnostics),
+      }
+  }
+}
+
+/**
+ * What to do about a sandbox failure, by phase.
+ *
+ * A build failure is the workflow author's to fix and the diagnostics say how; an engine failure is
+ * the operator's and no retry will help. Conflating them would send a model into a retry loop
+ * against a supervisor that is not running.
+ */
+const sandboxSuggestion = (
+  phase: 'engine' | 'build' | 'start' | 'protocol' | 'policy',
+  diagnostics: ReadonlyArray<string> | undefined,
+): string => {
+  const detail =
+    diagnostics === undefined || diagnostics.length === 0
+      ? ''
+      : `\n${diagnostics.map((d) => `- ${d}`).join('\n')}`
+
+  switch (phase) {
+    case 'build':
+      return `The workflow did not build. Fix the source, save a new draft with workflow_update_draft, and validate that.${detail}`
+    case 'policy':
+      return `The request was refused before anything ran. Change the request to comply.${detail}`
+    case 'start':
+    case 'engine':
+    case 'protocol':
+      return `Do not retry; the sandbox supervisor is unavailable or misconfigured. Tell the user to check that it is running and that DISCORD_MCP_SUPERVISOR_SOCKET points at it.${detail}`
   }
 }

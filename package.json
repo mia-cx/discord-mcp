@@ -10,8 +10,8 @@
   "scripts": {
     "check": "biome check . && pnpm typecheck && pnpm test",
     "check:fix": "biome check --write .",
-    "typecheck": "tsc --build",
-    "build": "tsc --build",
+    "typecheck": "tsc --build && node scripts/copy-assets.mjs",
+    "build": "tsc --build && node scripts/copy-assets.mjs",
     "test": "vitest run",
     "test:integration": "vitest run --project integration",
     "test:e2e": "vitest run --project e2e",

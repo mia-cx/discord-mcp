@@ -83,6 +83,14 @@ export class WorkflowRepository extends Context.Service<
     ) => Effect.Effect<WorkflowGrant | undefined, PersistenceError>
     readonly enable: (workflowId: string, revision: number) => Effect.Effect<void, PersistenceError>
     readonly disable: (workflowId: string) => Effect.Effect<void, PersistenceError>
+    /**
+     * Soft delete. Revisions, grants, and executions stay, because an audit trail that vanishes
+     * with the thing it describes is not an audit trail.
+     */
+    readonly softDelete: (workflowId: string) => Effect.Effect<void, PersistenceError>
+    readonly execution: (
+      executionId: string,
+    ) => Effect.Effect<Record<string, unknown> | undefined, PersistenceError>
     readonly recordExecution: (input: {
       readonly workflowId: string
       readonly revision: number
@@ -322,6 +330,22 @@ export class WorkflowRepository extends Context.Service<
               'UPDATE workflows SET enabled_revision = NULL, updated_at = ? WHERE id = ?',
               [at, workflowId],
             ),
+          ),
+
+        softDelete: (workflowId) =>
+          Effect.flatMap(now, (at) =>
+            db.execute(
+              'UPDATE workflows SET deleted_at = ?, enabled_revision = NULL, updated_at = ? WHERE id = ?',
+              [at, at, workflowId],
+            ),
+          ),
+
+        execution: (executionId) =>
+          Effect.map(
+            db.query<Record<string, unknown>>('SELECT * FROM workflow_executions WHERE id = ?', [
+              executionId,
+            ]),
+            (rows) => rows[0],
           ),
 
         recordExecution: (input) =>

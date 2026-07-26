@@ -112,8 +112,23 @@ export const dispatch = (
     yield* validateBody(op, args.body, bodySchema)
 
     if (options.requirePreviewToken) {
-      const { principal } = yield* McpRequestContext
+      // Optional, because a workflow handler dispatches with no MCP request behind it. Requiring
+      // the service outright would put a per-request dependency in the signature of a call the
+      // capability broker also makes.
+      const request = yield* Effect.serviceOption(McpRequestContext)
       const tokens = yield* PreviewTokens
+
+      if (request._tag === 'None') {
+        return yield* Effect.fail(
+          new ValidationError({
+            message: `${op.operationId} is ${op.risk} and requires a preview, but this call has no principal to bind one to.`,
+            issues: [
+              'previewToken: a preview token is bound to the principal that requested it, so it can only be redeemed inside an MCP request.',
+            ],
+          }),
+        )
+      }
+      const { principal } = request.value
 
       if (args.previewToken === undefined) {
         return yield* Effect.fail(

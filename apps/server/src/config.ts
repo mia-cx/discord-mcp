@@ -70,6 +70,21 @@ export interface ServerConfig {
     readonly bufferSize: number
     readonly maxWaitMs: number
   }
+  readonly workflows: {
+    /**
+     * Off by default. Workflows execute arbitrary code, so enabling them is a decision an operator
+     * makes deliberately, not one they inherit from a default.
+     */
+    readonly enabled: boolean
+    readonly supervisorSocket: string
+    readonly supervisorCredential: string
+    readonly supervisorTimeoutMs: number
+    /**
+     * Where this process sees the shared capability volume. Workflow containers mount the same
+     * volume, each restricted to its own execution's subdirectory.
+     */
+    readonly capabilityDirectory: string
+  }
   readonly toolsets: ReadonlySet<Toolset>
   readonly rest: typeof restConfig extends Config.Config<infer A> ? A : never
 }
@@ -103,6 +118,20 @@ const raw = Config.all({
   ),
   gatewayBufferSize: Config.int('DISCORD_MCP_GATEWAY_BUFFER_SIZE').pipe(Config.withDefault(1000)),
   gatewayMaxWaitMs: Config.int('DISCORD_MCP_GATEWAY_MAX_WAIT_MS').pipe(Config.withDefault(120_000)),
+  workflowsEnabled: Config.boolean('DISCORD_MCP_WORKFLOWS_ENABLED').pipe(Config.withDefault(false)),
+  supervisorSocket: Config.string('DISCORD_MCP_SUPERVISOR_SOCKET').pipe(
+    Config.withDefault('/run/discord-mcp/supervisor.sock'),
+  ),
+  supervisorCredential: Config.string('DISCORD_MCP_SUPERVISOR_CREDENTIAL').pipe(
+    Config.withDefault(''),
+  ),
+  // Generous: a build resolves arbitrary npm, and a five-minute install is slow rather than broken.
+  supervisorTimeoutMs: Config.int('DISCORD_MCP_SUPERVISOR_TIMEOUT_MS').pipe(
+    Config.withDefault(360_000),
+  ),
+  capabilityDirectory: Config.string('DISCORD_MCP_CAPABILITY_DIR').pipe(
+    Config.withDefault('/run/discord-mcp/capability'),
+  ),
   toolsets,
   rest: restConfig,
 })
@@ -191,6 +220,16 @@ export const loadServerConfig: Effect.Effect<ServerConfig, ConfigurationError> =
           randomBytes(32)
         : yield* decodeMasterKey(Redacted.make(decoded.masterKey))
 
+    if (decoded.workflowsEnabled && decoded.supervisorCredential === '') {
+      return yield* Effect.fail(
+        new ConfigurationError({
+          variable: 'DISCORD_MCP_SUPERVISOR_CREDENTIAL',
+          message:
+            'Workflows are enabled but no supervisor credential is set. The credential is what stops any local process from driving the sandbox supervisor; it must match the supervisor’s own.',
+        }),
+      )
+    }
+
     const oauthConfigured = decoded.discordClientId !== '' && decoded.discordClientSecret !== ''
     if (decoded.discordClientSecret !== '' && decoded.discordClientId === '') {
       return yield* Effect.fail(
@@ -223,6 +262,13 @@ export const loadServerConfig: Effect.Effect<ServerConfig, ConfigurationError> =
               jwksUri: decoded.oidcJwksUri,
             }
           : undefined,
+      workflows: {
+        enabled: decoded.workflowsEnabled,
+        supervisorSocket: decoded.supervisorSocket,
+        supervisorCredential: decoded.supervisorCredential,
+        supervisorTimeoutMs: decoded.supervisorTimeoutMs,
+        capabilityDirectory: decoded.capabilityDirectory,
+      },
       gateway: {
         mode: decoded.gatewayMode as 'off' | 'lazy' | 'eager',
         intents: decoded.gatewayIntents

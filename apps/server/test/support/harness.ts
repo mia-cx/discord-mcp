@@ -14,6 +14,15 @@ export const testConfig: ServerConfig = {
   // `off` so the tool suite never opens a socket; gateway-gated tools stay unregistered, which is
   // exactly what a deployment with the Gateway disabled sees.
   gateway: { mode: 'off', intents: [], bufferSize: 10, maxWaitMs: 1000 },
+  // Enabled, so the workflow-gated tools are registered and the suite exercises them. No container
+  // is ever started: the tests provide a stub supervisor.
+  workflows: {
+    enabled: true,
+    supervisorSocket: '/nonexistent/supervisor.sock',
+    supervisorCredential: 'test-credential',
+    supervisorTimeoutMs: 1000,
+    capabilityDirectory: '/tmp/discord-mcp-test-capability',
+  },
   discordPublicKey: undefined,
   masterKey: Buffer.alloc(32),
   discordOAuth: undefined,
@@ -26,7 +35,9 @@ export const testConfig: ServerConfig = {
     trustProxyIdentity: false,
     trustedProxyCidrs: [],
   },
-  toolsets: new Set(['operator', 'automation', 'api']),
+  // `admin` included, unlike the shipped default, so the suite covers the tools an operator has to
+  // opt into rather than leaving them untested.
+  toolsets: new Set(['operator', 'automation', 'admin', 'api']),
   rest: {
     token: Redacted.make('test-token'),
     timeoutMs: 1000,
@@ -71,13 +82,19 @@ export const stubRest = (
  */
 export const testPersistence = () => PersistenceLayer(':memory:')
 
-export const withClient = async <A>(
+export const withClient = async <A, R = never>(
   layer: Layer.Layer<DiscordRest>,
   tools: ReadonlyArray<AnyToolDef>,
   use: (client: Client) => Promise<A>,
+  /** Services beyond REST and persistence, for tool suites that need them. */
+  extra?: Layer.Layer<R>,
 ): Promise<A> => {
+  const base = Layer.mergeAll(
+    Layer.provide(layer, RateGuard.layer()),
+    Layer.orDie(testPersistence()),
+  )
   const runtime = ManagedRuntime.make(
-    Layer.mergeAll(Layer.provide(layer, RateGuard.layer()), Layer.orDie(testPersistence())),
+    extra === undefined ? base : Layer.merge(base, Layer.provide(extra, base)),
   )
   const server = buildMcpServer({ config: testConfig, runtime, authorize: stdioAuthorize, tools })
   const handler = createMcpHandler(() => server, { onerror: () => {} })
