@@ -243,6 +243,14 @@ const renderDomainError = (e: DomainError): ToolErrorPayload => {
         retryable: false,
         suggestion: e.suggestion,
       }
+    case 'PersistenceError':
+      return {
+        code: e._tag,
+        message: `Local storage failed during ${e.operation}.`,
+        retryable: false,
+        suggestion:
+          "Do not retry; this is a problem with the server's database, not with your arguments. Tell the user to check DATABASE_PATH, disk space, and file permissions.",
+      }
     case 'ConfigurationError':
       return {
         code: e._tag,

@@ -86,6 +86,14 @@ export class RateGuardTrippedError extends Schema.TaggedErrorClass<RateGuardTrip
   },
 ) {}
 
+export class PersistenceError extends Schema.TaggedErrorClass<PersistenceError>()(
+  'PersistenceError',
+  {
+    operation: Schema.String,
+    message: Schema.String,
+  },
+) {}
+
 /** Errors the tool boundary knows how to render into an actionable `CallToolResult`. */
 export type DomainError =
   | ConfigurationError
@@ -97,3 +105,4 @@ export type DomainError =
   | DiscordRateLimitError
   | OperationNotFoundError
   | RateGuardTrippedError
+  | PersistenceError
