@@ -1,2 +1,5 @@
+export * from './apply.ts'
 export * from './plan.ts'
 export * from './schema.ts'
+export * from './snapshot.ts'
+export * from './tools.ts'

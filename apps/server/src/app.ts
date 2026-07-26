@@ -17,6 +17,8 @@ import {
   permissionsExplain,
   RateGuard,
 } from '@discord-mcp/discord-api'
+import { blueprintTools } from '@discord-mcp/discord-blueprints'
+import { PersistenceLayer } from '@discord-mcp/persistence'
 import { Effect, Layer } from 'effect'
 import type { ServerConfig } from './config.ts'
 
@@ -25,6 +27,7 @@ export const allTools: ReadonlyArray<AnyToolDef> = [
   guildGet,
   permissionsExplain,
   ...messageTools,
+  ...blueprintTools,
   ...apiTools,
 ]
 
@@ -77,4 +80,14 @@ export const AppLayer = (config: ServerConfig) =>
     DiscordRest.layer(config.rest).pipe(Layer.provide(RateGuard.layer())),
     OperationCatalog.layer,
     PreviewTokens.layer,
+    // A migration failure is fatal and an operator problem, so it becomes a defect with a readable
+    // message rather than riding in the runtime's error channel, where every tool call would then
+    // have to account for an error that can only happen once, at startup.
+    Layer.orDie(
+      Layer.tapError(PersistenceLayer(config.databasePath), (cause) =>
+        Effect.logError(
+          `The database at ${config.databasePath} could not be opened or migrated during ${cause.operation}: ${cause.message} Check DATABASE_PATH, disk space, and file permissions.`,
+        ),
+      ),
+    ),
   )

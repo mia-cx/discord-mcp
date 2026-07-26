@@ -32,6 +32,12 @@ importers:
       '@discord-mcp/discord-api':
         specifier: workspace:*
         version: link:../../packages/discord-api
+      '@discord-mcp/discord-blueprints':
+        specifier: workspace:*
+        version: link:../../packages/discord-blueprints
+      '@discord-mcp/persistence':
+        specifier: workspace:*
+        version: link:../../packages/persistence
       '@effect/platform-node':
         specifier: 4.0.0-beta.101
         version: 4.0.0-beta.101(effect@4.0.0-beta.101)(ioredis@5.11.1)
@@ -90,6 +96,9 @@ importers:
       '@discord-mcp/discord-api':
         specifier: workspace:*
         version: link:../discord-api
+      '@discord-mcp/persistence':
+        specifier: workspace:*
+        version: link:../persistence
       effect:
         specifier: 4.0.0-beta.101
         version: 4.0.0-beta.101

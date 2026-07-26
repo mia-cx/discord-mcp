@@ -11,6 +11,12 @@
     },
     {
       "path": "../../packages/discord-api"
+    },
+    {
+      "path": "../../packages/discord-blueprints"
+    },
+    {
+      "path": "../../packages/persistence"
     }
   ]
 }

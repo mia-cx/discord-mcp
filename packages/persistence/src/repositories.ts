@@ -251,6 +251,11 @@ export class RevisionRepository extends Context.Service<
       table: 'message_templates' | 'server_blueprints',
       id: string,
     ) => Effect.Effect<number, PersistenceError>
+    /** The mutable working copy, which is what publishing freezes. */
+    readonly getDraft: (
+      table: 'message_templates' | 'server_blueprints',
+      id: string,
+    ) => Effect.Effect<unknown | undefined, PersistenceError>
   }
 >()('persistence/RevisionRepository') {
   static readonly layer = Layer.effect(RevisionRepository)(
@@ -334,6 +339,20 @@ export class RevisionRepository extends Context.Service<
               [id],
             ),
             (rows) => rows[0]?.latest_revision ?? 0,
+          ),
+
+        getDraft: (table, id) =>
+          Effect.map(
+            db.query<{ draft_json: string | null }>(
+              `SELECT draft_json FROM ${table} WHERE id = ?`,
+              [id],
+            ),
+            (rows) => {
+              const draft = rows[0]?.draft_json
+              return draft === undefined || draft === null
+                ? undefined
+                : (JSON.parse(draft) as unknown)
+            },
           ),
       }
     }),

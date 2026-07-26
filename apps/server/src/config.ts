@@ -38,12 +38,14 @@ const toConfigurationError = (cause: Config.ConfigError): ConfigurationError => 
 
 export interface ServerConfig {
   readonly transport: 'stdio' | 'http'
+  readonly databasePath: string
   readonly toolsets: ReadonlySet<Toolset>
   readonly rest: typeof restConfig extends Config.Config<infer A> ? A : never
 }
 
 const raw = Config.all({
   transport: Config.string('MCP_TRANSPORT').pipe(Config.withDefault('stdio')),
+  databasePath: Config.string('DATABASE_PATH').pipe(Config.withDefault('./discord-mcp.sqlite')),
   toolsets,
   rest: restConfig,
 })
@@ -79,6 +81,7 @@ export const loadServerConfig: Effect.Effect<ServerConfig, ConfigurationError> =
 
     return {
       transport: decoded.transport,
+      databasePath: decoded.databasePath,
       toolsets: new Set(decoded.toolsets as ReadonlyArray<Toolset>),
       rest: decoded.rest,
     }
