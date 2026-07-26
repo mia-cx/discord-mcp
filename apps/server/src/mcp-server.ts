@@ -1,7 +1,13 @@
-import { type AnyToolDef, type Authorize, registerTools } from '@discord-mcp/core'
+import {
+  type AnyResourceDef,
+  type AnyToolDef,
+  type Authorize,
+  registerResources,
+  registerTools,
+} from '@discord-mcp/core'
 import { McpServer } from '@modelcontextprotocol/server'
 import type { ManagedRuntime } from 'effect'
-import { allTools, selectionFor } from './app.ts'
+import { allResources, allTools, selectionFor } from './app.ts'
 import type { ServerConfig } from './config.ts'
 
 export const SERVER_NAME = 'discord-mcp'
@@ -27,6 +33,7 @@ export interface BuildOptions<R> {
   readonly runtime: ManagedRuntime.ManagedRuntime<R, never>
   readonly authorize: Authorize
   readonly tools?: ReadonlyArray<AnyToolDef>
+  readonly resources?: ReadonlyArray<AnyResourceDef>
 }
 
 /**
@@ -49,6 +56,14 @@ export const buildMcpServer = <R>(options: BuildOptions<R>): McpServer => {
     authorize: options.authorize,
     runtime: options.runtime,
     authProfile: 'bot',
+  })
+
+  // Registered after tools and before any transport accepts a connection, for the same reason: a
+  // broken definition should fail startup rather than break `resources/list` for a live client.
+  registerResources({
+    server,
+    resources: options.resources ?? allResources,
+    runtime: options.runtime,
   })
 
   return server

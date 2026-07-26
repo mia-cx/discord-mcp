@@ -1,5 +1,6 @@
 import { DiscordOAuth, oauthTools, PrincipalStore, SecretStore } from '@discord-mcp/auth'
 import {
+  type AnyResourceDef,
   type AnyToolDef,
   type AuthenticationError,
   type Authorize,
@@ -15,6 +16,7 @@ import {
 import {
   AuthProfiles,
   apiTools,
+  catalogResources,
   DiscordRest,
   guildGet,
   messageTools,
@@ -40,6 +42,7 @@ import {
   WorkflowQueues,
   WorkflowRepository,
   WorkflowRoutes,
+  workflowResources,
   workflowTools,
 } from '@discord-mcp/workflow-runtime'
 import { Effect, Layer } from 'effect'
@@ -59,6 +62,17 @@ export const allTools: ReadonlyArray<AnyToolDef> = [
   ...workflowTools,
   ...diagnosticsTools,
   ...apiTools,
+]
+
+/**
+ * Read-only detail, addressed by URI.
+ *
+ * Registered unconditionally: a resource costs nothing until something reads it, and gating them
+ * the way tools are gated would mean a link in a tool result could dangle.
+ */
+export const allResources: ReadonlyArray<AnyResourceDef> = [
+  ...catalogResources,
+  ...workflowResources,
 ]
 
 /**

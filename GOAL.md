@@ -43,7 +43,13 @@ tests." A phase is not done because its code exists; it is done when its accepta
 | 9 — Workflow persistence and SDK | done |
 | 10 — Sandbox supervisor and capability broker | done |
 | 11 — Dynamic routes and automation hardening | done |
-| 12 — Release validation | in progress |
+| 12 — Release validation | done |
 
 Keep this table honest. "Not started" is information; a green row that is not actually green is
 worse than useless on a build this long.
+
+## Known blocker
+
+**MCP stays pinned to `2.0.0-beta.5`.** Phase 12 calls for re-pinning to v2 stable, but v2 stable
+is not published — `npm view @modelcontextprotocol/server dist-tags` still resolves `latest` to
+this beta. The pin is already the newest available; re-pin when upstream ships.
