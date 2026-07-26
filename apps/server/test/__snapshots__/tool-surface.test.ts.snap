@@ -2,6 +2,7 @@
 
 exports[`the tool surface > advertises a stable set of tools 1`] = `
 [
+  "audit_tail",
   "discord_api_admin",
   "discord_api_describe",
   "discord_api_destructive",
@@ -48,6 +49,7 @@ exports[`the tool surface > advertises a stable set of tools 1`] = `
   "discord_server_blueprint_publish",
   "discord_server_blueprint_update_draft",
   "discord_server_snapshot",
+  "metrics_snapshot",
   "workflow_create",
   "workflow_delete",
   "workflow_disable",
@@ -59,6 +61,7 @@ exports[`the tool surface > advertises a stable set of tools 1`] = `
   "workflow_invoke",
   "workflow_list",
   "workflow_publish",
+  "workflow_queue_depth",
   "workflow_rollback",
   "workflow_update_draft",
   "workflow_validate",
@@ -67,6 +70,35 @@ exports[`the tool surface > advertises a stable set of tools 1`] = `
 
 exports[`the tool surface > advertises stable input schemas 1`] = `
 [
+  {
+    "annotations": {
+      "openWorldHint": false,
+      "readOnlyHint": true,
+    },
+    "description": "Recent audited actions: authentication and token administration, OAuth profile changes,
+destructive previews and calls, bot-administration changes, every workflow lifecycle
+transition, blueprint plan and apply, template publication, and sandbox policy violations.
+
+Each entry records the principal, the subject, and the outcome. Retained for 90 days.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "description": "Defaults to 50.",
+          "maximum": 200,
+          "minimum": 1,
+          "type": "integer",
+        },
+        "since": {
+          "description": "Epoch milliseconds. Entries recorded at or after this time.",
+          "type": "integer",
+        },
+      },
+      "type": "object",
+    },
+    "name": "audit_tail",
+    "title": "Read the audit log",
+  },
   {
     "annotations": {
       "destructiveHint": true,
@@ -22262,6 +22294,31 @@ Read-only.",
     },
     "name": "discord_server_snapshot",
     "title": "Read a guild’s current structure",
+  },
+  {
+    "annotations": {
+      "openWorldHint": false,
+      "readOnlyHint": true,
+    },
+    "description": "Counters and timings since the server started: Discord requests and failures, rate-limit
+waits, RateGuard trips, Gateway events and reconnects, interaction deadlines, workflow queue
+and execution outcomes, sandbox builds, and route authentication failures.
+
+Read this before guessing. A workflow that looks stuck is usually either not being triggered
+at all or failing every execution, and those two look identical from the outside.",
+    "inputSchema": {
+      "anyOf": [
+        {
+          "type": "object",
+        },
+        {
+          "type": "array",
+        },
+      ],
+      "type": "object",
+    },
+    "name": "metrics_snapshot",
+    "title": "Read operational counters",
   },
 ]
 `;

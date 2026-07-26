@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { countIfAvailable } from '@discord-mcp/core'
 import { WORKFLOW_LIMITS } from '@discord-mcp/workflow-sdk'
 import { Context, Effect, Layer, Ref } from 'effect'
 
@@ -89,6 +90,7 @@ export class WorkflowQueues extends Context.Service<
               // reorder a causal chain, and a workflow that cannot keep up should be told so at
               // the point of arrival.
               yield* update(request.workflowId, (q) => ({ ...q, dropped: q.dropped + 1 }))
+              yield* countIfAvailable('workflow.queue_overflow')
               return {
                 accepted: false as const,
                 reason: `This workflow has ${queue.pending.length} events queued, its limit. It is not keeping up; raise runtime.concurrency, make the handler faster, or narrow the events it subscribes to.`,
@@ -111,6 +113,7 @@ export class WorkflowQueues extends Context.Service<
             }
 
             yield* update(request.workflowId, (q) => ({ ...q, pending: [...q.pending, event] }))
+            yield* countIfAvailable('workflow.queued')
             return { accepted: true as const, event }
           }),
 

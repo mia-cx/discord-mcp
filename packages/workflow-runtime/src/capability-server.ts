@@ -1,3 +1,4 @@
+import { countIfAvailable } from '@discord-mcp/core'
 import {
   type AuthProfiles,
   type DiscordRest,
@@ -189,7 +190,10 @@ export class CapabilityServer extends Context.Service<
               ...(call.kind === 'discord' ? yield* discordFacts(catalog, call) : {}),
             })
 
-            if (!decision.allowed) return denied(request.id, decision.reason)
+            if (!decision.allowed) {
+              yield* countIfAvailable('workflow.capability.denied')
+              return denied(request.id, decision.reason)
+            }
 
             switch (call.kind) {
               case 'discord':

@@ -6,6 +6,7 @@ import { NodeRuntime } from '@effect/platform-node'
 import { serveStdio } from '@modelcontextprotocol/server/stdio'
 import { Cause, Effect, Layer, Logger, ManagedRuntime } from 'effect'
 import { AppLayer, httpAuthorize, stdioAuthorize } from './app.ts'
+import { startAutomation } from './automation.ts'
 import { loadServerConfig } from './config.ts'
 import { startHttpServer } from './http-server.ts'
 import { buildMcpServer } from './mcp-server.ts'
@@ -27,6 +28,12 @@ const main = Effect.gen(function* () {
   // One ManagedRuntime for the process. `Runtime<R>` was removed in v4, so this is the single
   // Effect<->Promise boundary every MCP handler crosses.
   const runtime = ManagedRuntime.make(AppLayer(config))
+
+  // Started before anything serves, so a workflow enabled before the last restart is running by
+  // the time the first request arrives rather than after the first tick.
+  if (config.workflows.enabled) {
+    yield* Effect.promise(() => runtime.runPromise(startAutomation))
+  }
 
   if (config.transport === 'http') {
     const handle = yield* Effect.acquireRelease(

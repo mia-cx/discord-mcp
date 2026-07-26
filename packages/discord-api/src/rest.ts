@@ -1,4 +1,4 @@
-import { type RateGuardTrippedError, requestSignal } from '@discord-mcp/core'
+import { countIfAvailable, type RateGuardTrippedError, requestSignal } from '@discord-mcp/core'
 import { REST, type RequestData, type RouteLike } from '@discordjs/rest'
 import { Config, Context, Effect, Layer, Redacted } from 'effect'
 import { type MappedDiscordError, mapDiscordError } from './errors.ts'
@@ -145,6 +145,8 @@ export class DiscordRest extends Context.Service<
               Effect.catch((cause) =>
                 Effect.gen(function* () {
                   const { status, body, retryAfterMs, global } = readError(cause)
+                  yield* countIfAvailable('discord.request.failed')
+                  if (retryAfterMs !== undefined) yield* countIfAvailable('discord.rate_limit_wait')
                   // 400s are free against Cloudflare's budget; only 401/403/429 are counted.
                   if (isCountedRejection(status)) yield* guard.recordRejection(scope)
                   return yield* Effect.fail(
@@ -157,6 +159,7 @@ export class DiscordRest extends Context.Service<
               ),
             )
 
+            yield* countIfAvailable('discord.request')
             return result
           })
 

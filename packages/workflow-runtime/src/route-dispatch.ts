@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { SecretStore } from '@discord-mcp/auth'
+import { countIfAvailable } from '@discord-mcp/core'
 import { Context, Effect, Layer, Redacted } from 'effect'
 import { CapabilityBroker } from './broker.ts'
 import type { CapabilityServer } from './capability-server.ts'
@@ -100,8 +101,13 @@ export class WorkflowRoutes extends Context.Service<
             })
             if (!policy.allowed) return problem(policy.status, policy.reason)
 
+            yield* countIfAvailable('route.request')
+
             const authenticated = yield* authenticate(request, route, secrets, registry)
-            if (!authenticated.allowed) return problem(authenticated.status, authenticated.reason)
+            if (!authenticated.allowed) {
+              yield* countIfAvailable('route.auth_failed')
+              return problem(authenticated.status, authenticated.reason)
+            }
 
             const outcome = yield* runHandler({
               broker,

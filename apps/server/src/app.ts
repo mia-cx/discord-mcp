@@ -5,6 +5,7 @@ import {
   type Authorize,
   authorizeWithPrincipal,
   type McpRequest,
+  Metrics,
   type Principal,
   type RegistrySelection,
   type Scope,
@@ -26,14 +27,17 @@ import {
 } from '@discord-mcp/discord-api'
 import { blueprintTools } from '@discord-mcp/discord-blueprints'
 import { DiscordGateway, gatewayTools } from '@discord-mcp/discord-gateway'
-import { PersistenceLayer } from '@discord-mcp/persistence'
+import { AuditRepository, PersistenceLayer } from '@discord-mcp/persistence'
 import { SupervisorClient } from '@discord-mcp/sandbox-supervisor'
 import {
   CapabilityBroker,
   CapabilityServer,
   CapabilitySockets,
+  diagnosticsTools,
   RouteRegistry,
   SandboxSupervisor,
+  WorkflowDispatcher,
+  WorkflowQueues,
   WorkflowRepository,
   WorkflowRoutes,
   workflowTools,
@@ -53,6 +57,7 @@ export const allTools: ReadonlyArray<AnyToolDef> = [
   ...templateTools,
   ...oauthTools,
   ...workflowTools,
+  ...diagnosticsTools,
   ...apiTools,
 ]
 
@@ -209,6 +214,8 @@ export const AppLayer = (config: ServerConfig) => {
     CapabilitySockets.layer({ directory: config.workflows.capabilityDirectory }),
     WorkflowRepository.layer,
     RouteRegistry.layer,
+    WorkflowQueues.layer,
+    AuditRepository.layer,
     sandbox,
     // Shares the REST client and catalog with the MCP tools, so a workflow's calls and an
     // operator's sit in one rate-limit view rather than two that each think they have the budget.
@@ -228,8 +235,10 @@ export const AppLayer = (config: ServerConfig) => {
 
   return Layer.mergeAll(
     rest,
+    Metrics.layer,
     OperationCatalog.layer,
     WorkflowRoutes.layer.pipe(Layer.provide(workflows)),
+    WorkflowDispatcher.layer.pipe(Layer.provide(workflows)),
     workflows,
     PreviewTokens.layer,
     // A misspelled intent is a configuration error, not a runtime one: Discord would close the

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { defineTool, McpRequestContext, ValidationError } from '@discord-mcp/core'
+import { countIfAvailable, defineTool, McpRequestContext, ValidationError } from '@discord-mcp/core'
+import { AuditRepository } from '@discord-mcp/persistence'
 import {
   type CompiledManifest,
   DEFAULT_GRANT,
@@ -31,6 +32,37 @@ type Deps =
   | CapabilitySockets
   | CapabilityServer
   | RouteRegistry
+  | AuditRepository
+
+/**
+ * Record a lifecycle transition.
+ *
+ * Every step from draft to deletion is audited, because the interesting question after an incident
+ * is not what a workflow did but who let it. Auditing is best-effort: a failed write must not undo
+ * a transition that already happened, which would leave the log and the database disagreeing about
+ * a thing that did occur.
+ */
+const audit = (entry: {
+  readonly action: string
+  readonly slug: string
+  readonly outcome: 'allowed' | 'denied' | 'failed'
+  readonly detail?: unknown
+}) =>
+  Effect.gen(function* () {
+    const repository = yield* AuditRepository
+    const request = yield* Effect.serviceOption(McpRequestContext)
+
+    yield* Effect.ignore(
+      repository.record({
+        action: entry.action,
+        subjectKind: 'workflow',
+        subjectId: entry.slug,
+        outcome: entry.outcome,
+        ...(request._tag === 'Some' ? { principalId: request.value.principal.id } : {}),
+        ...(entry.detail === undefined ? {} : { detail: entry.detail }),
+      }),
+    )
+  })
 
 const Slug = Schema.String.pipe(
   Schema.check(Schema.isPattern(/^[a-z0-9][a-z0-9-]{0,63}$/)),
@@ -115,7 +147,7 @@ const CreateInput = Schema.Struct({
   name: Schema.String.pipe(Schema.check(Schema.isMinLength(1), Schema.isMaxLength(100))),
 })
 
-export const workflowCreate = defineTool<typeof CreateInput.Type, unknown, WorkflowRepository>({
+export const workflowCreate = defineTool<typeof CreateInput.Type, unknown, Deps>({
   name: 'workflow_create',
   title: 'Create a workflow',
   description:
@@ -130,7 +162,13 @@ export const workflowCreate = defineTool<typeof CreateInput.Type, unknown, Workf
     Effect.gen(function* () {
       const repo = yield* WorkflowRepository
       const { principal } = yield* McpRequestContext
-      return yield* repo.create({ slug: args.slug, name: args.name, createdBy: principal.id })
+      const created = yield* repo.create({
+        slug: args.slug,
+        name: args.name,
+        createdBy: principal.id,
+      })
+      yield* audit({ action: 'workflow.create', slug: args.slug, outcome: 'allowed' })
+      return created
     }),
 })
 
@@ -152,7 +190,7 @@ const DraftInput = Schema.Struct({
   }),
 })
 
-export const workflowUpdateDraft = defineTool<typeof DraftInput.Type, unknown, WorkflowRepository>({
+export const workflowUpdateDraft = defineTool<typeof DraftInput.Type, unknown, Deps>({
   name: 'workflow_update_draft',
   title: 'Save a workflow draft',
   description: [
@@ -172,13 +210,20 @@ export const workflowUpdateDraft = defineTool<typeof DraftInput.Type, unknown, W
       const { principal } = yield* McpRequestContext
       const workflow = yield* requireWorkflow(args.slug)
 
-      return yield* repo.saveDraft({
+      const draft = yield* repo.saveDraft({
         workflowId: workflow.id,
         source: args.source,
         dependencies: (args.dependencies ?? {}) as Record<string, string>,
         requestedGrants: (args.requestedGrants ?? DEFAULT_GRANT) as WorkflowGrant,
         createdBy: principal.id,
       })
+      yield* audit({
+        action: 'workflow.update_draft',
+        slug: args.slug,
+        outcome: 'allowed',
+        detail: { revision: draft.revision, sourceDigest: draft.sourceDigest },
+      })
+      return draft
     }),
 })
 
@@ -231,6 +276,13 @@ export const workflowValidate = defineTool<typeof RevisionInput.Type, unknown, D
           revision: args.revision,
           diagnostics,
         })
+        yield* audit({
+          action: 'workflow.validate',
+          slug: args.slug,
+          outcome: 'failed',
+          detail: { revision: args.revision, phase: outcome.failure.phase },
+        })
+        yield* countIfAvailable('sandbox.build.failed')
         return { status: 'failed', diagnostics }
       }
 
@@ -240,6 +292,13 @@ export const workflowValidate = defineTool<typeof RevisionInput.Type, unknown, D
         artifactDigest: outcome.success.artifactDigest,
         manifest: outcome.success.manifest,
       })
+      yield* audit({
+        action: 'workflow.validate',
+        slug: args.slug,
+        outcome: 'allowed',
+        detail: { revision: args.revision, artifactDigest: outcome.success.artifactDigest },
+      })
+      yield* countIfAvailable('sandbox.build.succeeded')
 
       return {
         status: 'validated',
@@ -249,7 +308,7 @@ export const workflowValidate = defineTool<typeof RevisionInput.Type, unknown, D
     }),
 })
 
-export const workflowPublish = defineTool<typeof RevisionInput.Type, unknown, WorkflowRepository>({
+export const workflowPublish = defineTool<typeof RevisionInput.Type, unknown, Deps>({
   name: 'workflow_publish',
   title: 'Publish a validated revision',
   description: [
@@ -293,6 +352,12 @@ export const workflowPublish = defineTool<typeof RevisionInput.Type, unknown, Wo
       }
 
       yield* repo.publish(workflow.id, args.revision)
+      yield* audit({
+        action: 'workflow.publish',
+        slug: args.slug,
+        outcome: 'allowed',
+        detail: { revision: args.revision, artifactDigest: revision.artifactDigest },
+      })
       return { slug: args.slug, revision: args.revision, status: 'published' }
     }),
 })
@@ -308,7 +373,7 @@ const GrantInput = Schema.Struct({
   }),
 })
 
-export const workflowGrant = defineTool<typeof GrantInput.Type, unknown, WorkflowRepository>({
+export const workflowGrant = defineTool<typeof GrantInput.Type, unknown, Deps>({
   name: 'workflow_grant',
   title: 'Grant capabilities to a revision',
   description: [
@@ -349,6 +414,14 @@ export const workflowGrant = defineTool<typeof GrantInput.Type, unknown, Workflo
         revision: args.revision,
         grant,
         grantedBy: principal.id,
+      })
+      // The full grant, not a summary: after an incident the question is exactly what this
+      // revision was permitted to do, and a summary is the part that always omits the answer.
+      yield* audit({
+        action: 'workflow.grant',
+        slug: args.slug,
+        outcome: 'allowed',
+        detail: { revision: args.revision, grant },
       })
 
       return { slug: args.slug, revision: args.revision, grant }
@@ -481,6 +554,16 @@ export const workflowEnable = defineTool<typeof RevisionInput.Type, unknown, Dep
       yield* repo.enable(workflow.id, args.revision)
       yield* broker.setEnabled(workflow.id, args.revision, true)
 
+      yield* audit({
+        action: 'workflow.enable',
+        slug: args.slug,
+        outcome: 'allowed',
+        detail: {
+          revision: args.revision,
+          routes: routes.map((route) => `${route.method} ${route.path}`),
+        },
+      })
+
       return {
         slug: args.slug,
         revision: args.revision,
@@ -521,6 +604,12 @@ export const workflowDisable = defineTool<typeof SlugInput.Type, unknown, Deps>(
       // with a 503 at best and someone else's handler at worst.
       yield* registry.unregister(workflow.id)
       yield* repo.disable(workflow.id)
+      yield* audit({
+        action: 'workflow.disable',
+        slug: args.slug,
+        outcome: 'allowed',
+        detail: { revision: workflow.enabledRevision },
+      })
 
       return { slug: args.slug, status: 'disabled' }
     }),
@@ -561,6 +650,17 @@ export const workflowRollback = defineTool<typeof RevisionInput.Type, unknown, D
       yield* repo.enable(workflow.id, args.revision)
       yield* broker.setEnabled(workflow.id, args.revision, true)
 
+      yield* audit({
+        action: 'workflow.rollback',
+        slug: args.slug,
+        outcome: 'allowed',
+        detail: {
+          from: workflow.enabledRevision,
+          to: args.revision,
+          artifactDigest: target.artifactDigest,
+        },
+      })
+
       return { slug: args.slug, revision: args.revision, artifactDigest: target.artifactDigest }
     }),
 })
@@ -600,6 +700,8 @@ export const workflowDelete = defineTool<typeof SlugInput.Type, unknown, Deps>({
       // Best effort: a leftover artifact volume wastes disk but cannot run, and a cleanup failure
       // must not leave the workflow half-deleted.
       yield* Effect.ignore(supervisor.destroy({ workflowId: workflow.id, revision: 0 }))
+
+      yield* audit({ action: 'workflow.delete', slug: args.slug, outcome: 'allowed' })
 
       return { slug: args.slug, status: 'deleted' }
     }),
@@ -712,6 +814,13 @@ export const workflowInvoke = defineTool<typeof InvokeInput.Type, unknown, Deps>
       // would miss everything the SDK's Log service recorded.
       const logs = `${socket.logs()}${outcome.success.logs}`
       yield* repo.finishExecution({ executionId, status, logs })
+      yield* countIfAvailable(
+        status === 'succeeded'
+          ? 'workflow.execution.succeeded'
+          : status === 'timeout'
+            ? 'workflow.execution.timeout'
+            : 'workflow.execution.failed',
+      )
       return { executionId, status, logs }
     }),
 })

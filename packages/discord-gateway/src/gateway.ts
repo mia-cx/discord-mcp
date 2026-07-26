@@ -1,4 +1,4 @@
-import { DiscordGatewayError } from '@discord-mcp/core'
+import { countIfAvailable, DiscordGatewayError } from '@discord-mcp/core'
 import { DiscordRest } from '@discord-mcp/discord-api'
 import type { REST } from '@discordjs/rest'
 import { WebSocketManager, WebSocketShardEvents } from '@discordjs/ws'
@@ -191,6 +191,7 @@ export class DiscordGateway extends Context.Service<
 
             yield* Ref.update(ring, (events) => [...events, event].slice(-config.bufferSize))
             yield* PubSub.publish(hub, event)
+            yield* countIfAvailable('gateway.event')
             return event
           })
 
@@ -238,7 +239,9 @@ export class DiscordGateway extends Context.Service<
             void Effect.runPromise(Ref.set(botUserId, id)).catch(() => undefined)
           })
           ws.onClosed((code) => {
-            void Effect.runPromise(Ref.set(lastClose, code)).catch(() => undefined)
+            void Effect.runPromise(
+              Effect.andThen(Ref.set(lastClose, code), countIfAvailable('gateway.reconnect')),
+            ).catch(() => undefined)
           })
 
           yield* Effect.tryPromise({
