@@ -14,9 +14,13 @@ green. The server runs over stdio and exposes one real Discord tool end to end.
 | Phase | State |
 |---|---|
 | 0 — Spike both beta foundations | done · [ADR 0001](./docs/architecture/0001-beta-foundations.md) |
-| 1 — Tracer bullet: one real Discord tool | done · `discord_guild_get` |
-| 2 — Errors, rate safety, complete REST catalog | errors and `RateGuard` done; catalog not started |
-| 3–13 | not started |
+| 1 — Tracer bullet: one real Discord tool | done |
+| 2 — Errors, rate safety, complete REST catalog | done · 242 operations, 7 dispatchers |
+| 3 — Presentations and Components V2 | done · encoder, validator, message tools |
+| 4 — Templates and declarative server setup | partial · permissions and blueprint planning done; templates, snapshot, and the apply journal are not |
+| 5–12 | not started |
+
+See [GOAL.md](./GOAL.md) for the definition of done and the full remaining scope.
 
 ## Quick start
 
@@ -51,6 +55,14 @@ pnpm check:fix    # biome --write
 | `DISCORD_MCP_REST_RETRIES` | `2` | |
 | `DISCORD_MCP_REST_MAX_RATELIMIT_WAIT_MS` | `10000` | Longer waits fail fast rather than block a tool call. |
 
+## Catalog
+
+```bash
+pnpm spec:generate   # regenerate the operation catalog from the vendored spec
+pnpm spec:check      # CI gates: coverage, classification, path-item merge, determinism
+pnpm spec:drift      # report upstream changes; never writes to vendor/
+```
+
 Configuration is decoded at startup. A bad value exits non-zero with the offending variable named.
 
 ## Layout
@@ -58,7 +70,11 @@ Configuration is decoded at startup. A bad value exits non-zero with the offendi
 ```
 apps/server/            stdio transport, config, entrypoint, application layer
 packages/core/          ids, typed errors, MCP bridge, tool definition, registry, result rendering
-packages/discord-api/   DiscordRest over @discordjs/rest, error mapping, RateGuard, curated tools
+packages/discord-api/   DiscordRest, error mapping, RateGuard, operation catalog, dispatchers,
+                        permissions, curated tools
+packages/discord-presentations/  Components V2 schemas, encoder, validator, modals, ASCII preview
+packages/discord-blueprints/     blueprint schema and planner
+vendor/discord/         pinned OpenAPI spec, provenance, project overrides
 docs/architecture/      ADRs, starting with the phase-0 beta verification
 types/globals.d.ts      shims for two DOM types Effect references and @types/node omits
 spike/                  the phase-0 gate, kept runnable as a regression check on the beta cohort
