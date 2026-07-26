@@ -1,5 +1,7 @@
+import { PrincipalStore } from '@discord-mcp/auth'
 import {
   type AnyToolDef,
+  type AuthenticationError,
   type Authorize,
   authorizeWithPrincipal,
   type McpRequest,
@@ -72,6 +74,16 @@ export const stdioAuthorize: Authorize = authorizeWithPrincipal((_request: McpRe
   Effect.succeed(stdioLocalPrincipal),
 )
 
+/**
+ * Authorization over HTTP, where the principal came from a credential rather than from the fact
+ * that someone could run the process.
+ *
+ * Identical scope checking either way: the transport decides *who*, never *what they may do*.
+ */
+export const httpAuthorize = (
+  resolve: () => Effect.Effect<Principal, AuthenticationError>,
+): Authorize => authorizeWithPrincipal(() => Effect.orDie(resolve()))
+
 export const selectionFor = (config: ServerConfig): RegistrySelection => ({
   toolsets: config.toolsets,
   // A gated tool is registered only when its subsystem exists. Hiding a tool the server cannot
@@ -88,6 +100,17 @@ export const selectionFor = (config: ServerConfig): RegistrySelection => ({
 export const AppLayer = (config: ServerConfig) => {
   const rest = DiscordRest.layer(config.rest).pipe(Layer.provide(RateGuard.layer()))
 
+  // A migration failure is fatal and an operator problem, so it becomes a defect with a readable
+  // message rather than riding in the runtime's error channel, where every tool call would then
+  // have to account for an error that can only happen once, at startup.
+  const persistence = Layer.orDie(
+    Layer.tapError(PersistenceLayer(config.databasePath), (cause) =>
+      Effect.logError(
+        `The database at ${config.databasePath} could not be opened or migrated during ${cause.operation}: ${cause.message} Check DATABASE_PATH, disk space, and file permissions.`,
+      ),
+    ),
+  )
+
   return Layer.mergeAll(
     rest,
     OperationCatalog.layer,
@@ -101,15 +124,9 @@ export const AppLayer = (config: ServerConfig) => {
         ),
       ),
     ).pipe(Layer.provide(rest)),
-    // A migration failure is fatal and an operator problem, so it becomes a defect with a readable
-    // message rather than riding in the runtime's error channel, where every tool call would then
-    // have to account for an error that can only happen once, at startup.
-    Layer.orDie(
-      Layer.tapError(PersistenceLayer(config.databasePath), (cause) =>
-        Effect.logError(
-          `The database at ${config.databasePath} could not be opened or migrated during ${cause.operation}: ${cause.message} Check DATABASE_PATH, disk space, and file permissions.`,
-        ),
-      ),
-    ),
+    // Needed by the HTTP transport to turn a credential into a principal. Free to construct, so it
+    // is always present rather than conditional on the transport.
+    PrincipalStore.layer.pipe(Layer.provide(persistence)),
+    persistence,
   )
 }

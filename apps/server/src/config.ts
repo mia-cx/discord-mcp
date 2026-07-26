@@ -48,6 +48,9 @@ export interface ServerConfig {
     readonly trustProxyIdentity: boolean
     readonly trustedProxyCidrs: ReadonlyArray<string>
   }
+  readonly oidc:
+    | { readonly issuer: string; readonly audience: string; readonly jwksUri: string }
+    | undefined
   readonly gateway: {
     readonly mode: 'off' | 'lazy' | 'eager'
     readonly intents: ReadonlyArray<string>
@@ -70,6 +73,9 @@ const raw = Config.all({
   allowedHosts: Config.string('ALLOWED_HOSTS').pipe(Config.withDefault('')),
   trustProxyIdentity: Config.boolean('TRUST_PROXY_IDENTITY').pipe(Config.withDefault(false)),
   trustedProxyCidrs: Config.string('TRUSTED_PROXY_CIDRS').pipe(Config.withDefault('')),
+  oidcIssuer: Config.string('OIDC_ISSUER').pipe(Config.withDefault('')),
+  oidcAudience: Config.string('OIDC_AUDIENCE').pipe(Config.withDefault('')),
+  oidcJwksUri: Config.string('OIDC_JWKS_URI').pipe(Config.withDefault('')),
   gatewayMode: Config.string('DISCORD_MCP_GATEWAY_MODE').pipe(Config.withDefault('lazy')),
   // Privileged intents are absent by default; Discord refuses the connection outright for one
   // that is not enabled in the Developer Portal.
@@ -145,10 +151,32 @@ export const loadServerConfig: Effect.Effect<ServerConfig, ConfigurationError> =
       trustedProxyCidrs: http.trustedProxyCidrs,
     })
 
+    // All three or none: a partial OIDC configuration would verify tokens against defaults
+    // nobody chose, which is worse than not verifying at all.
+    const oidcParts = [decoded.oidcIssuer, decoded.oidcAudience, decoded.oidcJwksUri]
+    const oidcSet = oidcParts.filter((v) => v !== '').length
+    if (oidcSet > 0 && oidcSet < 3) {
+      return yield* Effect.fail(
+        new ConfigurationError({
+          variable: 'OIDC_ISSUER / OIDC_AUDIENCE / OIDC_JWKS_URI',
+          message:
+            'Set all three or none. A partial OIDC configuration would validate tokens against values nobody chose.',
+        }),
+      )
+    }
+
     return {
       transport: decoded.transport,
       databasePath: decoded.databasePath,
       http,
+      oidc:
+        oidcSet === 3
+          ? {
+              issuer: decoded.oidcIssuer,
+              audience: decoded.oidcAudience,
+              jwksUri: decoded.oidcJwksUri,
+            }
+          : undefined,
       gateway: {
         mode: decoded.gatewayMode as 'off' | 'lazy' | 'eager',
         intents: decoded.gatewayIntents

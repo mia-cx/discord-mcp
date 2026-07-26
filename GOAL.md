@@ -31,8 +31,8 @@ tests." A phase is not done because its code exists; it is done when its accepta
 | 3 — Presentations and Components V2 | done |
 | 4 — Templates and declarative server setup | done |
 | 5 — Remaining operator surface and Gateway | done |
-| 6 — Persistence and control-plane authentication | partial — SQLite, migrations, repositories done; auth not started |
-| 7 — Discord OAuth2 profiles | not started |
+| 6 — Persistence and control-plane authentication | done |
+| 7 — Discord OAuth2 profiles | in progress |
 | 8 — Interactions and component routing | not started |
 | 9 — Workflow persistence and SDK | not started |
 | 10 — Sandbox supervisor and capability broker | not started |

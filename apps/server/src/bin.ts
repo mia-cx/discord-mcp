@@ -2,8 +2,9 @@
 import { NodeRuntime } from '@effect/platform-node'
 import { serveStdio } from '@modelcontextprotocol/server/stdio'
 import { Cause, Effect, Layer, Logger, ManagedRuntime } from 'effect'
-import { AppLayer, stdioAuthorize } from './app.ts'
+import { AppLayer, httpAuthorize, stdioAuthorize } from './app.ts'
 import { loadServerConfig } from './config.ts'
+import { startHttpServer } from './http-server.ts'
 import { buildMcpServer } from './mcp-server.ts'
 
 /**
@@ -20,18 +21,44 @@ const main = Effect.gen(function* () {
     Effect.die(new Error(`Configuration error in ${e.variable}: ${e.message}`)),
   )
 
-  if (config.transport !== 'stdio') {
-    // The authenticated Streamable HTTP transport lands in phase 6 together with the principal
-    // resolution it exists to enforce. Shipping the port without the auth would be worse than
-    // not shipping it.
-    return yield* Effect.die(
-      new Error('MCP_TRANSPORT=http is not implemented yet; use stdio (the default).'),
-    )
-  }
-
   // One ManagedRuntime for the process. `Runtime<R>` was removed in v4, so this is the single
   // Effect<->Promise boundary every MCP handler crosses.
   const runtime = ManagedRuntime.make(AppLayer(config))
+
+  if (config.transport === 'http') {
+    const handle = yield* Effect.acquireRelease(
+      startHttpServer({
+        config: {
+          host: config.http.host,
+          port: config.http.port,
+          allowedHosts: config.http.allowedHosts,
+          publicBaseUrl: config.http.publicBaseUrl,
+          proxy: {
+            trustProxyIdentity: config.http.trustProxyIdentity,
+            trustedProxyCidrs: config.http.trustedProxyCidrs,
+            allowedHosts: config.http.allowedHosts,
+            identityHeader: 'X-Forwarded-User',
+            groupsHeader: 'X-Forwarded-Groups',
+          },
+          oidc: config.oidc,
+        },
+        // Rebuilt per connection here rather than once, because each carries a different
+        // principal. Registration still happens before the listener accepts anything.
+        buildServer: (resolve) =>
+          buildMcpServer({ config, runtime, authorize: httpAuthorize(resolve) }),
+        runtime,
+      }),
+      (h) =>
+        Effect.promise(async () => {
+          await h.close()
+          await runtime.dispose()
+        }),
+    )
+
+    yield* Effect.log(`discord-mcp listening on http://${config.http.host}:${handle.port}/mcp`)
+    yield* Effect.never
+    return
+  }
 
   yield* Effect.acquireRelease(
     Effect.sync(() =>

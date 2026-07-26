@@ -20,6 +20,9 @@
     },
     {
       "path": "../../packages/discord-gateway"
+    },
+    {
+      "path": "../../packages/auth"
     }
   ]
 }

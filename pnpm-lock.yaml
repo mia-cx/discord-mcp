@@ -44,6 +44,9 @@ importers:
 
   apps/server:
     dependencies:
+      '@discord-mcp/auth':
+        specifier: workspace:*
+        version: link:../../packages/auth
       '@discord-mcp/core':
         specifier: workspace:*
         version: link:../../packages/core
