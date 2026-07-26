@@ -28,8 +28,8 @@ tests." A phase is not done because its code exists; it is done when its accepta
 | 0 — Spike both beta foundations | done |
 | 1 — Tracer bullet: one real Discord tool | done |
 | 2 — Errors, rate safety, complete REST catalog | done |
-| 3 — Presentations and Components V2 | in progress |
-| 4 — Templates and declarative server setup | not started |
+| 3 — Presentations and Components V2 | done |
+| 4 — Templates and declarative server setup | in progress |
 | 5 — Remaining operator surface and Gateway | not started |
 | 6 — Persistence and control-plane authentication | not started |
 | 7 — Discord OAuth2 profiles | not started |

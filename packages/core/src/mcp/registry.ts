@@ -144,7 +144,14 @@ const callTool = async <R>(
   const program = options.authorize(request, tool).pipe(
     Effect.flatMap((principal) =>
       Effect.gen(function* () {
-        const decoded = yield* Schema.decodeUnknownEffect(tool.input, { errors: 'all' })(args)
+        // `onExcessProperty: 'error'` matches the `additionalProperties: false` we advertise.
+        // Effect decodes leniently by default and MCP's own `~standard.validate` is lenient too,
+        // so without this an unrecognised argument would be silently dropped — and a dropped
+        // argument is how a model gets a confidently wrong result instead of a fixable error.
+        const decoded = yield* Schema.decodeUnknownEffect(tool.input, {
+          errors: 'all',
+          onExcessProperty: 'error',
+        })(args)
         const out = yield* tool.handler(decoded)
         return tool.output === undefined ? out : yield* Schema.encodeEffect(tool.output)(out)
       }).pipe(

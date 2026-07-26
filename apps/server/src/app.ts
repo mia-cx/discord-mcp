@@ -11,6 +11,7 @@ import {
   apiTools,
   DiscordRest,
   guildGet,
+  messageTools,
   OperationCatalog,
   PreviewTokens,
   RateGuard,
@@ -19,7 +20,7 @@ import { Effect, Layer } from 'effect'
 import type { ServerConfig } from './config.ts'
 
 /** Every tool the process knows how to register, before toolset and gate selection. */
-export const allTools: ReadonlyArray<AnyToolDef> = [guildGet, ...apiTools]
+export const allTools: ReadonlyArray<AnyToolDef> = [guildGet, ...messageTools, ...apiTools]
 
 /**
  * Stdio has no transport-level authentication: the client is a process the user started, on their

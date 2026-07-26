@@ -63,6 +63,9 @@ importers:
       '@discord-mcp/core':
         specifier: workspace:*
         version: link:../core
+      '@discord-mcp/discord-presentations':
+        specifier: workspace:*
+        version: link:../discord-presentations
       '@discordjs/rest':
         specifier: 2.6.3
         version: 2.6.3
@@ -72,6 +75,18 @@ importers:
       ajv-formats:
         specifier: 3.0.1
         version: 3.0.1(ajv@8.17.1)
+      discord-api-types:
+        specifier: 0.38.51
+        version: 0.38.51
+      effect:
+        specifier: 4.0.0-beta.101
+        version: 4.0.0-beta.101
+
+  packages/discord-presentations:
+    dependencies:
+      '@discord-mcp/core':
+        specifier: workspace:*
+        version: link:../core
       discord-api-types:
         specifier: 0.38.51
         version: 0.38.51

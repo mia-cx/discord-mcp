@@ -1,8 +1,17 @@
 {
   "files": [],
   "references": [
-    { "path": "./packages/core" },
-    { "path": "./packages/discord-api" },
-    { "path": "./apps/server" }
+    {
+      "path": "./packages/core"
+    },
+    {
+      "path": "./packages/discord-api"
+    },
+    {
+      "path": "./packages/discord-presentations"
+    },
+    {
+      "path": "./apps/server"
+    }
   ]
 }
