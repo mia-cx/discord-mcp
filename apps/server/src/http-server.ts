@@ -186,6 +186,14 @@ const protectedResourceMetadata = (config: HttpConfig) => ({
 
 interface HandlerDeps<R> {
   readonly config: HttpConfig
+  /** Handles a signed Discord interaction. Absent when DISCORD_PUBLIC_KEY is unset. */
+  readonly handleInteraction:
+    | ((input: {
+        signature: string | null
+        timestamp: string | null
+        rawBody: Uint8Array
+      }) => Effect.Effect<{ status: number; body: unknown }, unknown, R>)
+    | undefined
   /** Completes a Discord OAuth2 flow. Absent when no client credentials are configured. */
   readonly completeOAuth:
     | ((state: string, code: string) => Effect.Effect<{ readonly name: string }, unknown, R>)
@@ -232,6 +240,64 @@ const toRequest = (req: IncomingMessage, url: URL, body: Buffer): Request =>
     ...(body.length > 0 ? { body: new Uint8Array(body) } : {}),
   })
 
+/**
+ * Discord posts here. Authentication is the Ed25519 signature, checked over the raw bytes before
+ * anything decodes them — see `routeInteraction`.
+ */
+const handleInteractionRoute = async <R>(
+  req: IncomingMessage,
+  deps: HandlerDeps<R>,
+): Promise<Response> => {
+  if (deps.handleInteraction === undefined) {
+    return json(503, {
+      error: 'interactions_not_configured',
+      error_description:
+        'DISCORD_PUBLIC_KEY is not set, so interaction signatures cannot be verified.',
+    })
+  }
+
+  const raw = await readBody(req)
+  const result = await deps.runtime.runPromiseExit(
+    deps.handleInteraction({
+      signature: (req.headers['x-signature-ed25519'] as string | undefined) ?? null,
+      timestamp: (req.headers['x-signature-timestamp'] as string | undefined) ?? null,
+      rawBody: new Uint8Array(raw),
+    }) as Effect.Effect<{ status: number; body: unknown }, unknown, R>,
+  )
+
+  return result._tag === 'Success'
+    ? json(result.value.status, result.value.body)
+    : json(500, { error: 'internal_error' })
+}
+
+/**
+ * Discord redirects a browser here after the user approves a profile.
+ *
+ * Authentication is the state parameter and PKCE, not a bearer token: the user's browser holds no
+ * credential for this server and never should.
+ */
+const handleOAuthCallbackRoute = async <R>(url: URL, deps: HandlerDeps<R>): Promise<Response> => {
+  const state = url.searchParams.get('state')
+  const code = url.searchParams.get('code')
+
+  if (deps.completeOAuth === undefined) {
+    return html(400, 'Discord OAuth2 is not configured on this server.')
+  }
+  if (state === null || code === null) {
+    return html(400, 'Discord did not return a state and code. Start the flow again.')
+  }
+
+  const completed = await deps.runtime.runPromiseExit(
+    deps.completeOAuth(state, code) as Effect.Effect<{ name: string }, unknown, R>,
+  )
+
+  return completed._tag === 'Success'
+    ? html(200, `Profile "${completed.value.name}" is authorized. You can close this window.`)
+    : // No detail: this page is reachable by anyone with a guessed state, and the failure reasons
+      // distinguish unknown from expired, which is not something to publish.
+      html(400, 'Authorization failed or expired. Start the flow again from your agent.')
+}
+
 const makeRequestHandler =
   <R>(deps: HandlerDeps<R | PrincipalStore>) =>
   async (req: IncomingMessage): Promise<Response> => {
@@ -240,28 +306,10 @@ const makeRequestHandler =
     const open = unauthenticatedRoute(url.pathname, deps.config)
     if (open !== undefined) return open
 
-    // Discord redirects a browser here. Authentication is the state parameter and PKCE, not a
-    // bearer token: the user's browser has no credential for this server and never should.
-    if (url.pathname === '/oauth/discord/callback') {
-      const state = url.searchParams.get('state')
-      const code = url.searchParams.get('code')
-
-      if (deps.completeOAuth === undefined) {
-        return html(400, 'Discord OAuth2 is not configured on this server.')
-      }
-      if (state === null || code === null) {
-        return html(400, 'Discord did not return a state and code. Start the flow again.')
-      }
-
-      const completed = await deps.runtime.runPromiseExit(
-        deps.completeOAuth(state, code) as Effect.Effect<{ name: string }, unknown, R>,
-      )
-      return completed._tag === 'Success'
-        ? html(200, `Profile "${completed.value.name}" is authorized. You can close this window.`)
-        : // No detail: this page is reachable by anyone with a guessed state, and the failure
-          // reasons distinguish unknown from expired, which is not something to publish.
-          html(400, 'Authorization failed or expired. Start the flow again from your agent.')
-    }
+    // Both of these carry their own proof — a signature and a state parameter — so neither needs
+    // an MCP credential, and requiring one would make them impossible to call.
+    if (url.pathname === '/discord/interactions') return handleInteractionRoute(req, deps)
+    if (url.pathname === '/oauth/discord/callback') return handleOAuthCallbackRoute(url, deps)
 
     if (!hostAllowed(req.headers.host ?? null, deps.config.allowedHosts)) {
       return json(421, {
@@ -303,6 +351,13 @@ export const startHttpServer = <R>(options: {
         code: string,
       ) => Effect.Effect<{ readonly name: string }, unknown, R | PrincipalStore>)
     | undefined
+  readonly handleInteraction?:
+    | ((input: {
+        signature: string | null
+        timestamp: string | null
+        rawBody: Uint8Array
+      }) => Effect.Effect<{ status: number; body: unknown }, unknown, R | PrincipalStore>)
+    | undefined
 }): Effect.Effect<HttpServerHandle> =>
   Effect.promise(
     () =>
@@ -331,6 +386,7 @@ export const startHttpServer = <R>(options: {
         const handle = makeRequestHandler({
           config,
           completeOAuth: options.completeOAuth,
+          handleInteraction: options.handleInteraction,
           verify,
           metadataUrl:
             config.publicBaseUrl === undefined

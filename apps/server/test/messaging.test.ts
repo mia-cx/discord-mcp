@@ -159,10 +159,10 @@ describe('discord_message_send', () => {
     )
   })
 
-  it('refuses an interactive component until bindings exist, and says why', async () => {
+  it('mints an opaque handle for an interactive component', async () => {
     const recorded: Array<StubbedRequest> = []
     await withClient(
-      stubRest(() => Effect.succeed({}), recorded),
+      stubRest(() => Effect.succeed({ id: '999999999999999999' }), recorded),
       messageTools,
       async (client) => {
         const result = await client.callTool({
@@ -188,10 +188,12 @@ describe('discord_message_send', () => {
           },
         })
 
-        expect(result.isError).toBe(true)
-        // A dead button is worse than a refusal, so the refusal names the alternative.
-        expect(text(result)).toContain('link buttons')
-        expect(recorded).toEqual([])
+        // The handle is minted and persisted before the send; the interactions router resolves
+        // it through the binding table rather than trusting the custom_id Discord returns.
+        expect(result.isError).toBe(false)
+        expect(recorded).toEqual([
+          { method: 'POST', route: '/channels/123456789012345678/messages' },
+        ])
       },
     )
   })

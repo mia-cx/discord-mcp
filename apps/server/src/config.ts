@@ -50,6 +50,8 @@ export interface ServerConfig {
     readonly trustProxyIdentity: boolean
     readonly trustedProxyCidrs: ReadonlyArray<string>
   }
+  /** Application public key, hex. Without it, interaction signatures cannot be verified. */
+  readonly discordPublicKey: string | undefined
   /** 32 bytes. Encrypts stored OAuth2 tokens and route secrets. */
   readonly masterKey: Buffer
   readonly discordOAuth:
@@ -87,6 +89,7 @@ const raw = Config.all({
   // Optional so a stdio-only deployment that stores no secrets needs no key; a random one is
   // generated instead, and nothing durable is encrypted under it.
   masterKey: Config.string('DISCORD_MCP_MASTER_KEY').pipe(Config.withDefault('')),
+  discordPublicKey: Config.string('DISCORD_PUBLIC_KEY').pipe(Config.withDefault('')),
   discordClientId: Config.string('DISCORD_APPLICATION_ID').pipe(Config.withDefault('')),
   discordClientSecret: Config.string('DISCORD_CLIENT_SECRET').pipe(Config.withDefault('')),
   oidcIssuer: Config.string('OIDC_ISSUER').pipe(Config.withDefault('')),
@@ -203,6 +206,7 @@ export const loadServerConfig: Effect.Effect<ServerConfig, ConfigurationError> =
       transport: decoded.transport,
       databasePath: decoded.databasePath,
       masterKey,
+      discordPublicKey: decoded.discordPublicKey === '' ? undefined : decoded.discordPublicKey,
       discordOAuth: oauthConfigured
         ? {
             clientId: decoded.discordClientId,

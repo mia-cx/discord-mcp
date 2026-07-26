@@ -9,30 +9,68 @@ import {
   validateComponentsV2,
   validateModal,
 } from '@discord-mcp/discord-presentations'
+import { ComponentBindingRepository } from '@discord-mcp/persistence'
 import { Effect, Schema } from 'effect'
 import { DiscordRest } from '../rest.ts'
 
 /**
- * Interactive components need a persisted binding before they can be sent.
+ * Mint an opaque handle for each interactive component before sending.
  *
- * Until phase 8 stands up the component-binding store, sending a presentation with an interactive
- * component would produce a `custom_id` nothing could route, so those sends are refused with a
- * message that says so rather than silently producing a dead button.
+ * The handle carries no meaning. Discord round-trips `custom_id` through the client, so anything
+ * encoded in one comes back as untrusted input; the interactions router resolves it through the
+ * binding table instead.
  */
-const UNBOUND_COMPONENT_MESSAGE =
-  'Interactive components need a persisted binding, which arrives with the interactions endpoint. Until then, use link buttons (which never fire an interaction) or send a presentation with no interactive components. discord_message_validate works on interactive layouts already.'
-
-const requireNoUnboundBindings = (
+const bindComponents = (
   bindings: ReadonlyArray<{ path: string; action: unknown }>,
-): Effect.Effect<void, ValidationError> =>
-  bindings.length === 0
-    ? Effect.void
-    : Effect.fail(
-        new ValidationError({
-          message: 'This message contains interactive components that cannot be bound yet.',
-          issues: bindings.map((b) => `${b.path}: ${UNBOUND_COMPONENT_MESSAGE}`),
-        }),
-      )
+  ownerId: string,
+) =>
+  Effect.gen(function* () {
+    if (bindings.length === 0) return new Map<string, string>()
+
+    const repo = yield* ComponentBindingRepository
+    const handles = new Map<string, string>()
+
+    for (const binding of bindings) {
+      const action = binding.action as { type?: string; key?: string }
+      if (action?.key === undefined) continue
+
+      const handle = yield* repo.create({
+        kind: action.type === 'workflow' ? 'workflow' : 'inbox',
+        actionKey: action.key,
+        ownerKind: 'message',
+        ownerId,
+      })
+      handles.set(binding.path, handle)
+    }
+    return handles
+  })
+
+/**
+ * Encode twice: once to discover the bindings, then again with the real handles.
+ *
+ * Cheaper than threading a mutable handle table through the encoder, and it keeps the encoder a
+ * pure function of its input — which is what makes `discord_message_validate` able to run the
+ * exact same path without minting anything.
+ */
+const encodeWithHandles = (
+  presentation: Exclude<MessagePresentation, { type: 'template' }>,
+  ownerId: string,
+  options: { upgradingFromLegacy?: boolean } = {},
+) =>
+  Effect.gen(function* () {
+    const discovery = yield* encodePresentation(presentation, {
+      resolveCustomId: (_action, path) => `pending:${path}`,
+    })
+
+    const handles = yield* bindComponents(discovery.bindings, ownerId)
+
+    return yield* encodePresentation(presentation, {
+      resolveCustomId: (_action, path) => handles.get(path) ?? `pending:${path}`,
+      ...(options.upgradingFromLegacy === undefined
+        ? {}
+        : { upgradingFromLegacy: options.upgradingFromLegacy }),
+    })
+  })
 
 // ------------------------------------------------------------------ validate
 
@@ -140,7 +178,11 @@ const SendInput = Schema.Struct({
   replyToMessageId: Schema.optionalKey(Snowflake),
 })
 
-export const messageSend = defineTool<typeof SendInput.Type, unknown, DiscordRest>({
+export const messageSend = defineTool<
+  typeof SendInput.Type,
+  unknown,
+  DiscordRest | ComponentBindingRepository
+>({
   name: 'discord_message_send',
   title: 'Send a message',
   description: [
@@ -168,10 +210,9 @@ export const messageSend = defineTool<typeof SendInput.Type, unknown, DiscordRes
         )
       }
 
-      const encoded = yield* encodePresentation(args.presentation, {
-        resolveCustomId: (_action, path) => `unbound:${path}`,
-      })
-      yield* requireNoUnboundBindings(encoded.bindings)
+      // Handles are minted against the channel until the message id exists; the interactions
+      // router only needs the handle to resolve, not the owner to be a message.
+      const encoded = yield* encodeWithHandles(args.presentation, args.channelId)
 
       const rest = yield* DiscordRest
       const body: Record<string, unknown> = { ...encoded.payload }
@@ -204,7 +245,11 @@ const EditInput = Schema.Struct({
   ),
 })
 
-export const messageEdit = defineTool<typeof EditInput.Type, unknown, DiscordRest>({
+export const messageEdit = defineTool<
+  typeof EditInput.Type,
+  unknown,
+  DiscordRest | ComponentBindingRepository
+>({
   name: 'discord_message_edit',
   title: 'Edit a message',
   description: [
@@ -230,13 +275,11 @@ export const messageEdit = defineTool<typeof EditInput.Type, unknown, DiscordRes
         )
       }
 
-      const encoded = yield* encodePresentation(args.presentation, {
-        resolveCustomId: (_action, path) => `unbound:${path}`,
+      const encoded = yield* encodeWithHandles(args.presentation, args.messageId, {
         ...(args.upgradingFromLegacy === undefined
           ? {}
           : { upgradingFromLegacy: args.upgradingFromLegacy }),
       })
-      yield* requireNoUnboundBindings(encoded.bindings)
 
       const rest = yield* DiscordRest
       const data = yield* rest.request({

@@ -1,5 +1,6 @@
 import type { AnyToolDef } from '@discord-mcp/core'
 import { DiscordRest, RateGuard } from '@discord-mcp/discord-api'
+import { PersistenceLayer } from '@discord-mcp/persistence'
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client'
 import { createMcpHandler } from '@modelcontextprotocol/server'
 import { type Effect, Layer, ManagedRuntime, Redacted } from 'effect'
@@ -13,6 +14,7 @@ export const testConfig: ServerConfig = {
   // `off` so the tool suite never opens a socket; gateway-gated tools stay unregistered, which is
   // exactly what a deployment with the Gateway disabled sees.
   gateway: { mode: 'off', intents: [], bufferSize: 10, maxWaitMs: 1000 },
+  discordPublicKey: undefined,
   masterKey: Buffer.alloc(32),
   discordOAuth: undefined,
   oidc: undefined,
@@ -63,12 +65,20 @@ export const stubRest = (
  * transport. `handler.fetch` takes a `Request`, while the client's `FetchLike` is `(url, init)`,
  * so the adapter below is required.
  */
+/**
+ * An in-memory database, so tools that mint component handles work without a temporary file.
+ * SQLite's `:memory:` is per-connection, which is exactly one runtime here.
+ */
+export const testPersistence = () => PersistenceLayer(':memory:')
+
 export const withClient = async <A>(
   layer: Layer.Layer<DiscordRest>,
   tools: ReadonlyArray<AnyToolDef>,
   use: (client: Client) => Promise<A>,
 ): Promise<A> => {
-  const runtime = ManagedRuntime.make(Layer.provide(layer, RateGuard.layer()))
+  const runtime = ManagedRuntime.make(
+    Layer.mergeAll(Layer.provide(layer, RateGuard.layer()), Layer.orDie(testPersistence())),
+  )
   const server = buildMcpServer({ config: testConfig, runtime, authorize: stdioAuthorize, tools })
   const handler = createMcpHandler(() => server, { onerror: () => {} })
 

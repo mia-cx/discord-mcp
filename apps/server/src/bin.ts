@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { DiscordOAuth } from '@discord-mcp/auth'
+import { routeInteraction } from '@discord-mcp/discord-api'
 import { NodeRuntime } from '@effect/platform-node'
 import { serveStdio } from '@modelcontextprotocol/server/stdio'
 import { Cause, Effect, Layer, Logger, ManagedRuntime } from 'effect'
@@ -50,6 +51,19 @@ const main = Effect.gen(function* () {
         runtime,
         completeOAuth: (state, code) =>
           Effect.flatMap(DiscordOAuth, (oauth) => oauth.callback({ state, code })),
+        ...(config.discordPublicKey === undefined
+          ? {}
+          : {
+              handleInteraction: (inbound) =>
+                Effect.map(
+                  routeInteraction({
+                    ...inbound,
+                    publicKey: config.discordPublicKey as string,
+                    now: Date.now(),
+                  }),
+                  (r) => ({ status: r.response.status, body: r.response.body }),
+                ),
+            }),
       }),
       (h) =>
         Effect.promise(async () => {
