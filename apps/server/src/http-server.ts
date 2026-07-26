@@ -7,6 +7,7 @@ import {
   type OidcConfig,
   PrincipalStore,
   type ProxyTrustConfig,
+  trustedClientAddress,
   verifyAccessToken,
 } from '@discord-mcp/auth'
 import { AuthenticationError, type Principal } from '@discord-mcp/core'
@@ -202,6 +203,12 @@ interface HandlerDeps<R> {
     | ((token: string) => Effect.Effect<{ scopes: ReadonlyArray<string> }, AuthenticationError>)
     | undefined
   readonly metadataUrl: string | undefined
+  /** Serves `/workflows/*`. Absent when workflows are disabled. */
+  readonly handleWorkflowRoute:
+    | ((
+        request: WorkflowRouteRequest,
+      ) => Effect.Effect<WorkflowRouteResponse | undefined, never, R>)
+    | undefined
   readonly mcp: McpHandler
   readonly runtime: ManagedRuntime.ManagedRuntime<R | PrincipalStore, never>
   readonly setIdentity: (identity: ResolvedIdentity) => void
@@ -239,6 +246,79 @@ const toRequest = (req: IncomingMessage, url: URL, body: Buffer): Request =>
     // Node's Request accepts a Uint8Array body; @types/node omits BodyInit globally.
     ...(body.length > 0 ? { body: new Uint8Array(body) } : {}),
   })
+
+export interface WorkflowRouteRequest {
+  readonly method: string
+  readonly path: string
+  readonly host: string | undefined
+  readonly origin: string | undefined
+  readonly sourceIp: string | undefined
+  readonly headers: Readonly<Record<string, string>>
+  readonly contentLength: number | undefined
+  readonly rawBody: string
+  readonly trustedSourceIp: string | undefined
+  readonly now: number
+}
+
+export interface WorkflowRouteResponse {
+  readonly status: number
+  readonly headers: Readonly<Record<string, string>>
+  readonly body: string
+}
+
+/**
+ * A public workflow route.
+ *
+ * The body is read here because the dispatcher needs the exact bytes for HMAC verification. The
+ * size limit is applied by the dispatcher from `Content-Length` before this point in the flow, so an
+ * oversized request never reaches the read below.
+ */
+const handleWorkflowRoute = async <R>(
+  req: IncomingMessage,
+  url: URL,
+  deps: HandlerDeps<R>,
+): Promise<Response> => {
+  if (deps.handleWorkflowRoute === undefined) return json(404, { error: 'not_found' })
+
+  const headers = Object.fromEntries(
+    Object.entries(req.headers).flatMap(([key, value]) =>
+      value === undefined
+        ? []
+        : [[key.toLowerCase(), Array.isArray(value) ? value.join(', ') : value] as const],
+    ),
+  )
+
+  const declared = Number(headers['content-length'])
+  const clientAddress = trustedClientAddress({
+    socketAddress: req.socket.remoteAddress ?? '',
+    forwardedFor: headers['x-forwarded-for'],
+    config: deps.config.proxy,
+  })
+
+  const request: WorkflowRouteRequest = {
+    method: req.method ?? 'GET',
+    path: url.pathname,
+    host: headers.host,
+    origin: headers.origin,
+    sourceIp: req.socket.remoteAddress,
+    headers,
+    contentLength: Number.isFinite(declared) ? declared : undefined,
+    rawBody: '',
+    trustedSourceIp: clientAddress,
+    now: Date.now(),
+  }
+
+  const preflight = await deps.runtime.runPromiseExit(
+    deps.handleWorkflowRoute(request) as Effect.Effect<WorkflowRouteResponse | undefined, never, R>,
+  )
+
+  if (preflight._tag === 'Failure') return json(500, { error: 'internal_error' })
+  if (preflight.value === undefined) return json(404, { error: 'not_found' })
+  return new Response(preflight.value.body, {
+    status: preflight.value.status,
+    headers: { ...preflight.value.headers },
+  })
+}
 
 /**
  * Discord posts here. Authentication is the Ed25519 signature, checked over the raw bytes before
@@ -311,6 +391,11 @@ const makeRequestHandler =
     if (url.pathname === '/discord/interactions') return handleInteractionRoute(req, deps)
     if (url.pathname === '/oauth/discord/callback') return handleOAuthCallbackRoute(url, deps)
 
+    // Checked before the ALLOWED_HOSTS gate below, because a workflow route has its own host
+    // policy: the control plane's list is about who may reach `/mcp`, not who may reach a public
+    // webhook someone deliberately exposed.
+    if (url.pathname.startsWith('/workflows/')) return handleWorkflowRoute(req, url, deps)
+
     if (!hostAllowed(req.headers.host ?? null, deps.config.allowedHosts)) {
       return json(421, {
         error: 'misdirected_request',
@@ -358,6 +443,11 @@ export const startHttpServer = <R>(options: {
         rawBody: Uint8Array
       }) => Effect.Effect<{ status: number; body: unknown }, unknown, R | PrincipalStore>)
     | undefined
+  readonly handleWorkflowRoute?:
+    | ((
+        request: WorkflowRouteRequest,
+      ) => Effect.Effect<WorkflowRouteResponse | undefined, never, R | PrincipalStore>)
+    | undefined
 }): Effect.Effect<HttpServerHandle> =>
   Effect.promise(
     () =>
@@ -387,6 +477,7 @@ export const startHttpServer = <R>(options: {
           config,
           completeOAuth: options.completeOAuth,
           handleInteraction: options.handleInteraction,
+          handleWorkflowRoute: options.handleWorkflowRoute,
           verify,
           metadataUrl:
             config.publicBaseUrl === undefined

@@ -22,6 +22,8 @@ export interface ExecutionSocket {
   /** The socket path inside the container, which is fixed and the same for every execution. */
   readonly containerPath: string
   readonly logs: () => string
+  /** What the handler returned, or undefined if it never reported a result. */
+  readonly result: () => unknown
   readonly close: () => Effect.Effect<void>
 }
 
@@ -55,7 +57,13 @@ export class CapabilitySockets extends Context.Service<
               if (logs.length < MAX_LOG_BYTES) logs += `${line}\n`
             })
 
-          const scope: ExecutionScope = { credential, appendLog }
+          let result: unknown
+          const recordResult = (value: unknown) =>
+            Effect.sync(() => {
+              result = value
+            })
+
+          const scope: ExecutionScope = { credential, appendLog, recordResult }
 
           yield* Effect.promise(async () => {
             await mkdir(directory, { recursive: true, mode: 0o700 })
@@ -102,6 +110,7 @@ export class CapabilitySockets extends Context.Service<
           return {
             containerPath: socketPath,
             logs: () => logs,
+            result: () => result,
             close: () =>
               Effect.promise(
                 () =>

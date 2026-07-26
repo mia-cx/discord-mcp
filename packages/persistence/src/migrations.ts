@@ -337,6 +337,19 @@ export const MIGRATIONS: ReadonlyArray<Migration> = [
       )`,
     ],
   },
+  {
+    id: 5,
+    name: 'route_dispatch_columns',
+    statements: [
+      // Resolving a request needs the slug to build the mounted path and the trigger index to know
+      // which handler to run; without them a lookup would have to join back to the manifest.
+      `ALTER TABLE workflow_routes ADD COLUMN workflow_slug TEXT NOT NULL DEFAULT ''`,
+      `ALTER TABLE workflow_routes ADD COLUMN trigger_index INTEGER NOT NULL DEFAULT 0`,
+      // The hot path is method + path on every public request.
+      `CREATE INDEX workflow_routes_lookup ON workflow_routes(method, path)`,
+      `CREATE INDEX webhook_replay_seen_at ON webhook_replay_protection(seen_at)`,
+    ],
+  },
 ]
 
 /**

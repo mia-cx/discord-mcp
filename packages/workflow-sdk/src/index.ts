@@ -309,9 +309,18 @@ export interface CompiledManifest {
     readonly method: string
     readonly path: string
     readonly auth: RouteAuth
+    /** Which trigger serves this route. The control plane dispatches by index, not by name. */
+    readonly triggerIndex: number
   }>
-  readonly commands: ReadonlyArray<{ readonly name: string; readonly description: string }>
-  readonly schedules: ReadonlyArray<string>
+  readonly commands: ReadonlyArray<{
+    readonly name: string
+    readonly description: string
+    readonly triggerIndex: number
+  }>
+  readonly schedules: ReadonlyArray<{
+    readonly expression: string
+    readonly triggerIndex: number
+  }>
   readonly gatewayEventTypes: ReadonlyArray<string>
 }
 
@@ -325,11 +334,11 @@ export const compileManifest = (workflow: Workflow): CompiledManifest => {
   const triggers: CompiledTrigger[] = []
   const actions: string[] = []
   const routes: CompiledManifest['routes'] = []
-  const commands: Array<{ name: string; description: string }> = []
-  const schedules: string[] = []
+  const commands: Array<{ name: string; description: string; triggerIndex: number }> = []
+  const schedules: Array<{ expression: string; triggerIndex: number }> = []
   const gatewayEventTypes: string[] = []
 
-  for (const trigger of workflow.definition.triggers) {
+  for (const [triggerIndex, trigger] of workflow.definition.triggers.entries()) {
     switch (trigger.kind) {
       case 'gateway':
         triggers.push({ kind: trigger.kind, identifier: trigger.events.join(',') })
@@ -337,7 +346,7 @@ export const compileManifest = (workflow: Workflow): CompiledManifest => {
         break
       case 'interactionCommand':
         triggers.push({ kind: trigger.kind, identifier: trigger.name })
-        commands.push({ name: trigger.name, description: trigger.description })
+        commands.push({ name: trigger.name, description: trigger.description, triggerIndex })
         break
       case 'interactionComponent':
       case 'interactionModal':
@@ -349,15 +358,16 @@ export const compileManifest = (workflow: Workflow): CompiledManifest => {
         break
       case 'http':
         triggers.push({ kind: trigger.kind, identifier: `${trigger.method} ${trigger.path}` })
-        ;(routes as Array<{ method: string; path: string; auth: RouteAuth }>).push({
+        ;(routes as Array<CompiledManifest['routes'][number]>).push({
           method: trigger.method,
           path: trigger.path,
           auth: trigger.auth,
+          triggerIndex,
         })
         break
       case 'schedule':
         triggers.push({ kind: trigger.kind, identifier: trigger.schedule })
-        schedules.push(trigger.schedule)
+        schedules.push({ expression: trigger.schedule, triggerIndex })
         break
       case 'manual':
         triggers.push({ kind: trigger.kind, identifier: trigger.name })
@@ -370,7 +380,7 @@ export const compileManifest = (workflow: Workflow): CompiledManifest => {
     actions: [...new Set(actions)].sort(),
     routes,
     commands,
-    schedules: [...new Set(schedules)].sort(),
+    schedules,
     gatewayEventTypes: [...new Set(gatewayEventTypes)].sort(),
   }
 }

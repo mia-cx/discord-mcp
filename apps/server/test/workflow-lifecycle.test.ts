@@ -7,6 +7,7 @@ import {
   CapabilityBroker,
   CapabilityServer,
   CapabilitySockets,
+  RouteRegistry,
   SandboxSupervisor,
   WorkflowRepository,
   workflowTools,
@@ -26,7 +27,14 @@ import { stubRest, withClient } from './support/harness.ts'
 const SOURCE = `import { Workflow, Trigger } from '@discord-mcp/workflow-sdk'
 export default Workflow.make({ name: 'greeter', triggers: [] })`
 
-const MANIFEST = { name: 'greeter', triggers: [], routes: [], commands: [] }
+const MANIFEST = {
+  triggers: [],
+  actions: [],
+  routes: [],
+  commands: [],
+  schedules: [],
+  gatewayEventTypes: [],
+}
 
 /** A supervisor that builds successfully without a container in sight. */
 const stubSupervisor = (options: { readonly buildFails?: boolean } = {}) =>
@@ -58,6 +66,7 @@ const layers = (options: { readonly buildFails?: boolean } = {}) =>
     stubSupervisor(options),
     CapabilityBroker.layer,
     WorkflowRepository.layer,
+    RouteRegistry.layer,
     CapabilitySockets.layer({ directory: capabilityDirectory }),
     CapabilityServer.layer.pipe(
       Layer.provide(

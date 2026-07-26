@@ -219,6 +219,42 @@ export const evaluateProxyTrust = (
 }
 
 /**
+ * The client's address, when it can be established.
+ *
+ * Distinct from `evaluateProxyTrust`, which answers "who is this" from identity headers. This
+ * answers "where did it come from", which is what a source-CIDR rule needs.
+ *
+ * Undefined when it cannot be established honestly: an `X-Forwarded-For` from an untrusted peer is
+ * a claim the client made about itself, and treating it as an address makes every CIDR rule
+ * trivially bypassable by setting a header.
+ */
+export const trustedClientAddress = (input: {
+  readonly socketAddress: string
+  readonly forwardedFor: string | undefined
+  readonly config: ProxyTrustConfig
+}): string | undefined => {
+  const direct = normalizeAddress(input.socketAddress)
+
+  const behindTrustedProxy =
+    input.config.trustProxyIdentity &&
+    input.config.trustedProxyCidrs.length > 0 &&
+    input.config.trustedProxyCidrs.some((cidr) => isWithinCidr(direct, cidr))
+
+  if (!behindTrustedProxy) {
+    // A direct connection: the peer address is the client, and no header can change that.
+    return direct === '' ? undefined : direct
+  }
+
+  // Leftmost entry is the original client. Anything a proxy appended after it is a hop.
+  const claimed = input.forwardedFor?.split(',')[0]?.trim()
+  return claimed === undefined || claimed === '' ? undefined : normalizeAddress(claimed)
+}
+
+/** `::ffff:203.0.113.7` is an IPv4 address wearing an IPv6 hat; CIDR rules are written for the hat-free form. */
+const normalizeAddress = (address: string): string =>
+  address.startsWith('::ffff:') ? address.slice('::ffff:'.length) : address
+
+/**
  * Intersect a token's scopes with what the principal actually holds.
  *
  * A token can never widen a principal: an OIDC provider we do not control could otherwise assert

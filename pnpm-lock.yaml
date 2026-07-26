@@ -222,6 +222,9 @@ importers:
 
   packages/workflow-runtime:
     dependencies:
+      '@discord-mcp/auth':
+        specifier: workspace:*
+        version: link:../auth
       '@discord-mcp/core':
         specifier: workspace:*
         version: link:../core

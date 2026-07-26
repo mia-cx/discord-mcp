@@ -32,8 +32,10 @@ import {
   CapabilityBroker,
   CapabilityServer,
   CapabilitySockets,
+  RouteRegistry,
   SandboxSupervisor,
   WorkflowRepository,
+  WorkflowRoutes,
   workflowTools,
 } from '@discord-mcp/workflow-runtime'
 import { Effect, Layer } from 'effect'
@@ -195,14 +197,21 @@ export const AppLayer = (config: ServerConfig) => {
         'Workflows are disabled. Set DISCORD_MCP_WORKFLOWS_ENABLED=true and configure DISCORD_MCP_SUPERVISOR_SOCKET to run them.',
       )
 
-  return Layer.mergeAll(
-    rest,
-    OperationCatalog.layer,
-    sandbox,
+  const profiles = authProfilesLayer.pipe(Layer.provide(oauth))
+
+  // The workflow subsystem, built as one block because its pieces only make sense together: the
+  // broker decides, the capability server acts, the sockets carry, and the routes dispatch.
+  //
+  // `provideMerge` rather than `provide` so each piece stays visible to the application — the tool
+  // handlers and the HTTP server both reach in here.
+  const workflows = Layer.mergeAll(
     CapabilityBroker.layer,
     CapabilitySockets.layer({ directory: config.workflows.capabilityDirectory }),
-    // The broker's acting end. It shares the REST client and catalog with the MCP tools, so a
-    // workflow's calls and an operator's sit in the same rate-limit view.
+    WorkflowRepository.layer,
+    RouteRegistry.layer,
+    sandbox,
+    // Shares the REST client and catalog with the MCP tools, so a workflow's calls and an
+    // operator's sit in one rate-limit view rather than two that each think they have the budget.
     CapabilityServer.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
@@ -210,12 +219,18 @@ export const AppLayer = (config: ServerConfig) => {
           OperationCatalog.layer,
           PreviewTokens.layer,
           rest,
-          authProfilesLayer.pipe(Layer.provide(oauth)),
+          profiles,
           persistence,
         ),
       ),
     ),
-    WorkflowRepository.layer.pipe(Layer.provide(persistence)),
+  ).pipe(Layer.provideMerge(persistence), Layer.provideMerge(secrets))
+
+  return Layer.mergeAll(
+    rest,
+    OperationCatalog.layer,
+    WorkflowRoutes.layer.pipe(Layer.provide(workflows)),
+    workflows,
     PreviewTokens.layer,
     // A misspelled intent is a configuration error, not a runtime one: Discord would close the
     // connection with 4013 and the server would look broken. Dying here names the variable.
@@ -231,7 +246,7 @@ export const AppLayer = (config: ServerConfig) => {
     PrincipalStore.layer.pipe(Layer.provide(persistence)),
     secrets,
     oauth,
-    authProfilesLayer.pipe(Layer.provide(oauth)),
+    profiles,
     persistence,
   )
 }

@@ -82,11 +82,21 @@ describe('the SDK is descriptive, not executable', () => {
     const manifest = compileManifest(workflow)
 
     expect(manifest.actions).toEqual(['acknowledge'])
-    expect(manifest.commands).toEqual([{ name: 'status', description: 'Report status' }])
-    expect(manifest.schedules).toEqual(['0 9 * * 1'])
     expect(manifest.gatewayEventTypes).toEqual(['MESSAGE_CREATE'])
+
+    // Each entry carries the index of the trigger that serves it: the control plane dispatches by
+    // position, so a route or command that could not name its handler would be unroutable.
+    expect(manifest.commands).toEqual([
+      { name: 'status', description: 'Report status', triggerIndex: 2 },
+    ])
+    expect(manifest.schedules).toEqual([{ expression: '0 9 * * 1', triggerIndex: 0 }])
     expect(manifest.routes).toEqual([
-      { method: 'POST', path: '/deploy', auth: { type: 'hmacSha256', secretRef: 'deploy-hook' } },
+      {
+        method: 'POST',
+        path: '/deploy',
+        auth: { type: 'hmacSha256', secretRef: 'deploy-hook' },
+        triggerIndex: 4,
+      },
     ])
   })
 

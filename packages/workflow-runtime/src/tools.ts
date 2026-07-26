@@ -1,12 +1,19 @@
 import { randomUUID } from 'node:crypto'
 import { defineTool, McpRequestContext, ValidationError } from '@discord-mcp/core'
-import { DEFAULT_GRANT, WORKFLOW_LIMITS, type WorkflowGrant } from '@discord-mcp/workflow-sdk'
+import {
+  type CompiledManifest,
+  DEFAULT_GRANT,
+  WORKFLOW_LIMITS,
+  type WorkflowGrant,
+} from '@discord-mcp/workflow-sdk'
 import { Effect, Schema } from 'effect'
 import { CapabilityBroker } from './broker.ts'
 import type { CapabilityServer } from './capability-server.ts'
 import { CapabilitySockets } from './capability-socket.ts'
 import { WorkflowRepository } from './repository.ts'
+import { RouteConflict, RouteRegistry } from './route-registry.ts'
 import { SandboxSupervisor } from './sandbox.ts'
+import { checkScheduleFloor, parseCron } from './schedule.ts'
 
 /**
  * Workflow lifecycle tools.
@@ -23,6 +30,7 @@ type Deps =
   | CapabilityBroker
   | CapabilitySockets
   | CapabilityServer
+  | RouteRegistry
 
 const Slug = Schema.String.pipe(
   Schema.check(Schema.isPattern(/^[a-z0-9][a-z0-9-]{0,63}$/)),
@@ -349,6 +357,74 @@ export const workflowGrant = defineTool<typeof GrantInput.Type, unknown, Workflo
 
 // ---------------------------------------------------------------- lifecycle
 
+/**
+ * Register a revision's routes, refusing schedules the floor forbids on the way.
+ *
+ * Schedules are checked here rather than at build time because the floor is an operator's policy
+ * about their own server, not a property of the code — a workflow that was fine yesterday should
+ * fail to enable if the policy tightened, not fail to compile.
+ */
+const registerRoutes = (input: {
+  readonly workflowId: string
+  readonly slug: string
+  readonly revision: number
+  readonly manifest: CompiledManifest | null
+}) =>
+  Effect.gen(function* () {
+    const registry = yield* RouteRegistry
+    const manifest = input.manifest
+    if (manifest === null) return []
+
+    // Defensive `?? []`: the manifest arrives as JSON from the supervisor, so a version skew shows
+    // up as a missing field rather than a type error. Treating that as "declares nothing" is safe;
+    // crashing the enable is not.
+    const now = yield* Effect.clockWith((clock) => clock.currentTimeMillis)
+    for (const schedule of manifest.schedules ?? []) {
+      const parsed = parseCron(schedule.expression)
+      if ('reason' in parsed) {
+        return yield* Effect.fail(
+          new ValidationError({
+            message: `The schedule "${schedule.expression}" is not valid.`,
+            issues: [`schedule: ${parsed.reason}`],
+          }),
+        )
+      }
+
+      const tooFrequent = checkScheduleFloor(parsed, new Date(now))
+      if (tooFrequent !== undefined) {
+        return yield* Effect.fail(
+          new ValidationError({
+            message: `The schedule "${schedule.expression}" fires too often.`,
+            issues: [`schedule: ${tooFrequent.reason}`],
+          }),
+        )
+      }
+    }
+
+    const registered = yield* Effect.mapError(
+      registry.register({
+        workflowId: input.workflowId,
+        workflowSlug: input.slug,
+        revision: input.revision,
+        routes: (manifest.routes ?? []).map((route) => ({
+          method: route.method,
+          relativePath: route.path,
+          auth: route.auth,
+          triggerIndex: route.triggerIndex,
+        })),
+      }),
+      (cause) =>
+        cause instanceof RouteConflict
+          ? new ValidationError({
+              message: 'This revision’s routes could not be registered.',
+              issues: [`routes: ${cause.reason}`],
+            })
+          : cause,
+    )
+
+    return registered
+  })
+
 export const workflowEnable = defineTool<typeof RevisionInput.Type, unknown, Deps>({
   name: 'workflow_enable',
   title: 'Enable a revision',
@@ -393,10 +469,24 @@ export const workflowEnable = defineTool<typeof RevisionInput.Type, unknown, Dep
         )
       }
 
+      // Routes register with the revision, and a failure here stops the enable rather than
+      // leaving a workflow live with only some of its routes served.
+      const routes = yield* registerRoutes({
+        workflowId: workflow.id,
+        slug: args.slug,
+        revision: args.revision,
+        manifest: revision.manifest,
+      })
+
       yield* repo.enable(workflow.id, args.revision)
       yield* broker.setEnabled(workflow.id, args.revision, true)
 
-      return { slug: args.slug, revision: args.revision, status: 'enabled' }
+      return {
+        slug: args.slug,
+        revision: args.revision,
+        status: 'enabled',
+        routes: routes.map((route) => `${route.method} ${route.path}`),
+      }
     }),
 })
 
@@ -419,6 +509,7 @@ export const workflowDisable = defineTool<typeof SlugInput.Type, unknown, Deps>(
     Effect.gen(function* () {
       const repo = yield* WorkflowRepository
       const broker = yield* CapabilityBroker
+      const registry = yield* RouteRegistry
       const workflow = yield* requireWorkflow(args.slug)
 
       if (workflow.enabledRevision !== null) {
@@ -426,6 +517,9 @@ export const workflowDisable = defineTool<typeof SlugInput.Type, unknown, Deps>(
         // handler authorized until its deadline.
         yield* broker.setEnabled(workflow.id, workflow.enabledRevision, false)
       }
+      // Routes go with the revision: a public URL that outlived the code behind it would answer
+      // with a 503 at best and someone else's handler at worst.
+      yield* registry.unregister(workflow.id)
       yield* repo.disable(workflow.id)
 
       return { slug: args.slug, status: 'disabled' }

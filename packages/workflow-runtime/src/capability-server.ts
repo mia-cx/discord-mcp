@@ -22,6 +22,8 @@ import { MAX_LOG_BYTES } from './capability-rpc.ts'
 export interface ExecutionScope {
   readonly credential: CapabilityCredential
   readonly appendLog: (line: string) => Effect.Effect<void>
+  /** The handler's return value, which for an HTTP trigger becomes the response. */
+  readonly recordResult: (result: unknown) => Effect.Effect<void>
 }
 
 const denied = (id: string, message: string, suggestion?: string): CapabilityResponse => ({
@@ -173,7 +175,10 @@ export class CapabilityServer extends Context.Service<
             const call = request.call
 
             if (call.kind === 'finish') {
-              return { id: request.id, ok: true as const, result: call.result }
+              // Recorded rather than returned to the container: the caller of the execution is what
+              // needs this, and the container is about to be destroyed.
+              yield* scope.recordResult(call.result)
+              return { id: request.id, ok: true as const, result: null }
             }
 
             const decision = yield* broker.authorize({

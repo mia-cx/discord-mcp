@@ -14,6 +14,7 @@
     "@discord-mcp/persistence": "workspace:*",
     "@discord-mcp/workflow-sdk": "workspace:*",
     "effect": "4.0.0-beta.101",
-    "@discord-mcp/discord-api": "workspace:*"
+    "@discord-mcp/discord-api": "workspace:*",
+    "@discord-mcp/auth": "workspace:*"
   }
 }

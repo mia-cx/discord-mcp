@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { DiscordOAuth } from '@discord-mcp/auth'
 import { routeInteraction } from '@discord-mcp/discord-api'
+import { WorkflowRoutes } from '@discord-mcp/workflow-runtime'
 import { NodeRuntime } from '@effect/platform-node'
 import { serveStdio } from '@modelcontextprotocol/server/stdio'
 import { Cause, Effect, Layer, Logger, ManagedRuntime } from 'effect'
@@ -64,6 +65,12 @@ const main = Effect.gen(function* () {
                   (r) => ({ status: r.response.status, body: r.response.body }),
                 ),
             }),
+        ...(config.workflows.enabled
+          ? {
+              handleWorkflowRoute: (request) =>
+                Effect.flatMap(WorkflowRoutes, (routes) => routes.handle(request)),
+            }
+          : {}),
       }),
       (h) =>
         Effect.promise(async () => {
