@@ -34,8 +34,8 @@ tests." A phase is not done because its code exists; it is done when its accepta
 | 6 — Persistence and control-plane authentication | done |
 | 7 — Discord OAuth2 profiles | done |
 | 8 — Interactions and component routing | done |
-| 9 — Workflow persistence and SDK | in progress |
-| 10 — Sandbox supervisor and capability broker | not started |
+| 9 — Workflow persistence and SDK | done |
+| 10 — Sandbox supervisor and capability broker | in progress |
 | 11 — Dynamic routes and automation hardening | not started |
 | 12 — Release validation | not started |
 

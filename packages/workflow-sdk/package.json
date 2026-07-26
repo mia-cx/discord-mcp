@@ -1,0 +1,19 @@
+{
+  "name": "@discord-mcp/workflow-sdk",
+  "version": "0.1.0",
+  "description": "The API sandboxed Discord MCP workflows are written against. Published; follows semver.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "effect": "4.0.0-beta.101"
+  }
+}

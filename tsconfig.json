@@ -2,6 +2,9 @@
   "files": [],
   "references": [
     {
+      "path": "./packages/workflow-sdk"
+    },
+    {
       "path": "./packages/core"
     },
     {
@@ -27,6 +30,9 @@
     },
     {
       "path": "./apps/cli"
+    },
+    {
+      "path": "./packages/workflow-runtime"
     }
   ]
 }
