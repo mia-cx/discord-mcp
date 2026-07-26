@@ -152,7 +152,9 @@ export class WorkflowDispatcher extends Context.Service<
             now,
           })
 
-          const socket = yield* sockets.open(credential).pipe(Effect.provide(capability))
+          const socket = yield* sockets
+            .open(credential, { index: input.triggerIndex, input: input.payload })
+            .pipe(Effect.provide(capability))
 
           const outcome = yield* Effect.result(
             Effect.ensuring(

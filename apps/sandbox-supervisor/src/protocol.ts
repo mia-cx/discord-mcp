@@ -70,5 +70,14 @@ export type SupervisorResponse = typeof SupervisorResponse.Type
 /** One request must not be able to exhaust the supervisor's memory before it is even parsed. */
 export const MAX_REQUEST_BYTES = 512 * 1024
 
-/** Owner-only. The socket is the Docker socket by proxy. */
-export const SOCKET_MODE = 0o600
+/**
+ * Owner and group. The socket is the Docker socket by proxy.
+ *
+ * Group rather than owner-only because the control plane runs as a *different user* in a different
+ * container — deliberately, so that compromising it does not make you the supervisor. They share
+ * one group and nothing else, so the group is exactly those two processes.
+ */
+export const SOCKET_MODE = 0o660
+
+/** Same reasoning: the directory admits the shared group and no one else. */
+export const SOCKET_DIR_MODE = 0o770

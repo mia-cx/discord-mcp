@@ -86,8 +86,10 @@ export class Supervisor extends Context.Service<
             })
 
             yield* docker.createVolume(artifactVolume(ref))
-            yield* docker.run(spec)
+            // Create, copy, then start. Starting first would run `build.sh` before it exists.
+            yield* docker.create(spec)
             yield* docker.copyInto(spec.name, workspaceFiles(request))
+            yield* docker.start(spec.name)
 
             const result = yield* docker.wait(spec.name, WORKFLOW_LIMITS.buildSeconds * 1000)
             const logs = yield* docker.logs(spec.name, WORKFLOW_LIMITS.logBytesPerExecution)
@@ -204,10 +206,12 @@ export class Supervisor extends Context.Service<
                   // it before asking for the container, so creating it here is idempotent rather
                   // than per-execution setup.
                   yield* docker.createVolume(CAPABILITY_VOLUME)
+
+                  // Nothing is copied in: the trigger payload is written beside the capability
+                  // socket by the control plane before this call. Copying it to /tmp would not
+                  // survive, because the tmpfs mounts over that path the moment the container
+                  // starts.
                   const { containerId } = yield* docker.run(spec)
-                  yield* docker.copyInto(spec.name, [
-                    { path: '/tmp/payload.json', contents: JSON.stringify(request.payload) },
-                  ])
 
                   const result = yield* docker.wait(spec.name, limits.timeoutSeconds * 1000)
                   const logs = yield* docker.logs(spec.name, WORKFLOW_LIMITS.logBytesPerExecution)

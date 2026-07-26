@@ -1,5 +1,5 @@
 import { timingSafeEqual } from 'node:crypto'
-import { chmod, mkdir, unlink } from 'node:fs/promises'
+import { chmod, mkdir, stat, unlink } from 'node:fs/promises'
 import { createServer, type Socket } from 'node:net'
 import { dirname } from 'node:path'
 import { SandboxError } from '@discord-mcp/core'
@@ -7,6 +7,7 @@ import { Effect, Schema } from 'effect'
 import { DEFAULT_RUNTIME_LIMITS } from './container-spec.ts'
 import {
   MAX_REQUEST_BYTES,
+  SOCKET_DIR_MODE,
   SOCKET_MODE,
   SupervisorRequest,
   type SupervisorResponse,
@@ -158,8 +159,8 @@ export const serve = (options: {
 
       void prepareSocketPath(options.socketPath).then(() => {
         server.listen(options.socketPath, () => {
-          // Belt and braces: the parent directory is already owner-only, so there is no window in
-          // which the socket is reachable with looser permissions than this.
+          // Belt and braces: the parent directory already admits only the shared group, so there is no
+          // window in which the socket is reachable more widely than this.
           void chmod(options.socketPath, SOCKET_MODE)
         })
       })
@@ -177,8 +178,23 @@ export const serve = (options: {
  * the directory first closes it, because traversal is denied regardless of the socket's own mode.
  */
 const prepareSocketPath = async (socketPath: string): Promise<void> => {
-  await mkdir(dirname(socketPath), { recursive: true, mode: 0o700 })
-  await chmod(dirname(socketPath), 0o700)
+  const directory = dirname(socketPath)
+  await mkdir(directory, { recursive: true, mode: SOCKET_DIR_MODE })
+
+  // The directory may belong to someone else — an operator bind-mounting one they manage, or a
+  // Docker volume seeded by another image. `chmod` then fails, and crashing over it would be the
+  // wrong answer: what matters is whether the mode is *acceptable*, not who set it.
+  try {
+    await chmod(directory, SOCKET_DIR_MODE)
+  } catch {
+    const { mode } = await stat(directory)
+    if ((mode & 0o007) !== 0) {
+      throw new Error(
+        `${directory} is world-accessible and this process cannot tighten it. The supervisor socket is the Docker socket by proxy, so refusing is the only safe answer: chown the directory to this user, or mount one that is not world-accessible.`,
+      )
+    }
+  }
+
   // A socket left by a crashed supervisor would fail `bind` with EADDRINUSE and read as a second
   // instance running.
   await unlink(socketPath).catch(() => undefined)

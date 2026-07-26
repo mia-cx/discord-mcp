@@ -158,6 +158,9 @@ describe('the build workspace', () => {
       '/build/build.sh',
       '/build/emit-manifest.js',
       '/build/package.json',
+      // The artifact's entry point, built here rather than baked into the runtime image so a
+      // revision's runner and the SDK it compiled against stay pinned together.
+      '/build/runner.js',
       '/build/src/index.ts',
       '/build/tsconfig.json',
     ])
@@ -201,5 +204,40 @@ describe('build stage attribution', () => {
   it('names the last stage the build reached', () => {
     expect(lastStage('::stage::install\n::stage::compile\nerror TS2304')).toBe('compile')
     expect(lastStage('')).toBe('start')
+  })
+})
+
+describe('the generated scripts', () => {
+  const scripts = workspaceFiles({
+    workflowId: 'wf',
+    revision: 1,
+    source: '',
+    dependencies: {},
+    allowInstallScripts: false,
+  })
+
+  it('contain no backtick, which would close the template literal that holds them', () => {
+    // These are shell and JavaScript sources embedded in TypeScript template literals. A backtick
+    // in a comment terminates the literal early and the file stops parsing — a failure that shows
+    // up as a syntax error dozens of lines away from the cause.
+    for (const file of scripts) {
+      expect(file.contents.includes('`'), `${file.path} contains a backtick`).toBe(false)
+    }
+  })
+
+  it('relink the SDK after installing, because installing recreates node_modules', () => {
+    const build = scripts.find((f) => f.path === '/build/build.sh')?.contents ?? ''
+    const install = build.indexOf('--frozen-lockfile')
+    const relink = build.indexOf('node_modules/@discord-mcp/workflow-sdk')
+
+    expect(install).toBeGreaterThan(-1)
+    expect(relink).toBeGreaterThan(install)
+  })
+
+  it('emit a runner into the artifact, since the runtime image has none', () => {
+    const build = scripts.find((f) => f.path === '/build/build.sh')?.contents ?? ''
+    expect(build).toContain('/artifact/runner.js')
+    // -L, or the artifact would carry a symlink to a path that exists only in the build image.
+    expect(build).toContain('cp -RL')
   })
 })

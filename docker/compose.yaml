@@ -30,14 +30,13 @@ services:
       # the supervisor.
       DISCORD_MCP_SUPERVISOR_CREDENTIAL: ${DISCORD_MCP_SUPERVISOR_CREDENTIAL:-}
       DISCORD_MCP_TOOLSETS: ${DISCORD_MCP_TOOLSETS:-operator,automation,api}
-      DISCORD_MCP_CAPABILITY_DIR: /run/discord-mcp/capability
     volumes:
       - data:/data
       - supervisor-socket:/run/discord-mcp
       # The server serves each execution's capability socket here; workflow containers mount the
       # same volume restricted to their own execution's subdirectory. The server holds the grants
       # and the Discord credentials, so it is the right place for the broker to listen.
-      - capability:/run/discord-mcp/capability
+      - capability:/run/capability
     ports:
       # Loopback only. Put Traefik in front before exposing this anywhere.
       - '127.0.0.1:3000:3000'

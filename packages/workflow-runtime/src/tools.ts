@@ -779,7 +779,7 @@ export const workflowInvoke = defineTool<typeof InvokeInput.Type, unknown, Deps>
       // closed and removed whatever the outcome — a socket outliving its execution would be a way
       // back in for a container that somehow survived.
       const sockets = yield* CapabilitySockets
-      const socket = yield* sockets.open(credential)
+      const socket = yield* sockets.open(credential, { index: 0, input: args.payload ?? null })
 
       const outcome = yield* Effect.result(
         Effect.ensuring(

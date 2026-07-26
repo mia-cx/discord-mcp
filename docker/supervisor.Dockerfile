@@ -36,18 +36,22 @@ FROM node:24-alpine
 # API. There is no shell in the path a caller controls, so there is nothing to inject into.
 RUN apk add --no-cache docker-cli
 
-RUN addgroup -g 10002 supervisor && adduser -D -u 10002 -G supervisor supervisor
+# The same GID as the control plane's image. Different users, one shared group: that is what makes
+# the socket reachable by exactly those two processes and nothing else on the host.
+RUN addgroup -g 10000 discord-mcp && adduser -D -u 10002 -G discord-mcp supervisor
 
 COPY --from=build /src/node_modules /app/node_modules
 COPY --from=build /src/packages /app/packages
 COPY --from=build /src/apps /app/apps
 
-# Shared with the control plane, owner-only. The supervisor creates the socket here at 0600 inside a
-# 0700 directory, so filesystem permissions are the first gate and the service credential the second.
+# Shared with the control plane. The supervisor creates the socket here at 0660 inside a 0770
+# directory, both group-owned by `discord-mcp` — so filesystem permissions are the first gate and
+# the service credential the second, and the two are the only processes that pass either.
+RUN mkdir -p /run/discord-mcp && chown supervisor:discord-mcp /run/discord-mcp
 VOLUME /run/discord-mcp
 ENV DISCORD_MCP_SUPERVISOR_SOCKET=/run/discord-mcp/supervisor.sock
 
-USER supervisor:supervisor
+USER supervisor:discord-mcp
 WORKDIR /app
 
 CMD ["node", "/app/apps/sandbox-supervisor/dist/bin.js"]

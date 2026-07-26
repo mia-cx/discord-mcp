@@ -19,10 +19,14 @@ import type { ContainerSpec } from './container-spec.ts'
  * Pure and exported so the hostile-fixture suite can assert on the exact flags without Docker
  * installed. If a restriction is missing here it is missing in production.
  */
-export const runArgs = (spec: ContainerSpec): ReadonlyArray<string> => {
+export const runArgs = (
+  spec: ContainerSpec,
+  verb: 'run' | 'create' = 'run',
+): ReadonlyArray<string> => {
   const args = [
-    'run',
-    '--detach',
+    verb,
+    // `create` is not detached; it does not start anything at all.
+    ...(verb === 'run' ? ['--detach'] : []),
     '--name',
     spec.name,
     '--network',
@@ -70,6 +74,17 @@ export class DockerEngine extends Context.Service<
     readonly run: (
       spec: ContainerSpec,
     ) => Effect.Effect<{ readonly containerId: string }, SandboxError>
+    /**
+     * Create without starting.
+     *
+     * The build and run flows both copy files in before anything executes, and `docker cp` cannot
+     * create a container's parent directories or reach into one that has already exited. Create,
+     * copy, then start is the only ordering that works.
+     */
+    readonly create: (
+      spec: ContainerSpec,
+    ) => Effect.Effect<{ readonly containerId: string }, SandboxError>
+    readonly start: (name: string) => Effect.Effect<void, SandboxError>
     readonly wait: (
       name: string,
       timeoutMs: number,
@@ -139,6 +154,13 @@ export class DockerEngine extends Context.Service<
             containerId: stdout.trim(),
           })),
 
+        create: (spec) =>
+          Effect.map(exec(runArgs(spec, 'create'), spec.env), ({ stdout }) => ({
+            containerId: stdout.trim(),
+          })),
+
+        start: (name) => Effect.asVoid(exec(['start', name])),
+
         wait: (name, timeoutMs) =>
           Effect.map(Effect.result(exec(['wait', name], {}, timeoutMs)), (result) =>
             result._tag === 'Success'
@@ -194,7 +216,10 @@ export class DockerEngine extends Context.Service<
                 (dir) => {
                   const staged = join(dir, 'file')
                   return Effect.tryPromise({
-                    try: () => writeFile(staged, file.contents, { mode: 0o600 }),
+                    // World-readable, because `docker cp` lands the file as root and the container
+                    // runs as 65534 — at 0600 the build cannot read its own source. The staging
+                    // directory is 0700, so the file is not exposed on the supervisor's host.
+                    try: () => writeFile(staged, file.contents, { mode: 0o644 }),
                     catch: (cause) =>
                       new SandboxError({
                         message: `Could not stage ${file.path}: ${cause}`,

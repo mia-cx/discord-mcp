@@ -220,7 +220,15 @@ const runHandler = (input: {
       now: input.request.now,
     })
 
-    const socket = yield* input.sockets.open(credential)
+    const socket = yield* input.sockets.open(credential, {
+      index: input.route.triggerIndex,
+      input: {
+        method: input.request.method,
+        path: input.request.path,
+        headers: redactHeaders(input.request.headers),
+        request: input.request.rawBody,
+      },
+    })
 
     const result = yield* Effect.result(
       Effect.ensuring(

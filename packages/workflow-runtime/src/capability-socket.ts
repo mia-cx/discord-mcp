@@ -1,4 +1,4 @@
-import { chmod, mkdir, rm } from 'node:fs/promises'
+import { chmod, mkdir, rm, writeFile } from 'node:fs/promises'
 import { createServer, type Socket } from 'node:net'
 import { join } from 'node:path'
 import { Context, Effect, Layer, Schema } from 'effect'
@@ -35,6 +35,8 @@ export class CapabilitySockets extends Context.Service<
     /** Open a socket for one execution. The caller closes it when the execution ends. */
     readonly open: (
       credential: CapabilityCredential,
+      /** The trigger payload, written beside the socket for the runner to read. */
+      payload?: unknown,
     ) => Effect.Effect<ExecutionSocket, never, CapabilityServer>
   }
 >()('workflow-runtime/CapabilitySockets') {
@@ -43,7 +45,7 @@ export class CapabilitySockets extends Context.Service<
     readonly directory: string
   }): Layer.Layer<CapabilitySockets> =>
     Layer.sync(CapabilitySockets)(() => ({
-      open: (credential) =>
+      open: (credential, payload) =>
         Effect.gen(function* () {
           const server = yield* CapabilityServer
           const directory = join(options.directory, credential.executionId)
@@ -66,9 +68,17 @@ export class CapabilitySockets extends Context.Service<
           const scope: ExecutionScope = { credential, appendLog, recordResult }
 
           yield* Effect.promise(async () => {
-            await mkdir(directory, { recursive: true, mode: 0o700 })
+            // Traversable, because the workflow container runs as a different user again (65534)
+            // and has to reach the socket inside. The mode is not what isolates one execution from
+            // another — the per-execution subpath mount is, and a container sees only its own.
+            await mkdir(directory, { recursive: true, mode: 0o755 })
             // A socket left by a crashed control plane would fail `bind` with EADDRINUSE.
             await rm(socketPath, { force: true })
+            // Beside the socket rather than inside the container: the runtime's tmpfs would mask
+            // anything copied to /tmp, and a Gateway payload is too large to pass as an env var.
+            await writeFile(join(directory, 'payload.json'), JSON.stringify(payload ?? null), {
+              mode: 0o644,
+            })
           })
 
           const listener = createServer((socket) => {
