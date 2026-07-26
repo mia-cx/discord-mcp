@@ -1,0 +1,15 @@
+{
+  "name": "spike",
+  "private": true,
+  "type": "module",
+  "description": "Phase-0 gate. Not part of the workspace; run with `pnpm install && pnpm tsx spike.ts` inside this directory.",
+  "scripts": { "gate": "tsx spike.ts", "typecheck": "tsc -p tsconfig.json" },
+  "dependencies": {
+    "@effect/platform-node": "4.0.0-beta.101",
+    "@effect/sql-sqlite-node": "4.0.0-beta.101",
+    "@modelcontextprotocol/client": "2.0.0-beta.5",
+    "@modelcontextprotocol/server": "2.0.0-beta.5",
+    "effect": "4.0.0-beta.101"
+  },
+  "devDependencies": { "@types/node": "24.10.1", "tsx": "4.21.1", "typescript": "7.0.2" }
+}
