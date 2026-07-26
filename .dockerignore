@@ -1,0 +1,32 @@
+# What never belongs in a build context.
+#
+# Without this the context carries node_modules (hundreds of megabytes, and rebuilt inside the
+# image anyway), plus anything local that matches a secret or a database — a `.env` sitting in the
+# working directory would otherwise be uploaded to the daemon and, one careless `COPY .` later,
+# baked into a published layer.
+
+node_modules
+**/node_modules
+
+# Built output. Every image builds from source; copying a host build in would ship whatever
+# happened to be on that machine.
+dist
+**/dist
+*.tsbuildinfo
+**/*.tsbuildinfo
+
+# Secrets and local state.
+.env
+.env.*
+!docker/.env.example
+*.sqlite
+*.sqlite-*
+
+.git
+.github
+spike
+
+# Documentation and planning: not needed to build, and they change constantly, which would bust
+# the context cache on every edit.
+*.md
+docs

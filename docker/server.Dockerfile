@@ -6,6 +6,14 @@
 FROM node:24-alpine AS build
 
 RUN corepack enable && corepack prepare pnpm@10.20.0 --activate
+
+# `pnpm prune` refuses to remove a modules directory without a TTY unless it knows it is in CI.
+ENV CI=true
+
+# argon2 has no musl prebuild, so it compiles here. It is not optional: personal access tokens are
+# hashed with argon2id, and without the binding the auth package does not load at all.
+RUN apk add --no-cache python3 make g++
+
 WORKDIR /src
 
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json tsconfig.json ./
@@ -13,10 +21,12 @@ COPY types ./types
 COPY packages ./packages
 COPY apps ./apps
 COPY vendor ./vendor
+# `pnpm build` runs scripts/copy-assets.mjs, which copies the generated catalog schemas into dist.
+# Without it the server starts and then fails at the first API call with a missing file.
+COPY scripts ./scripts
 
-RUN pnpm install --frozen-lockfile --ignore-scripts
+RUN pnpm install --frozen-lockfile
 RUN pnpm build
-RUN pnpm prune --prod
 
 FROM node:24-alpine
 

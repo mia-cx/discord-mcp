@@ -10,9 +10,11 @@ name: discord-mcp
 
 services:
   server:
-    build:
-      context: ..
-      dockerfile: docker/server.Dockerfile
+    # Published by CI on every version tag. Swap for the `build:` block below to run your own.
+    image: ghcr.io/mia-cx/discord-mcp/server:${DISCORD_MCP_VERSION:-latest}
+    # build:
+    #   context: ..
+    #   dockerfile: docker/server.Dockerfile
     restart: unless-stopped
     environment:
       DISCORD_TOKEN: ${DISCORD_TOKEN:?set DISCORD_TOKEN}
@@ -43,14 +45,19 @@ services:
       - supervisor
 
   supervisor:
-    build:
-      context: ..
-      dockerfile: docker/supervisor.Dockerfile
+    image: ghcr.io/mia-cx/discord-mcp/supervisor:${DISCORD_MCP_VERSION:-latest}
+    # build:
+    #   context: ..
+    #   dockerfile: docker/supervisor.Dockerfile
     restart: unless-stopped
     environment:
       DISCORD_MCP_SUPERVISOR_CREDENTIAL: ${DISCORD_MCP_SUPERVISOR_CREDENTIAL:-}
       DOCKER_HOST: ${DOCKER_HOST:-unix:///run/user/1000/docker.sock}
       DISCORD_MCP_NPM_REGISTRY: ${DISCORD_MCP_NPM_REGISTRY:-https://registry.npmjs.org/}
+      # The images the supervisor starts for workflow builds and runs. Pinned to the same version
+      # as the control plane: a runner from a different release may not speak its capability RPC.
+      DISCORD_MCP_BUILD_IMAGE: ghcr.io/mia-cx/discord-mcp/workflow-build:${DISCORD_MCP_VERSION:-latest}
+      DISCORD_MCP_RUNTIME_IMAGE: ghcr.io/mia-cx/discord-mcp/workflow-runner:${DISCORD_MCP_VERSION:-latest}
     volumes:
       - supervisor-socket:/run/discord-mcp
       # The rootless daemon's socket. This is the one bind mount in the deployment, it goes to the

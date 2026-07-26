@@ -191,13 +191,20 @@ export const loadServerConfig: Effect.Effect<ServerConfig, ConfigurationError> =
     }
 
     // Refuse to start in a configuration that is unsafe to expose, before anything binds.
-    yield* checkPublicExposure({
-      bindHost: http.host,
-      publicBaseUrl: http.publicBaseUrl,
-      allowedHosts: http.allowedHosts,
-      trustProxyIdentity: http.trustProxyIdentity,
-      trustedProxyCidrs: http.trustedProxyCidrs,
-    })
+    //
+    // Only for the HTTP transport: stdio binds nothing, so its HTTP settings describe a server
+    // that never exists. Checking them anyway would block a stdio deployment over a port it is
+    // not going to open — which is exactly what happens in a container image that sets a bind
+    // host for the HTTP case.
+    if (decoded.transport === 'http') {
+      yield* checkPublicExposure({
+        bindHost: http.host,
+        publicBaseUrl: http.publicBaseUrl,
+        allowedHosts: http.allowedHosts,
+        trustProxyIdentity: http.trustProxyIdentity,
+        trustedProxyCidrs: http.trustedProxyCidrs,
+      })
+    }
 
     // All three or none: a partial OIDC configuration would verify tokens against defaults
     // nobody chose, which is worse than not verifying at all.

@@ -35,7 +35,15 @@ const config = Config.all({
 })
 
 const main = Effect.gen(function* () {
-  const settings = yield* config
+  // A missing credential is the common first-run mistake, and the raw ConfigError says only
+  // "Invalid data <redacted>" — which names the variable but not what to do about it.
+  const settings = yield* Effect.catchTag(config, 'ConfigError', () =>
+    Effect.die(
+      new Error(
+        'DISCORD_MCP_SUPERVISOR_CREDENTIAL is not set. Generate one with `openssl rand -base64 32` and set the same value on both this supervisor and the control plane — it is what stops any other local process from driving the sandbox.',
+      ),
+    ),
+  )
 
   const layer = Supervisor.layer({
     build: settings.buildImage,

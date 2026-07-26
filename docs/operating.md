@@ -61,11 +61,26 @@ Gateway triggers that must not miss the first event after a restart.
 
 ## 3. Running it
 
+Images are published to GHCR by CI on every version tag, for `linux/amd64` and `linux/arm64`:
+
+| Image | What it is |
+|---|---|
+| `ghcr.io/mia-cx/discord-mcp/server` | The MCP control plane |
+| `ghcr.io/mia-cx/discord-mcp/supervisor` | The sandbox supervisor |
+| `ghcr.io/mia-cx/discord-mcp/workflow-runner` | Where a workflow's artifact runs |
+| `ghcr.io/mia-cx/discord-mcp/workflow-build` | Where a workflow is built |
+
+`latest` follows the newest version tag. `main` is the rolling build of the default branch — useful
+for tracking development, not for anything you depend on. Pin `DISCORD_MCP_VERSION` to an exact
+version for a deployment you want to stay put.
+
 ```sh
 cd docker
 cp .env.example .env   # then fill it in
 docker compose up -d
 ```
+
+To build locally instead, uncomment the `build:` blocks in `compose.yaml`.
 
 The server binds to `127.0.0.1:3000` and is **not** safe to expose directly — it holds a bot token
 and, on the HTTP transport, decides authorization from headers. Put a reverse proxy in front. The
