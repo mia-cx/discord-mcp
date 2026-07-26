@@ -8,8 +8,11 @@ See [PLAN.md](./PLAN.md) for the full design.
 
 ## Status
 
-Phases 0 and 1 of the [implementation sequence](./PLAN.md#implementation-sequence) are complete and
-green. The server runs over stdio and exposes one real Discord tool end to end.
+Phases 0–3 of the [implementation sequence](./PLAN.md#implementation-sequence) are complete and
+green, and phase 4 is partly done. The server runs over stdio with complete cataloged coverage of
+Discord's HTTP API, Components V2 messaging, and effective-permission diagnosis. Everything from
+the Gateway onward — persistence, authentication, interactions, workflows, and the sandbox — is not
+built yet.
 
 | Phase | State |
 |---|---|
