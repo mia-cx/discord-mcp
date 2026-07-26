@@ -16,6 +16,7 @@ import {
   PreviewTokens,
   permissionsExplain,
   RateGuard,
+  templateTools,
 } from '@discord-mcp/discord-api'
 import { blueprintTools } from '@discord-mcp/discord-blueprints'
 import { PersistenceLayer } from '@discord-mcp/persistence'
@@ -28,6 +29,7 @@ export const allTools: ReadonlyArray<AnyToolDef> = [
   permissionsExplain,
   ...messageTools,
   ...blueprintTools,
+  ...templateTools,
   ...apiTools,
 ]
 

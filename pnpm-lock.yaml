@@ -72,6 +72,9 @@ importers:
       '@discord-mcp/discord-presentations':
         specifier: workspace:*
         version: link:../discord-presentations
+      '@discord-mcp/persistence':
+        specifier: workspace:*
+        version: link:../persistence
       '@discordjs/rest':
         specifier: 2.6.3
         version: 2.6.3
