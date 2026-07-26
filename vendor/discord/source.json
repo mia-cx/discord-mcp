@@ -1,0 +1,25 @@
+{
+  "repository": "https://github.com/discord/discord-api-spec",
+  "file": "specs/openapi.json",
+  "commit": "74fda0fad044407ea280043a03ffc9bc64c4e49e",
+  "commitDate": "2026-07-18",
+  "fetchedAt": "2026-07-26T00:00:00Z",
+  "sha256": "8c1d0707ccdf8e380a86dfba04058820a66435c1b69d5ed82e04dd8c0520dd73",
+  "bytes": 1183025,
+  "apiVersion": "10",
+  "title": "Discord HTTP API (Preview)",
+  "counts": {
+    "paths": 150,
+    "operations": 242,
+    "componentSchemas": 539,
+    "pathsWithPathItemParameters": 130,
+    "operationsWithSummary": 0,
+    "operationsWithDescription": 17
+  },
+  "notes": [
+    "Facts about this pin, not constants. Re-derive after every spec:generate.",
+    "The upstream repository self-describes as a public preview with missing descriptions and known schema quirks.",
+    "openapi.json and openapi_preview.json were near-identical at this pin and both self-describe as (Preview). Observed, not acted on: no stable/preview split is built.",
+    "Zero operations carry a summary and only 17 carry a description, so catalog search cannot be summary-driven and depends on the maintained gloss."
+  ]
+}

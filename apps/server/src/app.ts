@@ -7,12 +7,19 @@ import {
   type RegistrySelection,
   type Scope,
 } from '@discord-mcp/core'
-import { DiscordRest, guildGet, RateGuard } from '@discord-mcp/discord-api'
+import {
+  apiTools,
+  DiscordRest,
+  guildGet,
+  OperationCatalog,
+  PreviewTokens,
+  RateGuard,
+} from '@discord-mcp/discord-api'
 import { Effect, Layer } from 'effect'
 import type { ServerConfig } from './config.ts'
 
 /** Every tool the process knows how to register, before toolset and gate selection. */
-export const allTools: ReadonlyArray<AnyToolDef> = [guildGet]
+export const allTools: ReadonlyArray<AnyToolDef> = [guildGet, ...apiTools]
 
 /**
  * Stdio has no transport-level authentication: the client is a process the user started, on their
@@ -59,4 +66,8 @@ export const selectionFor = (config: ServerConfig): RegistrySelection => ({
  * which is what makes the union of handler `R` types a compile-time proof of completeness.
  */
 export const AppLayer = (config: ServerConfig) =>
-  DiscordRest.layer(config.rest).pipe(Layer.provide(RateGuard.layer()))
+  Layer.mergeAll(
+    DiscordRest.layer(config.rest).pipe(Layer.provide(RateGuard.layer())),
+    OperationCatalog.layer,
+    PreviewTokens.layer,
+  )

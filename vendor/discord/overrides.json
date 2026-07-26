@@ -1,0 +1,38 @@
+{
+  "get_my_guild_member": {
+    "reason": "Discord's spec omits BotToken here and it is correct to do so: this operation reads the *calling user's* member object, which only exists under an OAuth2 bearer with guilds.members.read. Recorded explicitly so the dispatcher refuses it under a bot profile with an accurate message rather than a bare 401.",
+    "family": "member"
+  },
+  "get_current_user_application_entitlements": {
+    "reason": "OAuth2-only for the same reason: it reads entitlements belonging to the authorizing user, not the application.",
+    "family": "entitlement"
+  },
+  "get_application_user_role_connection": {
+    "reason": "Role connections are user-scoped metadata; a bot token has no user to scope to.",
+    "family": "user"
+  },
+  "update_application_user_role_connection": {
+    "reason": "Role connections are user-scoped metadata; a bot token has no user to scope to.",
+    "family": "user"
+  },
+  "delete_application_user_role_connection": {
+    "reason": "Role connections are user-scoped metadata; a bot token has no user to scope to.",
+    "family": "user"
+  },
+  "get_guild": {
+    "reason": "Covered by a curated tool with a bounded, model-friendly projection.",
+    "curatedTool": "discord_guild_get"
+  },
+  "prune_guild": {
+    "reason": "Discord's method (POST) understates this: it removes members in bulk and cannot be undone.",
+    "risk": "destructive"
+  },
+  "delete_guild": {
+    "reason": "Deletes an entire guild. Classified destructive rather than bot_admin so it can never be reached through the admin dispatcher without a preview token.",
+    "risk": "destructive"
+  },
+  "delete_user_guild": {
+    "reason": "Makes the bot leave a guild, which is irreversible without a fresh invite.",
+    "risk": "destructive"
+  }
+}

@@ -15,7 +15,10 @@
     "test": "vitest run",
     "test:integration": "vitest run --project integration",
     "test:e2e": "vitest run --project e2e",
-    "mcp:inspect": "npx @modelcontextprotocol/inspector node apps/server/dist/bin.js"
+    "mcp:inspect": "npx @modelcontextprotocol/inspector node apps/server/dist/bin.js",
+    "spec:generate": "tsx packages/discord-api/scripts/generate-catalog.ts",
+    "spec:check": "tsx packages/discord-api/scripts/check-catalog.ts",
+    "spec:drift": "tsx packages/discord-api/scripts/drift.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.1",

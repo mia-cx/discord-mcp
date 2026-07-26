@@ -13,6 +13,8 @@
     "@discord-mcp/core": "workspace:*",
     "@discordjs/rest": "2.6.3",
     "discord-api-types": "0.38.51",
-    "effect": "4.0.0-beta.101"
+    "effect": "4.0.0-beta.101",
+    "ajv": "8.17.1",
+    "ajv-formats": "3.0.1"
   }
 }
