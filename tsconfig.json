@@ -11,6 +11,9 @@
       "path": "./packages/discord-presentations"
     },
     {
+      "path": "./packages/discord-blueprints"
+    },
+    {
       "path": "./apps/server"
     }
   ]

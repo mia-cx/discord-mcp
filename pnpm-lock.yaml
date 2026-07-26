@@ -82,6 +82,18 @@ importers:
         specifier: 4.0.0-beta.101
         version: 4.0.0-beta.101
 
+  packages/discord-blueprints:
+    dependencies:
+      '@discord-mcp/core':
+        specifier: workspace:*
+        version: link:../core
+      '@discord-mcp/discord-api':
+        specifier: workspace:*
+        version: link:../discord-api
+      effect:
+        specifier: 4.0.0-beta.101
+        version: 4.0.0-beta.101
+
   packages/discord-presentations:
     dependencies:
       '@discord-mcp/core':
