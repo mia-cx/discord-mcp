@@ -12,7 +12,7 @@ import { PersistenceLayer } from '@discord-mcp/persistence'
 import { DEFAULT_GRANT, type WorkflowGrant } from '@discord-mcp/workflow-sdk'
 import { Effect, Layer, ManagedRuntime } from 'effect'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { CapabilityBroker, type CapabilityCredential } from '../src/broker.ts'
+import { CapabilityBroker } from '../src/broker.ts'
 import { CapabilityServer } from '../src/capability-server.ts'
 import { CapabilitySockets } from '../src/capability-socket.ts'
 

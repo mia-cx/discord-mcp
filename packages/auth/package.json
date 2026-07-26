@@ -12,8 +12,8 @@
   "dependencies": {
     "@discord-mcp/core": "workspace:*",
     "@discord-mcp/persistence": "workspace:*",
-    "argon2": "0.44.0",
+    "argon2": "0.45.1",
     "effect": "4.0.0-beta.101",
-    "jose": "6.1.0"
+    "jose": "6.2.4"
   }
 }

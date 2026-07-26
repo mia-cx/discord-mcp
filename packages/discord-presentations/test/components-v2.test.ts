@@ -300,8 +300,10 @@ describe('the encoder maps semantic tags to Discord wire types', () => {
     expect(children[0]?.type).toBe(COMPONENT_TYPE.textDisplay)
     expect(children[1]).toMatchObject({ type: COMPONENT_TYPE.separator, spacing: 2 })
     expect(children[2]?.type).toBe(COMPONENT_TYPE.section)
-    expect((children[2]?.accessory as Record<string, unknown>).style).toBe(1)
-    expect((children[3]?.components as Array<Record<string, unknown>>)[0]?.style).toBe(5)
+    expect((children[2]?.accessory as Record<string, unknown> | undefined)?.style).toBe(1)
+    expect(
+      (children[3]?.components as Array<Record<string, unknown>> | undefined)?.[0]?.style,
+    ).toBe(5)
   })
 
   it('gives an interactive button an opaque handle and a link button a url', async () => {
@@ -319,7 +321,7 @@ describe('the encoder maps semantic tags to Discord wire types', () => {
     if (exit._tag !== 'Success') return
 
     const row = (exit.value.payload.components as Array<Record<string, unknown>>)[0]
-    const [danger, link, premium] = row?.components as Array<Record<string, unknown>>
+    const [danger, link, premium] = (row?.components ?? []) as Array<Record<string, unknown>>
 
     expect(danger?.custom_id).toBe('handle:components.0.components.0')
     expect(danger?.url).toBeUndefined()

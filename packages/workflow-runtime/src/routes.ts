@@ -113,13 +113,14 @@ export const checkRoutePolicy = (input: {
     // Only forwarding data from a trusted proxy counts. An untrusted `X-Forwarded-For` is a
     // claim by the client about itself, and treating it as a source address makes the CIDR rule
     // trivially bypassable.
-    if (input.trustedSourceIp === undefined) {
+    const client = input.trustedSourceIp
+    if (client === undefined) {
       return refuse(
         403,
         'This route restricts source addresses, but no trusted forwarding data identified the client. Configure TRUST_PROXY_IDENTITY and TRUSTED_PROXY_CIDRS, or remove the source restriction.',
       )
     }
-    if (!grant.routes.allowedSourceCidrs.some((cidr) => withinCidr(input.trustedSourceIp!, cidr))) {
+    if (!grant.routes.allowedSourceCidrs.some((cidr) => withinCidr(client, cidr))) {
       return refuse(403, 'This source address is not permitted by the route policy.')
     }
   }

@@ -1,7 +1,12 @@
 packages:
   - 'apps/*'
   - 'packages/*'
+
+# Native builds we deliberately allow.
+#
+# `argon2` is load-bearing: personal access tokens are hashed with argon2id, and without its native
+# binding the auth package does not work at all. The other two are build tooling.
 allowBuilds:
-  argon2: set this to true or false
-  esbuild: set this to true or false
-  msgpackr-extract: set this to true or false
+  argon2: true
+  esbuild: true
+  msgpackr-extract: true

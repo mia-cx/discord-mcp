@@ -21,17 +21,10 @@
     "spec:drift": "tsx packages/discord-api/scripts/drift.ts"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.1",
+    "@biomejs/biome": "2.5.5",
     "@types/node": "24.10.1",
-    "tsx": "4.21.1",
+    "tsx": "4.23.1",
     "typescript": "7.0.2",
-    "vitest": "3.2.4"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "argon2",
-      "esbuild",
-      "msgpackr-extract"
-    ]
+    "vitest": "3.2.6"
   }
 }

@@ -8,8 +8,14 @@ each phase.
 - Phase 13 / `native/social-sdk-bridge` — Discord Social SDK native bridge.
 - Bot voice media: joining for playback, receiving audio, codecs, recording, FFmpeg.
   Voice/stage REST operations and member voice-state control stay in scope.
-- Horizontal scaling or multiple active control-plane replicas.
-- Hosted Cloudflare deployment.
+- Horizontal scaling or multiple active control-plane replicas. **Permanently out of scope**, not
+  deferred: the design assumes one active control plane, and the single-writer SQLite persistence
+  and in-process broker state both depend on that.
+- Any hosted or serverless deployment target, Cloudflare included. **Permanently out of scope.**
+  The only deployment surface is the Docker image set under `docker/`.
+  (Cloudflare appears throughout the code for an unrelated reason: Discord's API sits behind it and
+  bans a source IP after 10,000 401/403/429 responses in ten minutes. That is a rate-safety
+  constraint on the client, not a deployment target.)
 - A bundled identity provider or login UI.
 - Automatically starting a new model turn when a Discord event arrives.
 
@@ -35,9 +41,9 @@ tests." A phase is not done because its code exists; it is done when its accepta
 | 7 — Discord OAuth2 profiles | done |
 | 8 — Interactions and component routing | done |
 | 9 — Workflow persistence and SDK | done |
-| 10 — Sandbox supervisor and capability broker | in progress |
-| 11 — Dynamic routes and automation hardening | not started |
-| 12 — Release validation | not started |
+| 10 — Sandbox supervisor and capability broker | done |
+| 11 — Dynamic routes and automation hardening | done |
+| 12 — Release validation | in progress |
 
 Keep this table honest. "Not started" is information; a green row that is not actually green is
 worse than useless on a build this long.
