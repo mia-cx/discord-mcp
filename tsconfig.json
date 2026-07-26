@@ -8,6 +8,9 @@
       "path": "./packages/persistence"
     },
     {
+      "path": "./packages/auth"
+    },
+    {
       "path": "./packages/discord-gateway"
     },
     {
@@ -21,6 +24,9 @@
     },
     {
       "path": "./apps/server"
+    },
+    {
+      "path": "./apps/cli"
     }
   ]
 }

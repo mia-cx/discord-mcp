@@ -2,6 +2,7 @@ import type { Toolset } from '@discord-mcp/core'
 import { ConfigurationError } from '@discord-mcp/core'
 import { restConfig } from '@discord-mcp/discord-api'
 import { Config, Effect, SchemaIssue } from 'effect'
+import { checkPublicExposure } from './public-exposure.ts'
 
 const ALL_TOOLSETS: ReadonlyArray<Toolset> = ['operator', 'automation', 'admin', 'api']
 
@@ -39,6 +40,14 @@ const toConfigurationError = (cause: Config.ConfigError): ConfigurationError => 
 export interface ServerConfig {
   readonly transport: 'stdio' | 'http'
   readonly databasePath: string
+  readonly http: {
+    readonly host: string
+    readonly port: number
+    readonly publicBaseUrl: string | undefined
+    readonly allowedHosts: ReadonlyArray<string>
+    readonly trustProxyIdentity: boolean
+    readonly trustedProxyCidrs: ReadonlyArray<string>
+  }
   readonly gateway: {
     readonly mode: 'off' | 'lazy' | 'eager'
     readonly intents: ReadonlyArray<string>
@@ -53,6 +62,14 @@ const raw = Config.all({
   transport: Config.string('MCP_TRANSPORT').pipe(Config.withDefault('stdio')),
   databasePath: Config.string('DATABASE_PATH').pipe(Config.withDefault('./discord-mcp.sqlite')),
   // lazy by default: REST-only operation opens no WebSocket, so the common case pays nothing.
+  // Defaults to loopback. This process holds a bot token, so the safe bind is the one that is
+  // only reachable from the host.
+  httpHost: Config.string('MCP_HTTP_HOST').pipe(Config.withDefault('127.0.0.1')),
+  httpPort: Config.int('MCP_HTTP_PORT').pipe(Config.withDefault(3000)),
+  publicBaseUrl: Config.string('PUBLIC_BASE_URL').pipe(Config.withDefault('')),
+  allowedHosts: Config.string('ALLOWED_HOSTS').pipe(Config.withDefault('')),
+  trustProxyIdentity: Config.boolean('TRUST_PROXY_IDENTITY').pipe(Config.withDefault(false)),
+  trustedProxyCidrs: Config.string('TRUSTED_PROXY_CIDRS').pipe(Config.withDefault('')),
   gatewayMode: Config.string('DISCORD_MCP_GATEWAY_MODE').pipe(Config.withDefault('lazy')),
   // Privileged intents are absent by default; Discord refuses the connection outright for one
   // that is not enabled in the Developer Portal.
@@ -104,9 +121,34 @@ export const loadServerConfig: Effect.Effect<ServerConfig, ConfigurationError> =
       )
     }
 
+    const csv = (value: string) =>
+      value
+        .split(',')
+        .map((v) => v.trim())
+        .filter((v) => v.length > 0)
+
+    const http = {
+      host: decoded.httpHost,
+      port: decoded.httpPort,
+      publicBaseUrl: decoded.publicBaseUrl === '' ? undefined : decoded.publicBaseUrl,
+      allowedHosts: csv(decoded.allowedHosts),
+      trustProxyIdentity: decoded.trustProxyIdentity,
+      trustedProxyCidrs: csv(decoded.trustedProxyCidrs),
+    }
+
+    // Refuse to start in a configuration that is unsafe to expose, before anything binds.
+    yield* checkPublicExposure({
+      bindHost: http.host,
+      publicBaseUrl: http.publicBaseUrl,
+      allowedHosts: http.allowedHosts,
+      trustProxyIdentity: http.trustProxyIdentity,
+      trustedProxyCidrs: http.trustedProxyCidrs,
+    })
+
     return {
       transport: decoded.transport,
       databasePath: decoded.databasePath,
+      http,
       gateway: {
         mode: decoded.gatewayMode as 'off' | 'lazy' | 'eager',
         intents: decoded.gatewayIntents

@@ -13,6 +13,14 @@ export const testConfig: ServerConfig = {
   // `off` so the tool suite never opens a socket; gateway-gated tools stay unregistered, which is
   // exactly what a deployment with the Gateway disabled sees.
   gateway: { mode: 'off', intents: [], bufferSize: 10, maxWaitMs: 1000 },
+  http: {
+    host: '127.0.0.1',
+    port: 3000,
+    publicBaseUrl: undefined,
+    allowedHosts: [],
+    trustProxyIdentity: false,
+    trustedProxyCidrs: [],
+  },
   toolsets: new Set(['operator', 'automation', 'api']),
   rest: {
     token: Redacted.make('test-token'),

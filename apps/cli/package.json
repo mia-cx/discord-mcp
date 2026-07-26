@@ -1,0 +1,16 @@
+{
+  "name": "@discord-mcp/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "discord-mcp": "./dist/bin.js"
+  },
+  "dependencies": {
+    "@discord-mcp/auth": "workspace:*",
+    "@discord-mcp/core": "workspace:*",
+    "@discord-mcp/persistence": "workspace:*",
+    "@effect/platform-node": "4.0.0-beta.101",
+    "effect": "4.0.0-beta.101"
+  }
+}
