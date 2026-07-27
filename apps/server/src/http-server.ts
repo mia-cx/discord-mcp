@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { createServer, type IncomingMessage } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import {
@@ -211,7 +212,8 @@ interface HandlerDeps<R> {
     | undefined
   readonly mcp: McpHandler
   readonly runtime: ManagedRuntime.ManagedRuntime<R | PrincipalStore, never>
-  readonly setIdentity: (identity: ResolvedIdentity) => void
+  /** Runs the rest of the request inside this principal's async context. */
+  readonly runWithIdentity: <A>(identity: ResolvedIdentity, use: () => A) => A
 }
 
 interface McpHandler {
@@ -255,7 +257,8 @@ export interface WorkflowRouteRequest {
   readonly sourceIp: string | undefined
   readonly headers: Readonly<Record<string, string>>
   readonly contentLength: number | undefined
-  readonly rawBody: string
+  /** Read only once the dispatcher's size check has passed. */
+  readonly readBody: () => Promise<string>
   readonly trustedSourceIp: string | undefined
   readonly now: number
 }
@@ -303,20 +306,23 @@ const handleWorkflowRoute = async <R>(
     sourceIp: req.socket.remoteAddress,
     headers,
     contentLength: Number.isFinite(declared) ? declared : undefined,
-    rawBody: '',
+    // A thunk, so the dispatcher reads the body only after checking it against the route's limit.
+    // Passing a string here would mean buffering before the check and reading an unbounded body
+    // from an unauthenticated caller.
+    readBody: async () => (await readBody(req)).toString('utf8'),
     trustedSourceIp: clientAddress,
     now: Date.now(),
   }
 
-  const preflight = await deps.runtime.runPromiseExit(
+  const outcome = await deps.runtime.runPromiseExit(
     deps.handleWorkflowRoute(request) as Effect.Effect<WorkflowRouteResponse | undefined, never, R>,
   )
 
-  if (preflight._tag === 'Failure') return json(500, { error: 'internal_error' })
-  if (preflight.value === undefined) return json(404, { error: 'not_found' })
-  return new Response(preflight.value.body, {
-    status: preflight.value.status,
-    headers: { ...preflight.value.headers },
+  if (outcome._tag === 'Failure') return json(500, { error: 'internal_error' })
+  if (outcome.value === undefined) return json(404, { error: 'not_found' })
+  return new Response(outcome.value.body, {
+    status: outcome.value.status,
+    headers: { ...outcome.value.headers },
   })
 }
 
@@ -422,8 +428,7 @@ const makeRequestHandler =
       return unauthorized('Authentication failed.', deps.metadataUrl)
     }
 
-    deps.setIdentity(identity.value)
-    return deps.mcp.fetch(request)
+    return deps.runWithIdentity(identity.value, () => deps.mcp.fetch(request))
   }
 
 export const startHttpServer = <R>(options: {
@@ -459,17 +464,22 @@ export const startHttpServer = <R>(options: {
             ? undefined
             : verifyAccessToken(config.oidc, jwks)
 
-        // Identity is resolved per request and read by the MCP handler through this slot, because
-        // `registerTool`'s callback cannot take extra arguments.
-        let current: ResolvedIdentity | undefined
+        // Identity is resolved per request and read by the MCP handler through async context,
+        // because `registerTool`'s callback cannot take extra arguments.
+        //
+        // Deliberately not a mutable slot: two concurrent requests would overwrite each other
+        // between authentication and authorization, and a low-scope caller could then execute
+        // under a high-scope principal. `AsyncLocalStorage` scopes it to the request instead.
+        const identity = new AsyncLocalStorage<ResolvedIdentity>()
 
         const mcp = createMcpHandler(
           () =>
-            options.buildServer(() =>
-              current === undefined
+            options.buildServer(() => {
+              const resolved = identity.getStore()
+              return resolved === undefined
                 ? Effect.fail(new AuthenticationError({ message: 'No authenticated principal.' }))
-                : Effect.succeed(current.principal),
-            ),
+                : Effect.succeed(resolved.principal)
+            }),
           { onerror: () => undefined },
         )
 
@@ -485,9 +495,7 @@ export const startHttpServer = <R>(options: {
               : `${config.publicBaseUrl}/.well-known/oauth-protected-resource`,
           mcp,
           runtime: options.runtime,
-          setIdentity: (identity) => {
-            current = identity
-          },
+          runWithIdentity: (resolved, use) => identity.run(resolved, use),
         })
 
         const server = createServer((req, res) => {

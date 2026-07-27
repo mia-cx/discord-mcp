@@ -151,7 +151,7 @@ const request = (overrides: Partial<IncomingRouteRequest> = {}): IncomingRouteRe
   sourceIp: '203.0.113.7',
   headers: {},
   contentLength: 20,
-  rawBody: '{"ref":"main"}',
+  readBody: async () => '{"ref":"main"}',
   trustedSourceIp: '203.0.113.7',
   now: NOW,
   ...overrides,
@@ -223,7 +223,7 @@ describe('route authentication end to end', () => {
     const body = '{"ref":"main"}'
     const signed = await send(
       request({
-        rawBody: body,
+        readBody: async () => body,
         headers: {
           'x-signature': sign(NOW, body),
           'x-signature-timestamp': String(NOW),
@@ -232,7 +232,7 @@ describe('route authentication end to end', () => {
     )
     expect(signed?.status).toBe(200)
 
-    expect((await send(request({ rawBody: body })))?.status).toBe(401)
+    expect((await send(request({ readBody: async () => body })))?.status).toBe(401)
   })
 
   it('refuses a replayed signature', async () => {
@@ -241,10 +241,10 @@ describe('route authentication end to end', () => {
     const body = `{"id":"${randomUUID()}"}`
     const headers = { 'x-signature': sign(NOW, body), 'x-signature-timestamp': String(NOW) }
 
-    expect((await send(request({ rawBody: body, headers })))?.status).toBe(200)
+    expect((await send(request({ readBody: async () => body, headers })))?.status).toBe(200)
     // The signature is still cryptographically valid; only the replay record stops the second
     // delivery.
-    expect((await send(request({ rawBody: body, headers })))?.status).toBe(409)
+    expect((await send(request({ readBody: async () => body, headers })))?.status).toBe(409)
   })
 
   it('refuses an API key that does not match', async () => {
@@ -349,5 +349,44 @@ describe('route registration', () => {
     // A public URL that outlived the code behind it would answer with someone else's handler at
     // worst and a confusing 503 at best.
     expect(await send(request())).toBeUndefined()
+  })
+})
+
+describe('the request body', () => {
+  it('reaches HMAC verification and the handler, not an empty string', async () => {
+    await setUp({ grant: grantWith({}), auth: { type: 'hmacSha256', secretRef: 'deploy-hook' } })
+
+    const body = '{"ref":"main","sha":"abc123"}'
+    const signature = createHmac('sha256', SECRET).update(`${NOW}.${body}`).digest('hex')
+
+    // A body signed for real. If the transport substitutes an empty string anywhere between the
+    // socket and the verifier, this signature cannot match — which is exactly the bug this guards.
+    const response = await send(
+      request({
+        readBody: async () => body,
+        headers: { 'x-signature': signature, 'x-signature-timestamp': String(NOW) },
+      }),
+    )
+    expect(response?.status).toBe(200)
+  })
+
+  it('is not read until the size check has passed', async () => {
+    await setUp({ grant: grantWith({ maxBodyBytes: 10 }), auth: { type: 'none' } })
+
+    let read = false
+    const response = await send(
+      request({
+        contentLength: 5000,
+        readBody: async () => {
+          read = true
+          return 'x'.repeat(5000)
+        },
+      }),
+    )
+
+    expect(response?.status).toBe(413)
+    // Buffering before the check would make `maxBodyBytes` protect nothing: the memory is already
+    // spent by the time the limit is consulted.
+    expect(read).toBe(false)
   })
 })

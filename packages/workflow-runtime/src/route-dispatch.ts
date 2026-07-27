@@ -31,8 +31,14 @@ export interface WorkflowHttpResponse {
 }
 
 export interface IncomingRouteRequest extends RequestFacts {
-  /** The bytes exactly as received. Re-serialising before verifying breaks the signature. */
-  readonly rawBody: string
+  /**
+   * Reads the body, exactly as received. Re-serialising before verifying breaks the signature.
+   *
+   * A thunk rather than a string so the body is still read *after* the size check: the grant's
+   * `maxBodyBytes` is only knowable once the route is resolved, and buffering first would make the
+   * limit protect nothing.
+   */
+  readonly readBody: () => Promise<string>
   /** Present only when a trusted proxy identified the client. */
   readonly trustedSourceIp: string | undefined
   readonly now: number
@@ -103,7 +109,13 @@ export class WorkflowRoutes extends Context.Service<
 
             yield* countIfAvailable('route.request')
 
-            const authenticated = yield* authenticate(request, route, secrets, registry)
+            // Only now, after the host, source and size checks have all passed.
+            const rawBody = yield* Effect.orElseSucceed(
+              Effect.tryPromise(() => request.readBody()),
+              () => '',
+            )
+
+            const authenticated = yield* authenticate(request, rawBody, route, secrets, registry)
             if (!authenticated.allowed) {
               yield* countIfAvailable('route.auth_failed')
               return problem(authenticated.status, authenticated.reason)
@@ -117,6 +129,7 @@ export class WorkflowRoutes extends Context.Service<
               route,
               grant,
               request,
+              rawBody,
             }).pipe(Effect.provide(capability))
 
             const rejection = checkWorkflowResponse(outcome)
@@ -145,6 +158,7 @@ export class WorkflowRoutes extends Context.Service<
 
 const authenticate = (
   request: IncomingRouteRequest,
+  rawBody: string,
   route: { readonly id: string; readonly auth: Parameters<typeof authenticateRoute>[0]['auth'] },
   secrets: SecretStore['Service'],
   registry: RouteRegistry['Service'],
@@ -171,7 +185,7 @@ const authenticate = (
     return authenticateRoute({
       auth: route.auth,
       headers: request.headers,
-      rawBody: request.rawBody,
+      rawBody,
       now: request.now,
       secret: (name) =>
         name === reference && resolved !== undefined ? Redacted.value(resolved) : undefined,
@@ -198,6 +212,7 @@ const runHandler = (input: {
   }
   readonly grant: { readonly runtime: { readonly timeoutSeconds: number } }
   readonly request: IncomingRouteRequest
+  readonly rawBody: string
 }) =>
   Effect.gen(function* () {
     const executionId = yield* Effect.orElseSucceed(
@@ -226,7 +241,7 @@ const runHandler = (input: {
         method: input.request.method,
         path: input.request.path,
         headers: redactHeaders(input.request.headers),
-        request: input.request.rawBody,
+        request: input.rawBody,
       },
     })
 
@@ -243,7 +258,7 @@ const runHandler = (input: {
               method: input.request.method,
               path: input.request.path,
               headers: redactHeaders(input.request.headers),
-              request: input.request.rawBody,
+              request: input.rawBody,
             },
           },
           timeoutSeconds: input.grant.runtime.timeoutSeconds,
