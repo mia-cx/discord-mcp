@@ -1,0 +1,24 @@
+http:
+  middlewares:
+    discord-mcp-security:
+      headers:
+        contentTypeNosniff: true
+        frameDeny: true
+        referrerPolicy: no-referrer
+        stsSeconds: 31536000
+    discord-mcp-ratelimit:
+      rateLimit:
+        average: 30
+        burst: 60
+  routers:
+    discord-mcp:
+      rule: Host(`discord-mcp.example.com`)
+      entryPoints: [websecure]
+      service: discord-mcp
+      middlewares: [discord-mcp-security, discord-mcp-ratelimit]
+      tls: {}
+  services:
+    discord-mcp:
+      loadBalancer:
+        servers:
+          - url: http://server:3000

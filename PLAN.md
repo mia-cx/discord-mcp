@@ -35,10 +35,15 @@ authenticated Streamable HTTP MCP transports.
 Linux experimental, and is a game-user runtime rather than a Node bot library
 ([platform compatibility](https://docs.discord.com/developers/discord-social-sdk/core-concepts/platform-compatibility));
 provisional accounts additionally require Discord to configure your app. Bot voice media (joining for
-playback, receiving audio, codecs, recording, FFmpeg). Horizontal scaling or multiple active
-control-plane replicas. Hosted Cloudflare deployment. A bundled identity provider or login UI.
+playback, receiving audio, codecs, recording, FFmpeg). A bundled identity provider or login UI.
 Automatically starting a new model turn when a Discord event arrives — MCP clients do not consistently
 convert server notifications into agent turns, which is precisely why the workflow runtime exists.
+
+**Permanently out of scope.** Horizontal scaling and multiple active control-plane replicas ·
+Cloudflare Workers/Pages or any other serverless deployment target. These are not future-version
+roadmap items. The product deliberately targets a single Docker-hosted control plane plus isolated
+Docker workflow builders/runners so agents can install arbitrary npm dependencies and publish custom
+bot code without redeploying the control plane.
 
 **Prohibited.** User-token self-bots. Exposing raw Discord credentials to workflows. Letting workflows
 mount host directories or the Docker socket. Letting workflows replace built-in root HTTP routes.
@@ -301,7 +306,9 @@ import { Schema } from "effect"
 
 /** Effect Schema -> StandardSchemaWithJSON, exactly what MCP v2 registerTool consumes. */
 export const McpInput = <S extends Schema.Top>(s: S) =>
-  Schema.toStandardJSONSchemaV1(Schema.toStandardSchemaV1(s))
+  Schema.toStandardJSONSchemaV1(Schema.toStandardSchemaV1(s, {
+    parseOptions: { errors: "all", onExcessProperty: "error" },
+  }))
 
 /** Standalone JSON Schema for the catalog, elicitation, and MCP resources. */
 export const toJsonSchema = (s: Schema.Top) => {
@@ -401,9 +408,9 @@ exclusively;** Effect logs and defects go to stderr. Tool descriptions state req
 permissions, required local scopes, destructive behaviour, important mutual exclusions, and the next
 diagnostic tool to call after a likely failure.
 
-> **Phase-0 gate:** `ManagedRuntime.runPromiseExit(program, { signal })` — the options bag is
-> unverified in beta.101. Fallback: `Effect.interruptWhen` + `Effect.callback` on abort. The
-> abstraction absorbs either.
+> **Phase-0 gate result:** `ManagedRuntime.runPromiseExit(program, { signal })` is verified in
+> beta.101. The executable compatibility fixture proves that aborting the signal interrupts the
+> fiber, and the production MCP boundary uses that same API.
 
 ---
 
@@ -1315,7 +1322,8 @@ dependency failures, and runner crashes produce recoverable typed failures · en
 automatically after a control-plane restart.
 
 **12 — Release validation (2d).** Full unit, contract, sandbox, integration, Inspector, and test-guild
-suites. Credential-leak review. Dependency and container-image audit. **Re-pin MCP to v2 stable.**
+suites. Credential-leak review. Dependency and container-image audit. **Re-pin MCP to v2 stable if it
+exists; never replace the verified exact beta with an unpublished or guessed version.**
 Operator documentation: setup, Discord permissions and intents, OAuth, Traefik, backups, workflow
 authoring, incident recovery. Tag only after the complete acceptance suite passes.
 
@@ -1334,8 +1342,9 @@ than being squeezed:
   read-only mounts, PID/memory caps, and a revision-scoped capability credential correct is one thing;
   *proving* it against the hostile fixture suite is another, and every fixture that escapes is a
   redesign rather than a patch. Budget double.
-- **Phases 6 and 11 (auth and remote deployment, 6d combined)** involve Traefik, TLS, forwarded-header
-  trust, and OAuth metadata — integration work whose failures are environmental and slow to diagnose.
+- **Phases 6 and 11 (auth and remote MCP transport, 6d combined)** involve the single Docker
+  deployment's Traefik/TLS boundary, forwarded-header trust, and OAuth metadata — integration work
+  whose failures are environmental and slow to diagnose.
 - **Phase 0 (1d)** is a research spike against two pre-stable dependencies. If the TypeScript 7 ×
   Effect v4 gate fails, everything shifts.
 
@@ -1434,13 +1443,14 @@ install-from-tarball smoke test of the CLI.
    own guidance is that v3 remains the production recommendation; `effect/unstable/*` may break in
    minor releases even after v4 GA. Mitigation: exact pins as one version-aligned cohort, atomic
    renovation gated on the full suite, and no `unstable/*` type crossing a service boundary.
-2. **TypeScript 7 × Effect v4** — unverified. Phase-0 gate; if broken, pin the newest TypeScript that
-   Effect v4 supports and record the upstream issue. Falling back to Effect v3 is not an option.
+2. **TypeScript 7 × Effect v4** — verified with TypeScript 7.0.2 and Effect 4.0.0-beta.101 across the
+   typecheck, schema, SQL, RPC, cancellation, and sandbox build fixtures. Keep the cohort atomically
+   pinned; falling back to Effect v3 is not an option.
 3. **MCP v2 beta → stable, expected 2026-07-28.** Low risk given a stable API surface across
    beta.1→beta.5, but `@modelcontextprotocol/fastify` lags at beta.4 (we use Express, so it does not
    bite). Re-pin in phase 12.
-4. **`ManagedRuntime.runPromiseExit` signal option** — unverified; `Effect.interruptWhen` fallback
-   specified.
+4. **`ManagedRuntime.runPromiseExit` signal option** — verified by the phase-0 interruption fixture
+   and used by the production tool boundary. Keep the fixture as a dependency-upgrade gate.
 5. **Three Components V2 limits are undocumented** (message-wide 4000 characters, 10 top-level
    components, Container's 10 children). Implemented as warnings so an upstream change never blocks a
    valid send.
