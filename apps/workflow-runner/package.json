@@ -1,0 +1,9 @@
+{
+  "name": "@discord-mcp/workflow-runner",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@discord-mcp/workflow-sdk": "workspace:*"
+  }
+}

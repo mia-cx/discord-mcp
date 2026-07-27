@@ -1,0 +1,45 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.0/schema.json",
+  "files": {
+    "includes": [
+      "**",
+      "!**/dist",
+      "!**/coverage",
+      "!vendor/discord/openapi.json",
+      "!packages/discord-api/src/generated/*.json"
+    ]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100,
+    "lineEnding": "lf"
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single",
+      "trailingCommas": "all",
+      "semicolons": "asNeeded"
+    }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "suspicious": {
+        "noConsole": "error"
+      },
+      "security": {
+        "noDangerouslySetInnerHtml": "error"
+      }
+    }
+  },
+  "assist": {
+    "actions": {
+      "source": {
+        "organizeImports": "on"
+      }
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "workflow-safe-fixture",
+  "private": true,
+  "dependencies": {
+    "hostile-install-fixture": "file:/build/source/hostile-install"
+  }
+}

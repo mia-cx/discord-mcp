@@ -1,0 +1,43 @@
+{
+  "name": "discord-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.13.1",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "cli": "tsx apps/cli/src/main.ts",
+    "check": "biome check .",
+    "check:fix": "biome check --write .",
+    "clean": "tsc -b --clean",
+    "compose:check": "node scripts/compose-check.mjs",
+    "dev": "tsx apps/server/src/main.ts",
+    "image:audit": "node scripts/image-audit.mjs",
+    "mcp:inspect": "corepack pnpm build && node scripts/mcp-inspect.mjs",
+    "pack:smoke": "node scripts/pack-smoke.mjs",
+    "spec:check": "node scripts/generate-discord-catalog.mjs --check",
+    "spec:drift": "node scripts/check-discord-drift.mjs",
+    "spec:generate": "node scripts/generate-discord-catalog.mjs",
+    "spec:vendor": "node scripts/vendor-discord-spec.mjs",
+    "test": "tsc -b && vitest run",
+    "test:e2e": "node scripts/test-e2e.mjs",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:sandbox": "docker build -f docker/workflow-builder.Dockerfile -t discord-mcp/workflow-builder:local . && docker build -f docker/workflow-runner.Dockerfile -t discord-mcp/workflow-runner:local . && node scripts/sandbox-smoke.mjs",
+    "test:stdio": "corepack pnpm build && sh scripts/stdio-purity.sh",
+    "release:check": "corepack pnpm check && corepack pnpm typecheck && corepack pnpm spec:check && corepack pnpm test && corepack pnpm test:integration && corepack pnpm test:stdio && corepack pnpm compose:check && corepack pnpm test:sandbox && corepack pnpm build && corepack pnpm mcp:inspect && corepack pnpm pack:smoke && corepack pnpm audit --audit-level moderate",
+    "release:audit": "corepack pnpm release:check && corepack pnpm image:audit",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.0",
+    "@modelcontextprotocol/client": "2.0.0-beta.5",
+    "@modelcontextprotocol/server": "2.0.0-beta.5",
+    "@types/node": "24.10.1",
+    "tsx": "4.20.6",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10"
+  }
+}

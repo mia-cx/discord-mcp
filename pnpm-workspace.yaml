@@ -1,0 +1,15 @@
+packages:
+  - apps/*
+  - packages/*
+
+overrides:
+  '@hono/node-server': 2.0.10
+
+onlyBuiltDependencies:
+  - argon2
+  - esbuild
+  - msgpackr-extract
+allowBuilds:
+  argon2: true
+  esbuild: true
+  msgpackr-extract: true

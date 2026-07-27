@@ -1,0 +1,25 @@
+{
+  "name": "@discord-mcp/workflow-sdk",
+  "version": "1.0.0",
+  "private": false,
+  "description": "Capability-safe SDK for discord-mcp sandboxed workflows",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "dependencies": {
+    "@discord-mcp/discord-presentations": "workspace:*",
+    "effect": "4.0.0-beta.101"
+  }
+}

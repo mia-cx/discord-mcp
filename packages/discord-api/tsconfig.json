@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/.tsbuildinfo",
+    "resolveJsonModule": true
+  },
+  "references": [{ "path": "../core" }],
+  "include": ["src/**/*.ts", "src/generated/*.json"]
+}

@@ -1,0 +1,23 @@
+{
+  "name": "@discord-mcp/auth",
+  "version": "1.0.0",
+  "private": true,
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "dependencies": {
+    "@discord-mcp/persistence": "workspace:*",
+    "argon2": "0.45.1",
+    "effect": "4.0.0-beta.101",
+    "ipaddr.js": "2.4.0",
+    "jose": "6.2.4"
+  }
+}
