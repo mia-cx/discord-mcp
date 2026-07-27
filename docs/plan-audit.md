@@ -11,7 +11,7 @@ work. UI/login, Social SDK, and voice-media transport are deferred or excluded a
 | 2 — complete REST catalog | Vendored OpenAPI pin, deterministic generator, 242 operations/150 paths, overrides, search/describe/preview, four risk dispatchers, multipart/blob/OAuth/secret paths | Catalog/dispatcher/REST tests, `spec:check`, Inspector inventory |
 | 3 — presentations | Strict legacy/Components V2/modal schemas, validation/encoding, safe mentions, attachments, message/webhook semantic tools, opaque bindings | Presentation/template tests, server integration flow, raw-dispatch mention-policy tests |
 | 4 — templates and blueprints | Mutable drafts, immutable revisions, typed rendering, guild snapshots, permission explanations, logical bindings, plan/token/apply/resume journal | Versioned-store, planner, permission, apply, stale-token, and partial-resume tests |
-| 5 — operator surface and Gateway | 126-tool curated inventory, remaining Discord families, lazy/eager Gateway lifecycle, durable cursor/wait, presence and voice-state control | Full tools snapshot, catalog contracts, Gateway lifecycle/event tests |
+| 5 — operator surface and Gateway | 127-tool curated inventory, remaining Discord families, lazy/eager Gateway lifecycle, durable cursor/wait, presence and voice-state control | Full tools snapshot, catalog contracts, Gateway lifecycle/event tests |
 | 6 — persistence and auth | Seven migrations, encrypted secrets, PAT CLI, OIDC/JWKS, trusted proxy identity, protected-resource metadata, host/origin/proxy startup guards | Database, PAT/auth/OIDC/proxy/config/HTTP tests; OIDC principal persistence and disabled-principal tests |
 | 7 — OAuth profiles | PKCE authorization/callback, encrypted durable tokens, serialized refresh, profile dispatch, revoke-and-erase | OAuth state/refresh/restart/revoke/principal tests |
 | 8 — interactions | Raw-body Ed25519 verification, PING, command/component ownership, durable dedupe/inbox, deterministic defer/follow-up, safe failure completion | Signature, deadline, dedupe, revision, opaque-handle, autocomplete, immediate/slow-failure tests |
@@ -22,8 +22,8 @@ work. UI/login, Social SDK, and voice-media transport are deferred or excluded a
 
 ## Final executable gates
 
-- `corepack pnpm release:check`: passed — Biome, typecheck, deterministic catalog, 149 unit tests,
-  2 offline integration tests, stdio purity, Compose, hostile sandbox, build, 126-tool Inspector,
+- `corepack pnpm release:check`: passed — Biome, typecheck, deterministic catalog, 158 unit tests,
+  2 offline integration tests, stdio purity, Compose, hostile sandbox, build, 127-tool Inspector,
   12 evaluation scenarios, package tarball installation, and moderate dependency audit.
 - `corepack pnpm image:audit`: passed — server, supervisor, workflow builder, and workflow runner
   contain no fixable HIGH/CRITICAL findings under pinned Trivy 0.72.0.

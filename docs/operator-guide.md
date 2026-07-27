@@ -1,119 +1,198 @@
 # Operator guide
 
-## Discord application setup
+This is the day-two runbook after initial [Setup](setup.md) and [Deployment](deployment.md). It focuses
+on routine checks, controlled changes, and the order in which to diagnose failures.
 
-Create a bot application in the Discord Developer Portal. Store its bot token only as
-`DISCORD_TOKEN`; never put it in workflow source or an MCP argument. Set `DISCORD_PUBLIC_KEY` to
-enable `/discord/interactions`. `DISCORD_APPLICATION_ID` is optional—the server derives and caches it
-from `/applications/@me` when OAuth or command publication first needs it.
+## Daily health check
 
-Invite the bot with the `bot` and `applications.commands` scopes. Grant only the guild permissions
-your automation uses. Typical server setup needs View Channels, Manage Channels, Manage Roles, and
-View Audit Log; message automation needs Send Messages, Embed Links, Attach Files, Read Message
-History, Manage Messages, and Create Public/Private Threads as appropriate. Role reconciliation
-cannot manage a role at or above the bot's highest role and cannot grant permissions the bot lacks.
-`discord_permissions_explain` gives a local, ordered explanation after a 403.
+1. Confirm both long-lived containers are healthy and not restarting.
+2. Check `/health/ready`.
+3. Review structured error/warning logs since the previous check.
+4. Inspect `discord_metrics_snapshot` or `/metrics` for new failures, timeouts, queue growth, and
+   RateGuard trips.
+5. Verify Gateway status if any enabled feature needs it.
+6. Confirm backups completed and the most recent restore test is still current.
 
-Gateway intents are a comma-separated list of `GatewayIntentBits` names in
-`DISCORD_MCP_GATEWAY_INTENTS`. `Guilds` is the safe baseline. Enable the corresponding privileged
-switch in the Developer Portal before adding `GuildMembers`, `GuildPresences`, or `MessageContent`.
-MESSAGE_CONTENT also affects message fields returned by REST; the curated message-list tool reports
-the likely redaction signature.
-
-## Local stdio
+Commands:
 
 ```sh
-MCP_TRANSPORT=stdio DISCORD_TOKEN=... corepack pnpm dev
+docker compose ps
+docker compose logs --since=24h server supervisor
+curl --fail https://discord-mcp.example.com/health/ready
+corepack pnpm cli -- diagnostics
 ```
 
-Stdio is a trusted local-administrator transport. Configure the MCP client to start this command and
-do not wrap it with anything that writes banners to stdout.
+Health endpoints intentionally report only `{ "ok": true }`; they do not prove Discord permissions,
+Gateway connectivity, or sandbox execution. Use the feature-specific checks for those.
 
-## HTTP and authentication
+## Discord application changes
 
-Non-loopback HTTP requires an HTTPS `PUBLIC_BASE_URL`, `ALLOWED_HOSTS`, and explicit trusted proxy
-CIDRs. The server refuses unsafe public startup. `/mcp` accepts:
+The normal baseline is a bot installed with `bot` and `applications.commands`. Add only the guild
+permissions and Gateway intents used by current automations.
 
-- `dcmcp_` personal access tokens created by `discord-mcp auth token create`;
-- OIDC JWTs validated for issuer, audience, signature, time, and scopes;
-- mapped proxy identities only from `TRUSTED_PROXY_CIDRS`.
+Before changing bot roles:
 
-Create a principal and PAT:
+- run `discord_permissions_explain` for the planned operation;
+- remember that role hierarchy is independent of permission bits;
+- keep the bot's highest role above every role it must manage;
+- do not grant broad permissions to work around one target-specific overwrite;
+- enable privileged intents in the Developer Portal before configuring them locally.
+
+See [Discord permissions and intents](discord-permissions.md).
+
+## Principal and token rotation
+
+Create separate principals for people, automation clients, and trust levels. Rotate PATs without
+changing the principal:
 
 ```sh
-corepack pnpm cli -- principal create operator mcp:read,mcp:write,server:plan
-corepack pnpm cli -- auth token create PRINCIPAL_ID editor
+corepack pnpm cli -- auth token create PRINCIPAL_ID replacement 90
+# update the client and verify it can connect
+corepack pnpm cli -- auth token revoke OLD_TOKEN_ID
 ```
 
-The token is displayed once. Health endpoints disclose only `{ "ok": true }`. Metrics require
-`audit:read`. The protected-resource metadata lives at
-`/.well-known/oauth-protected-resource/mcp`.
-
-## Discord OAuth profiles
-
-Set `DISCORD_CLIENT_SECRET`, `DISCORD_MCP_MASTER_KEY`, and `PUBLIC_BASE_URL`. Call
-`discord_oauth_profile_authorize`, open the returned Discord authorization URL, and let Discord return
-to `/oauth/discord/callback`. State and PKCE expire after ten minutes. Access and refresh tokens are
-AES-256-GCM encrypted and never returned by profile list/get tools.
-
-The master key is 32 random bytes encoded as base64:
+Never paste the one-time token into logs, MCP prompts, or issue trackers. Review principal and PAT
+metadata periodically:
 
 ```sh
-openssl rand -base64 32
+corepack pnpm cli -- principal list
+corepack pnpm cli -- auth token list
 ```
 
-Back it up separately from SQLite. Losing it makes OAuth profiles and encrypted route/webhook secrets
-unrecoverable.
+OIDC and proxy identities should be disabled at their identity source and locally during an incident.
 
-## Compose and Traefik
+## Safe Discord changes
 
-Create `data` and `run`, owned by UID/GID 65532 (or set `DISCORD_MCP_RUNTIME_GID` consistently):
+Prefer curated `discord_*` tools because they apply local schema, scope, permission, hierarchy, and
+presentation checks. For an unfamiliar operation:
 
-```sh
-mkdir -p data run
-sudo chown -R 65532:65532 data run
-docker compose --profile images build
-docker compose up -d server supervisor
+1. search the pinned catalog;
+2. describe the exact operation;
+3. preview destructive/admin calls;
+4. review normalized arguments and targets;
+5. execute once with the returned token.
+
+Preview tokens are principal-bound, argument-bound, one-use, and expire after 60 seconds. Never write
+an automation loop that blindly regenerates a destructive preview after failure.
+
+For large guild configuration changes, use a blueprint plan/apply cycle. A stale snapshot must be
+replanned; a partial apply must be resumed from its durable execution record, not recreated by name.
+
+## Workflow operations
+
+Use the full lifecycle:
+
+```text
+create/update draft → validate → publish → grant → enable
 ```
 
-`ROOTLESS_DOCKER_SOCKET` must point at a rootless daemon. The supervisor refuses rootful Docker unless
-`DISCORD_MCP_ALLOW_ROOTFUL_DOCKER=true`, which is for isolated development only. Compose bind-mounts
-`$PWD/data` and `$PWD/run` at both control-plane paths and daemon-visible absolute paths so sandbox
-artifact and Unix-socket mounts resolve correctly.
+Before granting, review source, exact lockfile, requested versus approved capabilities, HTTP hosts,
+Discord targets, OAuth profile IDs, trigger filters, command publication, install scripts, timeout,
+concurrency, and queue limits.
 
-The labels in `compose.yaml` support a shared external Traefik network; alternatively route to the
-published host port. Adapt [traefik.example.yaml](./traefik.example.yaml), terminate TLS at Traefik,
-and set exact hosts and proxy CIDRs. Host, forwarded protocol, proxy source, and principal mapping are
-all validated; CORS is not authentication.
+When a workflow misbehaves:
 
-## Blobs, secrets, and maintenance
+1. disable it to reject new work;
+2. let active handlers drain to their deadline;
+3. inspect recent executions and logs;
+4. fix a new draft and publish a new immutable revision, or roll back;
+5. approve a revision-specific grant;
+6. re-enable and invoke a disposable trigger.
 
-Only the local CLI may read an explicit local path:
+Do not edit an artifact or durable execution row in place.
+
+## Blobs and named secrets
+
+Only the local CLI accepts a path:
 
 ```sh
 corepack pnpm cli -- blob put PRINCIPAL_ID ./announcement.pdf application/pdf
-printf %s "$WEBHOOK_SECRET" | corepack pnpm cli -- secret set PRINCIPAL_ID deploy-hook
 ```
 
-Remote clients stream a blob to `POST /blobs` with bearer authentication,
-`Content-Type`, and `X-Discord-Mcp-Filename`. MCP returns metadata, never blob bytes. Unreferenced blobs
-expire after seven days; blobs retained by published templates remain referenced.
+Remote clients upload bytes to the authenticated blob endpoint. Attachments refer to returned blob
+IDs, never host paths. Published templates retain references; unreferenced blobs are deleted after
+their grace period.
 
-SQLite runs in WAL mode. Back up the database with SQLite's online backup command (or stop the server
-and copy the database plus `-wal`/`-shm` consistently), the `data/blobs` and `data/artifacts`
-directories, and the master key kept in a separate secret store. Test restores periodically.
+Store workflow route credentials as encrypted named secrets:
 
-## Incident recovery
+```sh
+printf %s "$WEBHOOK_SECRET" |
+  corepack pnpm cli -- secret set PRINCIPAL_ID deploy-hook
+```
 
-1. Stop public traffic and the server; leave the database untouched.
-2. For credential exposure, rotate `DISCORD_TOKEN`, revoke affected PAT/OAuth profiles, and replace
-   named secrets. Audit entries contain metadata but redact credentials and message/blob bodies.
-3. If RateGuard trips, do not retry. Check the Discord credential or run
-   `discord_permissions_explain`; the default threshold is 25 invalid responses per family/profile in
-   ten minutes.
-4. For a partial blueprint, inspect its execution resource and call apply again with
-   `resumeExecutionId` after taking a fresh matching plan/preview. Completed actions are not repeated.
-5. For a failed workflow, disable it, inspect execution logs/diagnostics, publish a corrected revision
-   or roll back to an existing published and granted artifact, then re-enable.
-6. Restore SQLite, blobs, artifacts, and the same master key together. Run
-   `discord-mcp migrate` and `diagnostics` before admitting traffic.
+List shows metadata, not values. Rotate by setting the same name again, then verify dependent routes.
+
+## Database maintenance
+
+SQLite runs in WAL mode and is owned by the single server replica. Normal startup and CLI access apply
+migrations automatically.
+
+Rules:
+
+- use SQLite's online backup API for a running system;
+- do not copy only the main `.sqlite` file while writes continue;
+- do not run manual `VACUUM`, journal changes, or schema edits during production traffic;
+- stop the server before invasive inspection;
+- retain a pre-upgrade backup until the new release has passed live acceptance.
+
+Run `corepack pnpm cli -- diagnostics` after a restore or upgrade. See [Backups](backups.md).
+
+## Retention
+
+The server runs retention hourly. It removes expired OAuth states, interaction dedupe records, replay
+records, and preview tokens; keeps Gateway events for seven days; bounds workflow/component event
+history by age and per-owner count; clears old execution log text; prunes old causality records;
+retains audit entries for 90 days; and deletes unreferenced blobs after their deadline.
+
+Retention is not a backup. Export audit data before its window expires if policy requires longer
+storage.
+
+## Restart behavior
+
+Queues, workflow enablement, revision grants, events, executions, interactions, component bindings,
+and route registrations are persisted. On restart the control plane:
+
+- migrates the database;
+- recovers enabled revisions and registrations;
+- reconciles orphaned runner state through the supervisor;
+- resumes processing durable queued work;
+- reconnects the Gateway according to mode and demand.
+
+A process restart is therefore recoverable, but it is not a substitute for diagnosing repeated
+crashes or queue pressure.
+
+## RateGuard response
+
+Repeated invalid Discord responses can lead to an upstream IP ban. RateGuard trips well before that
+threshold, by default after 25 invalid responses for an auth-profile/operation family in ten minutes.
+
+When it trips:
+
+1. stop retrying;
+2. identify 401 versus 403 versus invalid arguments;
+3. confirm credential mode, guild permission, channel overwrite, role hierarchy, and target IDs;
+4. use `discord_permissions_explain`;
+5. rotate a compromised/invalid credential if necessary;
+6. restore traffic only after the cause is fixed.
+
+## Upgrade and rollback
+
+Use immutable GHCR tags for the server, supervisor, builder, and runner. Back up first, pull one
+coherent release, recreate the two long-lived services, and run readiness plus a disposable workflow.
+
+Application rollback is safe only if the old code supports the current database schema. If a release
+applied a non-backward-compatible migration, restore the matching pre-upgrade data set rather than
+starting an older image on the newer database.
+
+## When to invoke incident recovery
+
+Switch from routine operations to [Recovery](recovery.md) for:
+
+- suspected credential or master-key exposure;
+- evidence that runner code accessed a forbidden secret, socket, host path, or network;
+- database corruption or loss;
+- a partial blueprint with uncertain external state;
+- repeated supervisor preflight or cgroup failures;
+- interaction signature failures after proxy changes;
+- uncontrolled command/route publication;
+- a restore or clone accidentally started alongside production.
