@@ -11,6 +11,7 @@ import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/cli
 import { createMcpHandler, InMemoryTransport } from '@modelcontextprotocol/server'
 import { afterEach, describe, expect, it } from 'vitest'
 import { curatedCatalogOperations } from './curated-tools.js'
+import { MetricsRegistry } from './observability.js'
 import { createServer } from './server.js'
 import { buildToolServer } from './tool-surface.js'
 
@@ -374,6 +375,7 @@ describe('MCP tracer bullet', () => {
         'discord_presence_set',
         'discord_voice_state_set',
         'discord_gateway_status',
+        'discord_metrics_snapshot',
       ]),
     )
     expect(listed.tools.every(({ inputSchema }) => inputSchema.type === 'object')).toBe(true)
@@ -421,6 +423,37 @@ describe('MCP tracer bullet', () => {
       }
     }
     expect(listed.tools).toMatchSnapshot()
+  })
+
+  it('returns an authorized metrics snapshot through the real MCP protocol stack', async () => {
+    const metrics = new MetricsRegistry()
+    metrics.initialize(['discord_mcp_gateway_reconnects_total'])
+    metrics.gauge('discord_mcp_workflow_queue_depth', 3)
+    const server = buildToolServer({
+      rest: new DiscordRestClient({ request: async () => ({}) }),
+      metrics,
+      toolsets: new Set(['admin']),
+    })
+    const client = new Client({ name: 'metrics-client', version: '1.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await server.connect(serverTransport)
+    await client.connect(clientTransport)
+    close.push(
+      () => client.close(),
+      () => server.close(),
+    )
+
+    const result = await client.callTool({
+      name: 'discord_metrics_snapshot',
+      arguments: {},
+    })
+    expect(result.structuredContent).toMatchObject({
+      ok: true,
+      data: {
+        counters: [{ series: 'discord_mcp_gateway_reconnects_total', value: 0 }],
+        gauges: [{ series: 'discord_mcp_workflow_queue_depth', value: 3 }],
+      },
+    })
   })
 
   it('truncates oversized responses with an explicit continuation', async () => {

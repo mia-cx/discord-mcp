@@ -848,6 +848,7 @@ export const buildToolServer = (services: ToolSurfaceServices): McpServer => {
       ...(services.workflowRuntime === undefined
         ? {}
         : { workflowRuntime: services.workflowRuntime }),
+      ...(services.metrics === undefined ? {} : { metrics: services.metrics }),
     },
     principal,
     attempt,
@@ -1038,6 +1039,7 @@ const toolsetFor = (name: string): 'operator' | 'automation' | 'admin' | 'api' =
   if (
     name.startsWith('discord_oauth_') ||
     name.startsWith('discord_audit_') ||
+    name === 'discord_metrics_snapshot' ||
     name.startsWith('discord_application_') ||
     name === 'discord_server_blueprint_apply'
   ) {
@@ -1374,6 +1376,11 @@ const AuditRowSchema = Schema.Struct({
   created_at: Schema.String,
 })
 
+const MetricSampleSchema = Schema.Struct({
+  series: Schema.String,
+  value: Schema.Number,
+})
+
 const customOutputDataSchemas: Readonly<Record<string, Schema.Top>> = {
   discord_guild_get: DiscordGuildDataSchema,
   discord_api_search: Schema.Struct({
@@ -1425,6 +1432,10 @@ const customOutputDataSchemas: Readonly<Record<string, Schema.Top>> = {
   discord_server_blueprint_publish: PublishedDocumentSchema,
   discord_server_blueprint_archive: Schema.Struct({ archived: Schema.Literal(true) }),
   discord_audit_list: Schema.Array(AuditRowSchema),
+  discord_metrics_snapshot: Schema.Struct({
+    counters: Schema.Array(MetricSampleSchema),
+    gauges: Schema.Array(MetricSampleSchema),
+  }),
   discord_oauth_profile_authorize: Schema.Struct({
     profileId: Schema.String,
     url: Schema.String,
@@ -1518,6 +1529,7 @@ const localScopeForTool = (name: string): string => {
     discord_voice_state_set: 'bot:admin',
     discord_gateway_recent_events: 'mcp:read',
     discord_gateway_wait_for_event: 'mcp:read',
+    discord_metrics_snapshot: 'audit:read',
   }
   if (name === 'discord_api_preview') {
     return 'one of mcp:read, mcp:write, mcp:destructive, or bot:admin, selected by operation risk'
@@ -1610,6 +1622,7 @@ const localOnlyTool = (name: string): boolean =>
   name.startsWith('discord_workflow_') ||
   name.startsWith('discord_oauth_profile_') ||
   name.startsWith('discord_audit_') ||
+  name === 'discord_metrics_snapshot' ||
   name === 'discord_events_tail' ||
   name === 'discord_message_validate' ||
   name === 'discord_modal_validate' ||

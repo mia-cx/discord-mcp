@@ -23,6 +23,7 @@ import type {
 } from '@discord-mcp/workflow-runtime'
 import type { CallToolResult, McpServer } from '@modelcontextprotocol/server'
 import { Schema } from 'effect'
+import type { MetricsRegistry } from './observability.js'
 
 export interface ControlToolServices {
   readonly database?: Database
@@ -30,6 +31,7 @@ export interface ControlToolServices {
   readonly workflows?: WorkflowStore
   readonly oauthProfiles?: DiscordOAuthProfiles
   readonly workflowRuntime?: WorkflowRuntimeManager
+  readonly metrics?: MetricsRegistry
 }
 
 type Attempt = (run: () => unknown | Promise<unknown>) => Promise<CallToolResult>
@@ -420,6 +422,14 @@ export const registerControlTools = (
             bounded,
           )
     },
+  })
+  register(server, principal, attempt, {
+    name: 'discord_metrics_snapshot',
+    description: 'Read a deterministic snapshot of in-process counters and gauges.',
+    schema: EmptyInput,
+    scope: 'audit:read',
+    readOnly: true,
+    run: () => requireService(services.metrics, 'metrics registry').snapshot(),
   })
 
   registerWorkflowTools(server, services, principal, attempt)

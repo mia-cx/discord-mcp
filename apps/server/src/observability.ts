@@ -113,6 +113,17 @@ export class MetricsRegistry {
     for (const name of names) this.increment(name, {}, 0)
   }
 
+  snapshot(): MetricsSnapshot {
+    const samples = (entries: Iterable<readonly [string, number]>): ReadonlyArray<MetricSample> =>
+      [...entries]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([series, value]) => ({ series, value }))
+    return {
+      counters: samples(this.#counters),
+      gauges: samples(this.#gauges),
+    }
+  }
+
   render(): string {
     return [...this.#counters, ...this.#gauges]
       .sort(([left], [right]) => left.localeCompare(right))
@@ -120,6 +131,16 @@ export class MetricsRegistry {
       .join('\n')
       .concat('\n')
   }
+}
+
+export interface MetricSample {
+  readonly series: string
+  readonly value: number
+}
+
+export interface MetricsSnapshot {
+  readonly counters: ReadonlyArray<MetricSample>
+  readonly gauges: ReadonlyArray<MetricSample>
 }
 
 export class RetentionManager {

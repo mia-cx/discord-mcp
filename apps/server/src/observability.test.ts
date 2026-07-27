@@ -21,6 +21,20 @@ describe('control-plane observability', () => {
     expect(metrics.render()).toContain(
       'discord_mcp_workflow_duration_milliseconds_sum{outcome="succeeded"} 125',
     )
+    expect(metrics.snapshot()).toEqual({
+      counters: [
+        { series: 'discord_mcp_gateway_reconnects_total', value: 0 },
+        {
+          series: 'discord_mcp_workflow_duration_milliseconds_count{outcome="succeeded"}',
+          value: 1,
+        },
+        {
+          series: 'discord_mcp_workflow_duration_milliseconds_sum{outcome="succeeded"}',
+          value: 125,
+        },
+      ],
+      gauges: [],
+    })
   })
 
   it('records queryable audit events while recursively redacting credentials and content', () => {

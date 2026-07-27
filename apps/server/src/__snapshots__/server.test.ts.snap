@@ -315586,6 +315586,340 @@ exports[`MCP tracer bullet > publishes the complete unique curated inventory wit
       "openWorldHint": false,
       "readOnlyHint": true,
     },
+    "description": "Read a deterministic snapshot of in-process counters and gauges. Required local scope: audit:read. Required Discord guild permissions: none; this operation is local or Gateway-only.",
+    "execution": undefined,
+    "icons": undefined,
+    "inputSchema": {
+      "additionalProperties": false,
+      "type": "object",
+    },
+    "name": "discord_metrics_snapshot",
+    "outputSchema": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "anyOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "counters": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "series": {
+                            "type": "string",
+                          },
+                          "value": {
+                            "anyOf": [
+                              {
+                                "type": "number",
+                              },
+                              {
+                                "enum": [
+                                  "NaN",
+                                ],
+                                "type": "string",
+                              },
+                              {
+                                "enum": [
+                                  "Infinity",
+                                ],
+                                "type": "string",
+                              },
+                              {
+                                "enum": [
+                                  "-Infinity",
+                                ],
+                                "type": "string",
+                              },
+                            ],
+                          },
+                        },
+                        "required": [
+                          "series",
+                          "value",
+                        ],
+                        "type": "object",
+                      },
+                      "type": "array",
+                    },
+                    "gauges": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "series": {
+                            "type": "string",
+                          },
+                          "value": {
+                            "anyOf": [
+                              {
+                                "type": "number",
+                              },
+                              {
+                                "enum": [
+                                  "NaN",
+                                ],
+                                "type": "string",
+                              },
+                              {
+                                "enum": [
+                                  "Infinity",
+                                ],
+                                "type": "string",
+                              },
+                              {
+                                "enum": [
+                                  "-Infinity",
+                                ],
+                                "type": "string",
+                              },
+                            ],
+                          },
+                        },
+                        "required": [
+                          "series",
+                          "value",
+                        ],
+                        "type": "object",
+                      },
+                      "type": "array",
+                    },
+                  },
+                  "required": [
+                    "counters",
+                    "gauges",
+                  ],
+                  "type": "object",
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "continuation": {
+                      "type": "string",
+                    },
+                    "preview": {
+                      "type": "string",
+                    },
+                    "truncated": {
+                      "enum": [
+                        true,
+                      ],
+                      "type": "boolean",
+                    },
+                  },
+                  "required": [
+                    "truncated",
+                    "preview",
+                    "continuation",
+                  ],
+                  "type": "object",
+                },
+              ],
+            },
+            "meta": {
+              "additionalProperties": false,
+              "properties": {
+                "authProfile": {
+                  "type": "string",
+                },
+                "operationId": {
+                  "type": "string",
+                },
+                "pagination": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "hasMore": {
+                      "type": "boolean",
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                    },
+                  },
+                  "required": [
+                    "hasMore",
+                  ],
+                  "type": "object",
+                },
+                "requestId": {
+                  "type": "string",
+                },
+                "truncated": {
+                  "type": "boolean",
+                },
+              },
+              "required": [
+                "requestId",
+                "authProfile",
+                "truncated",
+              ],
+              "type": "object",
+            },
+            "ok": {
+              "enum": [
+                true,
+              ],
+              "type": "boolean",
+            },
+            "warnings": {
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+          },
+          "required": [
+            "ok",
+            "data",
+            "meta",
+            "warnings",
+          ],
+          "type": "object",
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "error": {
+              "additionalProperties": false,
+              "properties": {
+                "code": {
+                  "type": "string",
+                },
+                "discordCode": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                    },
+                    {
+                      "enum": [
+                        "NaN",
+                      ],
+                      "type": "string",
+                    },
+                    {
+                      "enum": [
+                        "Infinity",
+                      ],
+                      "type": "string",
+                    },
+                    {
+                      "enum": [
+                        "-Infinity",
+                      ],
+                      "type": "string",
+                    },
+                  ],
+                },
+                "httpStatus": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                    },
+                    {
+                      "enum": [
+                        "NaN",
+                      ],
+                      "type": "string",
+                    },
+                    {
+                      "enum": [
+                        "Infinity",
+                      ],
+                      "type": "string",
+                    },
+                    {
+                      "enum": [
+                        "-Infinity",
+                      ],
+                      "type": "string",
+                    },
+                  ],
+                },
+                "message": {
+                  "type": "string",
+                },
+                "missingPermission": {
+                  "type": "string",
+                },
+                "retryAfterMs": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                    },
+                    {
+                      "enum": [
+                        "NaN",
+                      ],
+                      "type": "string",
+                    },
+                    {
+                      "enum": [
+                        "Infinity",
+                      ],
+                      "type": "string",
+                    },
+                    {
+                      "enum": [
+                        "-Infinity",
+                      ],
+                      "type": "string",
+                    },
+                  ],
+                },
+                "retryable": {
+                  "type": "boolean",
+                },
+                "suggestion": {
+                  "type": "string",
+                },
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+              ],
+              "type": "object",
+            },
+            "meta": {
+              "additionalProperties": false,
+              "properties": {
+                "requestId": {
+                  "type": "string",
+                },
+              },
+              "required": [
+                "requestId",
+              ],
+              "type": "object",
+            },
+            "ok": {
+              "enum": [
+                false,
+              ],
+              "type": "boolean",
+            },
+          },
+          "required": [
+            "ok",
+            "error",
+            "meta",
+          ],
+          "type": "object",
+        },
+      ],
+      "type": "object",
+    },
+    "title": "Metrics Snapshot",
+  },
+  {
+    "_meta": undefined,
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+    },
     "description": "List workflows and their enabled revisions. Required local scope: workflow:read. Required Discord guild permissions: none; this operation is local or Gateway-only.",
     "execution": undefined,
     "icons": undefined,
