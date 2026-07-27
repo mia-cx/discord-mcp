@@ -1,0 +1,26 @@
+{
+  "name": "@discord-mcp/discord-presentations",
+  "version": "1.0.0",
+  "private": false,
+  "description": "Canonical Discord Components V2, modal, attachment, and template presentation types",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "dependencies": {
+    "discord-api-types": "0.38.51",
+    "effect": "4.0.0-beta.101"
+  }
+}

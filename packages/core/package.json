@@ -1,0 +1,17 @@
+{
+  "name": "@discord-mcp/core",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "development": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@standard-schema/spec": "1.1.0",
+    "effect": "4.0.0-beta.101"
+  }
+}

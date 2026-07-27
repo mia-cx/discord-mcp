@@ -1,0 +1,9 @@
+{
+  "name": "@discord-mcp/sandbox-supervisor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "effect": "4.0.0-beta.101"
+  }
+}

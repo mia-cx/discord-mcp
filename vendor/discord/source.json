@@ -1,0 +1,9 @@
+{
+  "repository": "discord/discord-api-spec",
+  "commit": "74fda0fad044407ea280043a03ffc9bc64c4e49e",
+  "path": "specs/openapi.json",
+  "fetchedAt": "2026-07-26T12:59:40.102Z",
+  "sha256": "8c1d0707ccdf8e380a86dfba04058820a66435c1b69d5ed82e04dd8c0520dd73",
+  "pathCount": 150,
+  "operationCount": 242
+}

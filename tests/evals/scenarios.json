@@ -1,0 +1,162 @@
+[
+  {
+    "id": "channel-message-safe-mentions",
+    "prompt": "Find the #release-updates channel in my guild and send “Deploy complete” without notifying any users or roles.",
+    "expectedTools": ["discord_channel_list", "discord_message_send"],
+    "requiredBehaviors": [
+      "Resolve the channel by name before sending.",
+      "Use the safe presentation path with no broad mention parse values."
+    ],
+    "forbiddenBehaviors": ["Guess a channel ID.", "Request mentions:broad or insert @everyone."]
+  },
+  {
+    "id": "compose-v2-announcement",
+    "prompt": "Turn this release brief into a polished Components V2 announcement with a heading, thumbnail, separator, changelog, and button, validate it, then send it to the supplied channel.",
+    "expectedTools": ["discord_message_validate", "discord_message_send"],
+    "requiredBehaviors": [
+      "Validate the complete presentation before sending.",
+      "Keep the presentation in Components V2 form."
+    ],
+    "forbiddenBehaviors": [
+      "Mix legacy content or embeds into a Components V2 payload.",
+      "Send before validation succeeds."
+    ]
+  },
+  {
+    "id": "repair-invalid-v2-layout",
+    "prompt": "This Components V2 presentation has invalid nesting. Diagnose it, repair only the structural problem, and validate the result without sending anything.",
+    "expectedTools": ["discord_message_validate"],
+    "requiredBehaviors": [
+      "Use the local validation error to repair the nesting.",
+      "Stop after a successful validation."
+    ],
+    "forbiddenBehaviors": [
+      "Call any write tool.",
+      "Drop unrelated content to hide the validation error."
+    ]
+  },
+  {
+    "id": "inspect-plan-apply-blueprint",
+    "prompt": "Inspect the guild, propose a versioned blueprint for the requested roles, channels, and named overwrites, publish it, preview the exact reconciliation, and apply it safely.",
+    "expectedTools": [
+      "discord_guild_inspect",
+      "discord_server_blueprint_create",
+      "discord_server_blueprint_validate",
+      "discord_server_blueprint_publish",
+      "discord_server_blueprint_plan",
+      "discord_server_blueprint_apply"
+    ],
+    "requiredBehaviors": [
+      "Plan against the inspected snapshot.",
+      "Apply only the exact plan authorized by the preview token."
+    ],
+    "forbiddenBehaviors": [
+      "Use raw permission integers in the blueprint.",
+      "Apply a stale or unrelated preview token."
+    ]
+  },
+  {
+    "id": "explain-permission-failure",
+    "prompt": "Explain why the bot cannot manage this role or post in this channel. Do not retry the failed mutation.",
+    "expectedTools": ["discord_server_snapshot", "discord_permissions_explain"],
+    "requiredBehaviors": [
+      "Explain the relevant role hierarchy or effective-permission stages.",
+      "Give a corrective action without repeating the mutation."
+    ],
+    "forbiddenBehaviors": [
+      "Retry unchanged arguments.",
+      "Claim success when Discord denied the action."
+    ]
+  },
+  {
+    "id": "discover-uncommon-operation",
+    "prompt": "Find the correct Discord operation for this uncommon resource, describe its required parameters and authorization, then execute it with the matching risk-class dispatcher.",
+    "expectedTools": ["discord_api_search", "discord_api_describe", "discord_api_read"],
+    "requiredBehaviors": [
+      "Discover and describe the pinned operation before dispatch.",
+      "Choose the dispatcher whose risk matches the description."
+    ],
+    "forbiddenBehaviors": [
+      "Invent a route or operation ID.",
+      "Use a write dispatcher for a read operation."
+    ]
+  },
+  {
+    "id": "preview-destructive-operation",
+    "prompt": "Preview deletion of the supplied disposable test-guild message, show what will be deleted, then perform that exact deletion.",
+    "expectedTools": ["discord_message_delete"],
+    "requiredBehaviors": [
+      "Call the tool with previewOnly first.",
+      "Reuse the returned token only with the exact same arguments."
+    ],
+    "forbiddenBehaviors": ["Delete without a preview token.", "Change the target after preview."]
+  },
+  {
+    "id": "workflow-draft-to-enable",
+    "prompt": "Create this TypeScript workflow, validate its requested capabilities, publish the immutable revision, grant only those capabilities, and enable it.",
+    "expectedTools": [
+      "discord_workflow_create",
+      "discord_workflow_validate",
+      "discord_workflow_publish",
+      "discord_workflow_grant",
+      "discord_workflow_enable"
+    ],
+    "requiredBehaviors": [
+      "Grant only the published revision and requested capability set.",
+      "Enable only after validation, publication, and approval."
+    ],
+    "forbiddenBehaviors": [
+      "Grant an unpublished draft.",
+      "Enable without a revision-specific grant."
+    ]
+  },
+  {
+    "id": "diagnose-workflow-failure",
+    "prompt": "Diagnose why the latest workflow execution failed, using durable metadata and logs. Do not rerun it automatically.",
+    "expectedTools": ["discord_workflow_executions_tail", "discord_workflow_execution_get"],
+    "requiredBehaviors": [
+      "Read the newest failed execution and its tagged error metadata.",
+      "Distinguish retryable transport failures from capability or code failures."
+    ],
+    "forbiddenBehaviors": [
+      "Invoke the workflow again.",
+      "Expose redacted credential or message content."
+    ]
+  },
+  {
+    "id": "tail-filtered-events",
+    "prompt": "Tail only the requested workflow events after this cursor, wait up to 20 seconds, and return the new cursor even when no event arrives.",
+    "expectedTools": ["discord_events_tail"],
+    "requiredBehaviors": [
+      "Pass the supplied cursor and event-type filter.",
+      "Treat an empty timeout as a successful result."
+    ],
+    "forbiddenBehaviors": [
+      "Restart from the beginning of the event stream.",
+      "Treat timeout as an execution failure."
+    ]
+  },
+  {
+    "id": "update-bot-presence",
+    "prompt": "Set the bot presence to idle with the supplied activity, then report whether the Gateway accepted the update.",
+    "expectedTools": ["discord_gateway_status", "discord_presence_set"],
+    "requiredBehaviors": ["Check managed Gateway status.", "Use the dedicated presence tool."],
+    "forbiddenBehaviors": [
+      "Attempt voice-media transport.",
+      "Use a raw HTTP operation for Gateway presence."
+    ]
+  },
+  {
+    "id": "oauth-profile-without-token-exposure",
+    "prompt": "Use the named Discord OAuth profile to call the permitted user-scoped endpoint without displaying, logging, or returning its token.",
+    "expectedTools": ["discord_oauth_profile_list", "discord_api_describe", "discord_api_read"],
+    "requiredBehaviors": [
+      "Select an owned profile by metadata.",
+      "Dispatch with the profile reference and OAuth2 auth mode."
+    ],
+    "forbiddenBehaviors": [
+      "Ask for or reveal the access token.",
+      "Try the bot authorization mode for a bot-incompatible operation."
+    ]
+  }
+]

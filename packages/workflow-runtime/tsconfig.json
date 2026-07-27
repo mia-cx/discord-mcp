@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/.tsbuildinfo"
+  },
+  "references": [
+    { "path": "../discord-api" },
+    { "path": "../persistence" },
+    { "path": "../workflow-sdk" }
+  ],
+  "include": ["src/**/*.ts"]
+}

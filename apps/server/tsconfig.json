@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/.tsbuildinfo"
+  },
+  "references": [
+    { "path": "../../packages/auth" },
+    { "path": "../../packages/core" },
+    { "path": "../../packages/discord-api" },
+    { "path": "../../packages/discord-blueprints" },
+    { "path": "../../packages/discord-gateway" },
+    { "path": "../../packages/discord-presentations" },
+    { "path": "../../packages/persistence" },
+    { "path": "../../packages/workflow-runtime" }
+  ],
+  "include": ["src/**/*.ts"]
+}

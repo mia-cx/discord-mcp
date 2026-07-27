@@ -1,0 +1,19 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/core" },
+    { "path": "./packages/discord-api" },
+    { "path": "./packages/discord-presentations" },
+    { "path": "./packages/discord-blueprints" },
+    { "path": "./packages/persistence" },
+    { "path": "./packages/auth" },
+    { "path": "./packages/discord-gateway" },
+    { "path": "./packages/workflow-sdk" },
+    { "path": "./packages/workflow-runtime" },
+    { "path": "./packages/test-support" },
+    { "path": "./apps/server" },
+    { "path": "./apps/sandbox-supervisor" },
+    { "path": "./apps/cli" },
+    { "path": "./apps/workflow-runner" }
+  ]
+}

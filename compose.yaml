@@ -1,0 +1,84 @@
+name: discord-mcp
+
+services:
+  server:
+    image: discord-mcp/server:local
+    build:
+      context: .
+      dockerfile: docker/server.Dockerfile
+    restart: unless-stopped
+    read_only: true
+    init: true
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    env_file: [.env]
+    environment:
+      MCP_TRANSPORT: http
+      MCP_HTTP_HOST: 0.0.0.0
+      MCP_HTTP_PORT: "3000"
+      DATABASE_PATH: /var/lib/discord-mcp/discord-mcp.sqlite
+      DISCORD_MCP_BLOB_DIR: /var/lib/discord-mcp/blobs
+      DISCORD_MCP_ARTIFACT_DIR: /var/lib/discord-mcp/artifacts
+      SUPERVISOR_SOCKET: /run/discord-mcp/supervisor.sock
+    volumes:
+      - ${PWD}/data:/var/lib/discord-mcp
+      - ${PWD}/run:/run/discord-mcp
+    group_add:
+      - "${DISCORD_MCP_RUNTIME_GID:-65532}"
+    tmpfs:
+      - /tmp:size=32m,noexec,nosuid
+    expose: ["3000"]
+    ports:
+      - "${HOST_BIND_ADDRESS:-127.0.0.1}:${HOST_PORT:-3000}:3000"
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.discord-mcp.rule: Host(`${DISCORD_MCP_HOST}`)
+      traefik.http.routers.discord-mcp.entrypoints: websecure
+      traefik.http.routers.discord-mcp.tls: "true"
+      traefik.http.services.discord-mcp.loadbalancer.server.port: "3000"
+
+  supervisor:
+    image: discord-mcp/supervisor:local
+    build:
+      context: .
+      dockerfile: docker/supervisor.Dockerfile
+    restart: unless-stopped
+    init: true
+    read_only: true
+    user: "65532:65532"
+    group_add:
+      - "${ROOTLESS_DOCKER_GID:?set the group id owning ROOTLESS_DOCKER_SOCKET}"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      DISCORD_MCP_SUPERVISOR_CREDENTIAL: ${DISCORD_MCP_SUPERVISOR_CREDENTIAL:?set a random 32+ character supervisor credential}
+      DISCORD_MCP_SUPERVISOR_SOCKET: /run/discord-mcp/supervisor.sock
+      DISCORD_MCP_ARTIFACT_DIR: ${PWD}/data/artifacts
+      DISCORD_MCP_CAPABILITY_SOCKET: ${PWD}/run/capability.sock
+      DISCORD_MCP_RUNNER_SOCKET_ROOT: ${PWD}/run/runners
+      DISCORD_MCP_RUNTIME_GID: ${DISCORD_MCP_RUNTIME_GID:-65532}
+      DISCORD_MCP_BUILDER_IMAGE: ${DISCORD_MCP_BUILDER_IMAGE:-discord-mcp/workflow-builder:local}
+      DISCORD_MCP_RUNNER_IMAGE: ${DISCORD_MCP_RUNNER_IMAGE:-discord-mcp/workflow-runner:local}
+    volumes:
+      - ${PWD}/data:/var/lib/discord-mcp
+      - ${PWD}/run:/run/discord-mcp
+      - ${PWD}/data:${PWD}/data
+      - ${PWD}/run:${PWD}/run
+      - ${ROOTLESS_DOCKER_SOCKET}:/var/run/docker.sock
+    tmpfs:
+      - /tmp:size=32m,noexec,nosuid
+
+  workflow-builder:
+    profiles: [images]
+    image: discord-mcp/workflow-builder:local
+    build:
+      context: .
+      dockerfile: docker/workflow-builder.Dockerfile
+
+  workflow-runner:
+    profiles: [images]
+    image: discord-mcp/workflow-runner:local
+    build:
+      context: .
+      dockerfile: docker/workflow-runner.Dockerfile
