@@ -45,6 +45,16 @@ services:
 
   supervisor:
     image: ghcr.io/mia-cx/discord-mcp/supervisor:${DISCORD_MCP_VERSION:-latest}
+    # Root *inside the user namespace*, which under rootless Docker is the unprivileged host user
+    # that owns the daemon socket — not host root. This is what makes the socket reachable at all:
+    # the host owner maps to container uid 0, so the image's own 10002 cannot see it.
+    #
+    # The group is still the shared one, so the supervisor's socket stays reachable by the control
+    # plane and by nothing else.
+    #
+    # Under ROOTFUL Docker this would be genuine root with the real Docker socket. Do not run
+    # rootful; see docs/operating.md.
+    user: "0:10000"
     # build:
     #   context: ..
     #   dockerfile: docker/supervisor.Dockerfile

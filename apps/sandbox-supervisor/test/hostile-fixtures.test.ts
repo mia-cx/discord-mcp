@@ -10,7 +10,7 @@ import {
   runtimeSpec,
   validateRuntimeSpec,
 } from '../src/container-spec.ts'
-import { runArgs } from '../src/docker.ts'
+import { checkDaemon, runArgs } from '../src/docker.ts'
 
 /**
  * The hostile-fixture suite, container half.
@@ -204,5 +204,42 @@ describe('container naming', () => {
     // is nothing for a caller to inject.
     expect(containerName(ref, 'run')).toBe('discord-mcp-run-wf-hostile-3')
     expect(containerName(ref, 'build')).toBe('discord-mcp-build-wf-hostile-3')
+  })
+})
+
+describe('the daemon preflight', () => {
+  const capable = {
+    rootless: true,
+    cgroupVersion: '2',
+    memoryLimit: true,
+    pidsLimit: true,
+    warnings: [],
+  }
+
+  it('accepts a rootless daemon with cgroup v2 delegation', () => {
+    expect(checkDaemon(capable)).toEqual([])
+  })
+
+  it('refuses a daemon that cannot enforce a PID limit', () => {
+    // Rootless Docker without cgroup delegation *accepts* --pids-limit and then ignores it. Every
+    // spec-level assertion still passes, and the first fork bomb takes the host with it.
+    const problems = checkDaemon({ ...capable, pidsLimit: false })
+    expect(problems).toHaveLength(1)
+    expect(problems[0]).toContain('fork-bomb')
+    expect(problems[0]).toContain('cgroup')
+  })
+
+  it('refuses a daemon that cannot enforce a memory limit', () => {
+    expect(checkDaemon({ ...capable, memoryLimit: false })[0]).toContain('memory limit')
+  })
+
+  it('refuses cgroup v1, where the limits are unreliable under rootless', () => {
+    expect(checkDaemon({ ...capable, cgroupVersion: '1' })[0]).toContain('cgroup v1')
+  })
+
+  it('does not refuse a rootful daemon, because that is the operator’s call', () => {
+    // Rootful is a materially weaker posture and the supervisor says so loudly at startup, but
+    // refusing outright would break every deployment that has accepted the trade knowingly.
+    expect(checkDaemon({ ...capable, rootless: false })).toEqual([])
   })
 })

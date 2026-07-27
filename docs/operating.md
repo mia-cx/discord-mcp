@@ -159,9 +159,35 @@ DISCORD_MCP_SUPERVISOR_CREDENTIAL=$(openssl rand -base64 32)   # same value on b
 DOCKER_HOST=unix:///run/user/1000/docker.sock                  # rootless
 ```
 
-**Rootless Docker is assumed.** Under rootful Docker a container escape is a host root escape, and
-none of the sandbox's restrictions compensate for that. If you are not running rootless, leave
-workflows off.
+**Rootless Docker is assumed.** Under rootless, a container's root maps to your own unprivileged
+user, so an escape lands there rather than at host root — that is the property everything else is
+built on. Under rootful, an escape *is* host root and none of the sandbox's restrictions compensate.
+If you are not running rootless, leave workflows off.
+
+Set it up with:
+
+```sh
+sudo apt install -y uidmap        # newuidmap/newgidmap; the only thing usually missing
+dockerd-rootless-setuptool.sh install
+export DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock
+```
+
+The supervisor checks the daemon at startup and **refuses to run** if it cannot enforce a PID or
+memory limit. This matters more than it sounds: rootless Docker without cgroup v2 delegation accepts
+`--pids-limit` and `--memory` and then silently ignores them, so the container reports as
+constrained right up until a fork bomb takes the host. Confirm with:
+
+```sh
+docker info --format '{{.CgroupVersion}} {{.MemoryLimit}} {{.PidsLimit}}'   # want: 2 true true
+```
+
+If those are `false`, enable delegation:
+<https://rootlesscontaine.rs/getting-started/common/cgroup2/>.
+
+The supervisor container runs as `user: "0:10000"` — root *inside the user namespace*, which under
+rootless is your unprivileged host user and is what makes the daemon socket reachable at all. The
+group is the shared one, so its control socket stays reachable by the control plane and nothing
+else.
 
 The lifecycle is five deliberate steps:
 

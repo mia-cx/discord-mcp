@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { NodeRuntime } from '@effect/platform-node'
 import { Config, Effect, Layer, Redacted } from 'effect'
-import { DockerEngine } from './docker.ts'
+import { checkDaemon, DockerEngine } from './docker.ts'
 import { serve } from './server.ts'
 import { Supervisor } from './supervisor.ts'
 
@@ -50,15 +50,46 @@ const main = Effect.gen(function* () {
     runtime: settings.runtimeImage,
     registry: settings.registry,
   }).pipe(
-    Layer.provide(
+    // `provideMerge`, not `provide`: the startup preflight queries the daemon directly, so the
+    // engine has to stay visible rather than being consumed by the supervisor.
+    Layer.provideMerge(
       DockerEngine.layer({ binary: settings.dockerBinary, dockerHost: settings.dockerHost }),
     ),
   )
 
   yield* Effect.provide(
-    serve({
-      socketPath: settings.socketPath,
-      serviceCredential: Redacted.value(settings.serviceCredential),
+    Effect.gen(function* () {
+      // Before anything can be asked to run: a daemon that cannot enforce the limits the sandbox
+      // promises is worse than no sandbox, because everything downstream still reports as
+      // constrained.
+      const docker = yield* DockerEngine
+      const capabilities = yield* docker.capabilities
+      const problems = checkDaemon(capabilities)
+
+      if (problems.length > 0) {
+        yield* Effect.die(
+          new Error(
+            `The Docker daemon at ${settings.dockerHost} cannot enforce the sandbox's guarantees:\n${problems.map((p) => `  - ${p}`).join('\n')}`,
+          ),
+        )
+      }
+
+      if (!capabilities.rootless) {
+        // Not fatal — an operator may have decided this is acceptable — but it invalidates the
+        // isolation the rest of the design is built on, so it is said plainly and every time.
+        yield* Effect.logWarning(
+          'This is a ROOTFUL Docker daemon. A container escape is then a host root compromise, and none of the sandbox restrictions compensate for that. Run rootless, or accept that workflows are only as isolated as the kernel.',
+        )
+      }
+
+      yield* Effect.log(
+        `Supervisor ready on ${settings.socketPath} (${capabilities.rootless ? 'rootless' : 'rootful'}, cgroup v${capabilities.cgroupVersion})`,
+      )
+
+      return yield* serve({
+        socketPath: settings.socketPath,
+        serviceCredential: Redacted.value(settings.serviceCredential),
+      })
     }),
     layer,
   )

@@ -68,6 +68,44 @@ export interface DockerResult {
   readonly stderr: string
 }
 
+export interface DaemonCapabilities {
+  readonly rootless: boolean
+  readonly cgroupVersion: string
+  readonly memoryLimit: boolean
+  readonly pidsLimit: boolean
+  readonly warnings: ReadonlyArray<string>
+}
+
+/**
+ * Whether this daemon can enforce what the sandbox promises.
+ *
+ * A rootless daemon without cgroup delegation accepts `--pids-limit` and `--memory` and then
+ * ignores them. That is the worst possible outcome: the container looks constrained, the hostile
+ * fixtures still pass because they assert on the derived spec, and the first fork bomb takes the
+ * host down. Refusing to start is the only honest answer.
+ */
+export const checkDaemon = (capabilities: DaemonCapabilities): ReadonlyArray<string> => {
+  const problems: string[] = []
+
+  if (!capabilities.pidsLimit) {
+    problems.push(
+      'This daemon cannot enforce a PID limit, so a workflow could fork-bomb the host. On rootless Docker this usually means cgroup v2 delegation is not configured — see https://rootlesscontaine.rs/getting-started/common/cgroup2/',
+    )
+  }
+  if (!capabilities.memoryLimit) {
+    problems.push(
+      'This daemon cannot enforce a memory limit, so a workflow could exhaust the host. Same cause and same fix as the PID limit.',
+    )
+  }
+  if (capabilities.cgroupVersion !== '2') {
+    problems.push(
+      `This daemon reports cgroup v${capabilities.cgroupVersion}. The sandbox's resource limits assume v2; on v1 they are unreliable under rootless.`,
+    )
+  }
+
+  return problems
+}
+
 export class DockerEngine extends Context.Service<
   DockerEngine,
   {
@@ -101,6 +139,8 @@ export class DockerEngine extends Context.Service<
     ) => Effect.Effect<void, SandboxError>
     /** Read one file back out of a container, running or stopped. */
     readonly readFile: (name: string, path: string) => Effect.Effect<string, SandboxError>
+    /** What the daemon can actually enforce. Checked once, at startup. */
+    readonly capabilities: Effect.Effect<DaemonCapabilities, SandboxError>
   }
 >()('sandbox-supervisor/DockerEngine') {
   static readonly layer = (options: {
@@ -234,6 +274,36 @@ export class DockerEngine extends Context.Service<
               ),
             { discard: true },
           ),
+
+        capabilities: Effect.flatMap(exec(['info', '--format', '{{json .}}']), ({ stdout }) =>
+          Effect.try({
+            try: () => {
+              const info = JSON.parse(stdout) as {
+                SecurityOptions?: ReadonlyArray<string>
+                CgroupVersion?: string
+                MemoryLimit?: boolean
+                PidsLimit?: boolean
+                Warnings?: ReadonlyArray<string>
+              }
+
+              return {
+                // Docker reports rootless as a security option rather than a top-level field.
+                rootless: (info.SecurityOptions ?? []).some((option) =>
+                  option.includes('rootless'),
+                ),
+                cgroupVersion: info.CgroupVersion ?? 'unknown',
+                memoryLimit: info.MemoryLimit === true,
+                pidsLimit: info.PidsLimit === true,
+                warnings: info.Warnings ?? [],
+              }
+            },
+            catch: () =>
+              new SandboxError({
+                message: 'Could not read the Docker daemon’s capabilities.',
+                phase: 'engine',
+              }),
+          }),
+        ),
 
         readFile: (name, path) =>
           Effect.acquireUseRelease(
