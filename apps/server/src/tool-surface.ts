@@ -1165,8 +1165,8 @@ export const buildToolServer = (services: ToolSurfaceServices): McpServer => {
   )
 
   const GuildInspectInput = Schema.Struct({ guildId: Schema.String })
-  const inspectGuild = async (guildId: string, signal: AbortSignal) => {
-    requireScopes(principal, ['mcp:read'])
+  const inspectGuild = async (guildId: string, signal: AbortSignal, requireReadScope = true) => {
+    if (requireReadScope) requireScopes(principal, ['mcp:read'])
     if (!/^\d{17,21}$/.test(guildId)) throw new Error('guildId must be a Discord snowflake')
     const [guild, channels, roles, user] = await runEffect(
       Effect.all(
@@ -1391,7 +1391,6 @@ export const buildToolServer = (services: ToolSurfaceServices): McpServer => {
   const BlueprintApplyInput = Schema.Struct({
     blueprintId: Schema.String,
     revision: Schema.optionalKey(Schema.Int),
-    snapshot: GuildSnapshotSchema,
     deleteManaged: Schema.optionalKey(Schema.Boolean),
     previewToken: Schema.String,
     resumeExecutionId: Schema.optionalKey(Schema.String),
@@ -1409,9 +1408,10 @@ export const buildToolServer = (services: ToolSurfaceServices): McpServer => {
         openWorldHint: true,
       },
     },
-    async (args) =>
+    async (args, context) =>
       attempt(async () => {
         requireScopes(principal, ['server:apply'])
+        if (args.deleteManaged === true) requireScopes(principal, ['mcp:destructive'])
         if (!services.database) throw new Error('blueprint persistence is unavailable')
         const published = new VersionedDocumentStore(
           services.database,
@@ -1422,9 +1422,12 @@ export const buildToolServer = (services: ToolSurfaceServices): McpServer => {
           id: args.blueprintId,
           revision: published.revision,
         }
+        const currentSnapshot = (
+          await inspectGuild(blueprint.guildId, context.mcpReq.signal, false)
+        ).snapshot
         const plan = planBlueprint({
           blueprint,
-          snapshot: args.snapshot as GuildSnapshot,
+          snapshot: currentSnapshot,
           bindings: loadBlueprintBindings(services.database, args.blueprintId),
           ...(args.deleteManaged === undefined ? {} : { deleteManaged: args.deleteManaged }),
         })
