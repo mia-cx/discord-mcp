@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process'
 import { chmod, chown, rm } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { promisify } from 'node:util'
+import { daemonPreflightProblems, parseDaemonCapabilities } from './daemon-preflight.js'
 import { type ContainerEngine, SandboxSupervisor } from './supervisor.js'
 
 const execute = promisify(execFile)
@@ -49,17 +50,24 @@ if (!credential) {
   process.exitCode = 1
 } else {
   const socketPath = process.env.DISCORD_MCP_SUPERVISOR_SOCKET ?? '/run/discord-mcp/supervisor.sock'
-  if (process.env.DISCORD_MCP_ALLOW_ROOTFUL_DOCKER !== 'true') {
-    const information = await execute('docker', ['info', '--format', '{{json .SecurityOptions}}'], {
-      timeout: 10_000,
-      maxBuffer: 16 * 1024,
-    })
-    if (!information.stdout.toLowerCase().includes('rootless')) {
-      throw new Error(
-        'sandbox supervisor requires rootless Docker; set DISCORD_MCP_ALLOW_ROOTFUL_DOCKER=true only for isolated development',
-      )
-    }
+  const information = await execute('docker', ['info', '--format', '{{json .}}'], {
+    timeout: 10_000,
+    maxBuffer: 64 * 1024,
+  })
+  const capabilities = parseDaemonCapabilities(information.stdout)
+  const preflightProblems = daemonPreflightProblems(capabilities, {
+    allowRootful: process.env.DISCORD_MCP_ALLOW_ROOTFUL_DOCKER === 'true',
+  })
+  if (preflightProblems.length > 0) {
+    throw new Error(`sandbox Docker preflight failed:\n- ${preflightProblems.join('\n- ')}`)
   }
+  log('info', 'sandbox.daemon.ready', {
+    rootless: capabilities.rootless,
+    cgroupVersion: capabilities.cgroupVersion,
+    memoryLimit: capabilities.memoryLimit,
+    pidsLimit: capabilities.pidsLimit,
+    warnings: capabilities.warnings,
+  })
   const supervisor = new SandboxSupervisor(
     engine,
     credential,
