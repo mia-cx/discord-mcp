@@ -25,9 +25,15 @@ Read `README.md` for tools, configuration, and current limitations.
 
 ## Deployment boundary
 
-The live Docker stack on Athena still runs the divergent `t3code/implement-plan` worktree.
-It currently authenticates clients with application PATs or configured OIDC. Publishing this
-relay to `main` does not upgrade that running stack or migrate its stored data.
+Mia approved native k3s deployment and public cutover. Namespace `discord-mcp` now has a
+single-replica, read-only Deployment pinned to the OAuth relay image from `b7e419b` and a
+`discord-mcp-relay` Service. The generated encryption key lives in `discord-mcp-crypto`.
+The setup wizard supplies the existing Discord application's ID and secret to `discord-mcp-oauth`.
+Its only Discord redirect is `https://discord.mia.cx/auth/discord/callback`.
+
+Public routing remains on Athena's divergent `t3code/implement-plan` Docker stack until the
+OAuth Secret is saved and the native pod is Ready. Then switch the IngressRoute backend to
+`discord-mcp-relay`. The old PAT/OIDC stack and its data remain intact during this cutover.
 
 `https://discord.mia.cx/mcp` reaches the live instance through public k3s Traefik. Mia manages DNS.
 Routing manifests, Athena relay units, and recovery instructions live in
