@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./relay": {
+      "types": "./dist/relay.d.ts",
+      "default": "./dist/relay.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"

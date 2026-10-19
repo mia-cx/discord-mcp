@@ -8,6 +8,7 @@
     "node": ">=24"
   },
   "scripts": {
+    "start": "node apps/server/dist/bin.js",
     "check": "biome check . && pnpm typecheck && pnpm test",
     "check:fix": "biome check --write .",
     "typecheck": "tsc --build && node scripts/copy-assets.mjs",

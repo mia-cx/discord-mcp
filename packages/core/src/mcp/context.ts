@@ -5,7 +5,7 @@ import type { Scope } from '../ids.ts'
 /** Who is calling. Resolved by authorization *before* the request context exists. */
 export interface Principal {
   readonly id: string
-  readonly kind: 'stdio-local' | 'oauth' | 'pat' | 'trusted-proxy'
+  readonly kind: 'discord-bot' | 'stdio-local' | 'oauth' | 'pat' | 'trusted-proxy'
   readonly scopes: ReadonlySet<Scope>
 }
 

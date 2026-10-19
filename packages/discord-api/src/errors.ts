@@ -60,7 +60,7 @@ export const mapDiscordError = (
       issues,
       ...(parsed.code === undefined ? {} : { discordCode: parsed.code }),
       suggestion:
-        'Do not retry; the bot token is invalid, expired, or was reset. Tell the user to check DISCORD_TOKEN against the Developer Portal.',
+        'Do not retry; the bot token is invalid, expired, or was reset. Check the supplied bot token, or DISCORD_TOKEN for stdio, against the Developer Portal.',
     })
   }
 
