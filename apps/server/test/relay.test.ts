@@ -2,13 +2,8 @@ import { DiscordApiError, DiscordRateLimitError } from '@discord-mcp/core'
 import { DiscordRest } from '@discord-mcp/discord-api'
 import { Effect, Layer, Redacted } from 'effect'
 import { describe, expect, it } from 'vitest'
-import { createRelay, type RelayConfig } from '../src/relay.ts'
-
-const config: RelayConfig = {
-  allowedHosts: ['relay.test'],
-  allowedOrigins: ['https://relay.test'],
-  rest: { timeoutMs: 1000, retries: 0, maxRateLimitWaitMs: 1000 },
-}
+import { createRelay } from '../src/relay.ts'
+import { config, discordOAuth, login } from './login-fixture.ts'
 
 const envelope = {
   'io.modelcontextprotocol/protocolVersion': '2026-07-28',
@@ -16,6 +11,7 @@ const envelope = {
 }
 
 const request = (
+  accessToken: string,
   token?: string,
   method = 'tools/call',
   args: Record<string, unknown> = {},
@@ -29,7 +25,8 @@ const request = (
       'mcp-method': method,
       'mcp-protocol-version': '2026-07-28',
       ...(method === 'tools/call' ? { 'mcp-name': tool } : {}),
-      ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
+      authorization: `Bearer ${accessToken}`,
+      ...(token === undefined ? {} : { 'x-discord-bot-token': token }),
     },
     body: JSON.stringify({
       jsonrpc: '2.0',
@@ -54,23 +51,29 @@ const request = (
 describe('the stateless Discord relay', () => {
   it('validates every request and keeps concurrent callers on their own bot', async () => {
     const calls: Array<{ token: string; route: string }> = []
-    const relay = createRelay(config, (credential) => {
-      const token = Redacted.value(credential)
-      const bot = token === 'private-token-a' ? 'bot-a' : 'bot-b'
-      return Layer.succeed(DiscordRest)({
-        raw: undefined as never,
-        request: (call) =>
-          Effect.promise(async () => {
-            calls.push({ token, route: call.route })
-            await Promise.resolve()
-            return call.route === '/users/@me' ? { id: bot, bot: true } : { actor: bot }
-          }),
-      })
-    })
+    const oauth = discordOAuth()
+    const relay = createRelay(
+      config,
+      (credential) => {
+        const token = Redacted.value(credential)
+        const bot = token === 'private-token-a' ? 'bot-a' : 'bot-b'
+        return Layer.succeed(DiscordRest)({
+          raw: undefined as never,
+          request: (call) =>
+            Effect.promise(async () => {
+              calls.push({ token, route: call.route })
+              await Promise.resolve()
+              return call.route === '/users/@me' ? { id: bot, bot: true } : { actor: bot }
+            }),
+        })
+      },
+      oauth.fetch,
+    )
+    const { tokens } = await login(relay)
 
     const responses = await Promise.all(
       ['private-token-a', 'private-token-b', 'private-token-a'].map((token) =>
-        relay.fetch(request(token)),
+        relay.fetch(request(tokens.access_token, token)),
       ),
     )
     const results = await Promise.all(responses.map((response) => response.json()))
@@ -92,6 +95,7 @@ describe('the stateless Discord relay', () => {
 
     const mutation = await relay.fetch(
       request(
+        tokens.access_token,
         'private-token-b',
         'tools/call',
         {
@@ -111,52 +115,66 @@ describe('the stateless Discord relay', () => {
   it('rejects missing, invalid, non-bot, and subsequently revoked credentials', async () => {
     let revoked = false
     let calls = 0
-    const relay = createRelay(config, (credential) =>
-      Layer.succeed(DiscordRest)({
-        raw: undefined as never,
-        request: () => {
-          calls++
-          const token = Redacted.value(credential)
-          if (token === 'invalid' || revoked) {
-            return Effect.fail(
-              new DiscordApiError({
-                message: 'Unauthorized',
-                httpStatus: 401,
-                retryable: false,
-                issues: [],
-              }),
-            )
-          }
-          return Effect.succeed({ id: 'bot-a', bot: token !== 'user-token' })
-        },
-      }),
+    const oauth = discordOAuth()
+    const relay = createRelay(
+      config,
+      (credential) =>
+        Layer.succeed(DiscordRest)({
+          raw: undefined as never,
+          request: () => {
+            calls++
+            const token = Redacted.value(credential)
+            if (token === 'invalid' || revoked) {
+              return Effect.fail(
+                new DiscordApiError({
+                  message: 'Unauthorized',
+                  httpStatus: 401,
+                  retryable: false,
+                  issues: [],
+                }),
+              )
+            }
+            return Effect.succeed({ id: 'bot-a', bot: token !== 'user-token' })
+          },
+        }),
+      oauth.fetch,
     )
+    const { tokens } = await login(relay)
 
-    expect((await relay.fetch(request())).status).toBe(401)
+    expect((await relay.fetch(request(tokens.access_token))).status).toBe(403)
     expect(calls).toBe(0)
-    expect((await relay.fetch(request('invalid'))).status).toBe(401)
-    expect((await relay.fetch(request('user-token'))).status).toBe(401)
-    expect((await relay.fetch(request('valid', 'tools/list'))).status).toBe(200)
+    expect((await relay.fetch(request(tokens.access_token, 'invalid'))).status).toBe(403)
+    expect((await relay.fetch(request(tokens.access_token, 'user-token'))).status).toBe(403)
+    expect((await relay.fetch(request(tokens.access_token, 'valid', 'tools/list'))).status).toBe(
+      200,
+    )
     revoked = true
-    expect((await relay.fetch(request('valid', 'tools/list'))).status).toBe(401)
+    expect((await relay.fetch(request(tokens.access_token, 'valid', 'tools/list'))).status).toBe(
+      403,
+    )
     expect(calls).toBe(4)
   })
 
   it('reports a Discord rate limit without treating the token as invalid', async () => {
-    const relay = createRelay(config, () =>
-      Layer.succeed(DiscordRest)({
-        raw: undefined as never,
-        request: () =>
-          Effect.fail(
-            new DiscordRateLimitError({
-              message: 'Rate limited',
-              retryAfterMs: 2000,
-              global: true,
-            }),
-          ),
-      }),
+    const oauth = discordOAuth()
+    const relay = createRelay(
+      config,
+      () =>
+        Layer.succeed(DiscordRest)({
+          raw: undefined as never,
+          request: () =>
+            Effect.fail(
+              new DiscordRateLimitError({
+                message: 'Rate limited',
+                retryAfterMs: 2000,
+                global: true,
+              }),
+            ),
+        }),
+      oauth.fetch,
     )
-    const response = await relay.fetch(request('valid'))
+    const { tokens } = await login(relay)
+    const response = await relay.fetch(request(tokens.access_token, 'valid'))
     expect(response.status).toBe(429)
     expect(response.headers.get('retry-after')).toBe('2')
     expect(response.headers.get('www-authenticate')).toBeNull()
