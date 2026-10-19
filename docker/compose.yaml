@@ -11,6 +11,9 @@ services:
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?set the public HTTPS URL}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS:?set the public hostname}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+      DISCORD_OAUTH_CLIENT_ID: ${DISCORD_OAUTH_CLIENT_ID:?set the relay Discord application ID}
+      DISCORD_OAUTH_CLIENT_SECRET: ${DISCORD_OAUTH_CLIENT_SECRET:?set the relay OAuth client secret}
+      OAUTH_ENCRYPTION_KEY: ${OAUTH_ENCRYPTION_KEY:?set a random 32-byte base64 key}
       DISCORD_MCP_REST_TIMEOUT_MS: ${DISCORD_MCP_REST_TIMEOUT_MS:-15000}
     ports:
       - '127.0.0.1:3000:3000'
