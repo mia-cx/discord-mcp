@@ -1,82 +1,16 @@
-# A self-hosted deployment.
-#
-# Two processes with a deliberate asymmetry: the server holds the credentials and no Docker socket;
-# the supervisor holds the Docker socket and no credentials. They meet on one Unix socket.
-#
-# `DOCKER_HOST` must point at a **rootless** daemon. Under rootful Docker the supervisor's isolation
-# guarantees weaken to the point where they are not worth stating.
-
 name: discord-mcp
 
 services:
   server:
-    # Published by CI on every version tag. Swap for the `build:` block below to run your own.
-    image: ghcr.io/mia-cx/discord-mcp/server:${DISCORD_MCP_VERSION:-latest}
-    # build:
-    #   context: ..
-    #   dockerfile: docker/server.Dockerfile
+    image: ghcr.io/mia-cx/discord-mcp/server:${DISCORD_MCP_VERSION:-main}
     restart: unless-stopped
+    read_only: true
     environment:
-      DISCORD_TOKEN: ${DISCORD_TOKEN:?set DISCORD_TOKEN}
-      # Losing this makes every stored OAuth2 token and route secret unrecoverable. Back it up
-      # somewhere other than this host.
-      DISCORD_MCP_MASTER_KEY: ${DISCORD_MCP_MASTER_KEY:?set DISCORD_MCP_MASTER_KEY}
-      DISCORD_APPLICATION_ID: ${DISCORD_APPLICATION_ID:-}
-      DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
-      DISCORD_PUBLIC_KEY: ${DISCORD_PUBLIC_KEY:-}
-      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
-      DISCORD_MCP_WORKFLOWS_ENABLED: ${DISCORD_MCP_WORKFLOWS_ENABLED:-false}
-      # The same value on both services. This is what stops any other local process from driving
-      # the supervisor.
-      DISCORD_MCP_SUPERVISOR_CREDENTIAL: ${DISCORD_MCP_SUPERVISOR_CREDENTIAL:-}
-      DISCORD_MCP_TOOLSETS: ${DISCORD_MCP_TOOLSETS:-operator,automation,api}
-    volumes:
-      - data:/data
-      - supervisor-socket:/run/discord-mcp
-      # The server serves each execution's capability socket here; workflow containers mount the
-      # same volume restricted to their own execution's subdirectory. The server holds the grants
-      # and the Discord credentials, so it is the right place for the broker to listen.
-      - capability:/run/capability
+      MCP_TRANSPORT: http
+      MCP_HTTP_HOST: 0.0.0.0
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?set the public HTTPS URL}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:?set the public hostname}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+      DISCORD_MCP_REST_TIMEOUT_MS: ${DISCORD_MCP_REST_TIMEOUT_MS:-15000}
     ports:
-      # Loopback only. Put Traefik in front before exposing this anywhere.
       - '127.0.0.1:3000:3000'
-    depends_on:
-      - supervisor
-
-  supervisor:
-    image: ghcr.io/mia-cx/discord-mcp/supervisor:${DISCORD_MCP_VERSION:-latest}
-    # Root *inside the user namespace*, which under rootless Docker is the unprivileged host user
-    # that owns the daemon socket — not host root. This is what makes the socket reachable at all:
-    # the host owner maps to container uid 0, so the image's own 10002 cannot see it.
-    #
-    # The group is still the shared one, so the supervisor's socket stays reachable by the control
-    # plane and by nothing else.
-    #
-    # Under ROOTFUL Docker this would be genuine root with the real Docker socket. Do not run
-    # rootful; see docs/operating.md.
-    user: "0:10000"
-    # build:
-    #   context: ..
-    #   dockerfile: docker/supervisor.Dockerfile
-    restart: unless-stopped
-    environment:
-      DISCORD_MCP_SUPERVISOR_CREDENTIAL: ${DISCORD_MCP_SUPERVISOR_CREDENTIAL:-}
-      DOCKER_HOST: ${DOCKER_HOST:-unix:///run/user/1000/docker.sock}
-      DISCORD_MCP_NPM_REGISTRY: ${DISCORD_MCP_NPM_REGISTRY:-https://registry.npmjs.org/}
-      # The images the supervisor starts for workflow builds and runs. Pinned to the same version
-      # as the control plane: a runner from a different release may not speak its capability RPC.
-      DISCORD_MCP_BUILD_IMAGE: ghcr.io/mia-cx/discord-mcp/workflow-build:${DISCORD_MCP_VERSION:-latest}
-      DISCORD_MCP_RUNTIME_IMAGE: ghcr.io/mia-cx/discord-mcp/workflow-runner:${DISCORD_MCP_VERSION:-latest}
-    volumes:
-      - supervisor-socket:/run/discord-mcp
-      # The rootless daemon's socket. This is the one bind mount in the deployment, it goes to the
-      # supervisor alone, and it never reaches a workflow container.
-      - ${DOCKER_SOCKET:-/run/user/1000/docker.sock}:/run/user/1000/docker.sock
-
-volumes:
-  data:
-  supervisor-socket:
-  # Named `discord-mcp-capability` so the supervisor can name it without being told: it derives
-  # every mount rather than accepting one.
-  capability:
-    name: discord-mcp-capability

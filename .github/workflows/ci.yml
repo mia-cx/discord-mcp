@@ -67,10 +67,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Every image a deployment needs. The two workflow images are only used when workflows are
-        # enabled, but they are small and publishing them unconditionally means an operator who
-        # turns workflows on does not then have to go and build something by hand.
-        image: [server, supervisor, workflow-runner, workflow-build]
+        # The stateless relay needs only the server image.
+        image: [server]
         # Native runners rather than QEMU: argon2 compiles from source, and emulating that turns a
         # two-minute build into a twenty-minute one.
         platform:
@@ -134,7 +132,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [server, supervisor, workflow-runner, workflow-build]
+        image: [server]
     steps:
       - name: Download the digests
         uses: actions/download-artifact@v4
