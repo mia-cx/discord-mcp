@@ -5,8 +5,9 @@ Every request supplies a relay OAuth bearer credential and a separate `X-Discord
 Validate both grants with Discord and execute that request's tools as the supplied bot.
 OAuth identifies a human; possession of the bot token determines bot access, not that human's guild permissions.
 An optional user-ID allowlist gates both login and every authenticated request. The hosted
-deployment uses an explicit snapshot of accepted members of its application's developer Team.
-Resync that snapshot when Team membership changes; keep no server-side bot token for lookups.
+deployment's operator-managed list includes accepted developer-Team members and explicitly
+approved additional accounts. Preserve those additions during Team resyncs; keep user IDs
+outside Git and no server-side bot token for lookups.
 
 Keep no bot credentials, authentication results, sessions, or Discord-response cache. Login grants
 travel in encrypted, audience-bound relay tokens. Spent authorization-code hashes expire after

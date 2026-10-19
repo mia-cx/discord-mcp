@@ -87,6 +87,11 @@ Repeat all three steps after adding or removing Team members. An empty Team or
 failed lookup must not turn into `*` or an unset restriction. Keep the existing
 restriction until a complete replacement is verified.
 
+Operators can also approve additional Discord accounts directly. Preserve those
+explicit additions when resyncing Team membership; Team membership is not a
+requirement for an account the operator has separately approved. Keep the full
+access list private rather than publishing user IDs in deployment manifests.
+
 The Team lookup does not require keeping its bot token on the relay. Team
 membership details and this restriction remain operator-side, outside Git.
 See Discord's [application](https://docs.discord.com/developers/resources/application#get-current-application)
