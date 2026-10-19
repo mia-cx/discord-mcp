@@ -5,40 +5,17 @@ bot token. Every tool call acts as that bot under Discord's bot permissions.
 
 ## Connect
 
-Endpoint: `https://discord.mia.cx/mcp`. The public endpoint runs the OAuth relay in k3s.
+Ask your relay operator for its MCP URL and access. This repository does not
+publish a hosted endpoint.
 
-Clients with MCP OAuth support discover the login flow automatically. Configure
-the bot token as a separate header. For manually configured clients, run:
+Follow [Agent setup and OAuth login](./docs/connecting.md) for Claude Code, Codex,
+Devin, Cursor, and other stdio MCP clients. One browser login and private bot-token
+file can serve all agents under the same OS account. The helpers need Node.js 24+
+but no dependency installation. They are not published to npm.
 
-```sh
-node scripts/login.mjs https://discord.mia.cx/mcp
-```
+### Authentication
 
-The dependency-free helper opens your browser, completes login through a loopback
-callback, and saves `~/.config/discord-mcp/login.json` with mode `0600`. It never
-asks for or saves a bot token. Use `--no-open` to open the URL yourself,
-`--output PATH` for another credential file, or `--replace` to sign in again.
-`pnpm login` runs the same helper. It is not published to npm.
-
-### Share one login between local agent clients
-
-`node scripts/client.mjs` provides a dependency-free stdio connection to the hosted
-relay. Configure an agent to launch this command instead of copying credentials into
-its MCP settings. It reads these private client files on every request:
-
-- `~/.config/discord-mcp/login.json`, produced by the login helper above.
-- `~/.config/discord-mcp/bot.env`, containing `DISCORD_BOT_TOKEN=YOUR_BOT_TOKEN`.
-
-Keep the directory mode `0700` and both files mode `0600`. These files belong on the
-client machine, never in Git or on the hosted relay. `DISCORD_MCP_CONFIG_DIR` can
-select a different client directory. Replacing the files updates running bridge
-processes on their next request. An expired or revoked login still needs a fresh
-human OAuth sign-in; the bridge cannot refresh it automatically.
-
-The bridge forwards supported JSON-RPC messages and the relay's bounded legacy SSE
-responses. It does not run a local Discord server or bypass the hosted OAuth check.
-
-Supply both credentials on **every HTTP MCP request**, including discovery:
+Supply both credentials on **every HTTP MCP request**, including initialization and tool discovery:
 
 ```http
 Authorization: Bearer YOUR_RELAY_OAUTH_ACCESS_TOKEN
@@ -55,8 +32,10 @@ It checks the bot with `GET /users/@me`, uses that token for the request,
 and releases the request's client. Raw Discord OAuth tokens and user-account
 tokens are not accepted as MCP bearer credentials.
 
-OAuth requests only `identify`. Any Discord human may sign in. Login does not
-prove bot ownership or restrict a bot to that human's guild permissions.
+OAuth requests only `identify`. Operators can restrict access with
+`DISCORD_OAUTH_ALLOWED_USER_IDS`; unlisted accounts cannot finish login or use
+previously issued credentials. Without that restriction, any Discord human may sign in.
+Login does not prove bot ownership or restrict a bot to that human's guild permissions.
 Possession of a valid bot token grants that bot's existing authority.
 
 No local accounts, PATs, stored OAuth profiles, database, Gateway connection,
@@ -148,6 +127,7 @@ Keep the environment file private. Rotating the encryption key invalidates all l
 | `PUBLIC_BASE_URL` | Public HTTPS URL; required for non-loopback binds. |
 | `DISCORD_OAUTH_CLIENT_ID` | Required for HTTP. The relay's Discord application ID. |
 | `DISCORD_OAUTH_CLIENT_SECRET` | Required for HTTP. The application's OAuth client secret. |
+| `DISCORD_OAUTH_ALLOWED_USER_IDS` | Optional comma-separated Discord user IDs. Unset or `*` allows any human; an empty value denies everyone. |
 | `OAUTH_ENCRYPTION_KEY` | Required for HTTP. Stable random 32-byte base64 key for AES-256-GCM credentials. |
 | `ALLOWED_HOSTS` | Comma-separated hostnames; required for non-loopback binds. |
 | `ALLOWED_ORIGINS` | Optional additional browser origins. The request origin and configured public origin are accepted. |
@@ -156,8 +136,9 @@ Keep the environment file private. Rotating the encryption key invalidates all l
 
 `/health/live` and `/health/ready` return HTTP 200 when the process is serving.
 They do not check Discord. `/mcp` returns 401 for missing, invalid, expired, or
-revoked OAuth credentials. Invalid bot credentials return 403 without triggering
-another login. Discord authentication rate limits return 429.
+revoked OAuth credentials. An unlisted human receives 403 `access_denied`;
+invalid bot credentials receive 403 `invalid_bot_token`. Neither triggers another login.
+Discord authentication rate limits return 429.
 
 OAuth discovery lives at `/.well-known/oauth-protected-resource/mcp` and
 `/.well-known/oauth-authorization-server`. The issuer supports dynamic public-client
@@ -167,6 +148,8 @@ resource, issuer, browser state, and one-time codes. Registrations expire after
 30 days. Client ID metadata documents are not implemented.
 
 For agent-operated clients, use the [curl example](./docs/operating.md#curl).
+For a developer-Team-derived access list, follow
+[the explicit membership sync procedure](./docs/operating.md#developer-team-allowlist).
 
 Public routing lives in `mia-cx/yggdrasil-spec`. Consult
 [DIRECTION.md](./DIRECTION.md) for the live deployment and migration state.

@@ -4,6 +4,9 @@ Provide a stateless Discord API relay over MCP. HTTP callers must log in with Di
 Every request supplies a relay OAuth bearer credential and a separate `X-Discord-Bot-Token` header.
 Validate both grants with Discord and execute that request's tools as the supplied bot.
 OAuth identifies a human; possession of the bot token determines bot access, not that human's guild permissions.
+An optional user-ID allowlist gates both login and every authenticated request. The hosted
+deployment uses an explicit snapshot of accepted members of its application's developer Team.
+Resync that snapshot when Team membership changes; keep no server-side bot token for lookups.
 
 Keep no bot credentials, authentication results, sessions, or Discord-response cache. Login grants
 travel in encrypted, audience-bound relay tokens. Spent authorization-code hashes expire after
@@ -25,20 +28,22 @@ HTTP supports OAuth discovery, dynamic client registration, browser-bound consen
 `scripts/client.mjs` connects local agents over stdio to the hosted HTTP relay, sharing private
 client-side login and bot files without putting credentials in each agent's configuration.
 Read `README.md` for tools, configuration, and current limitations.
+Public setup instructions use operator-supplied URLs. Keep deployment hostnames out of this
+repository's docs and helper defaults; the login helper requires an explicit relay URL.
 
 ## Deployment boundary
 
 The public OAuth relay runs in native k3s. Namespace `discord-mcp` has a
-single-replica, read-only Deployment pinned to the OAuth relay image from `b7e419b` and a
+single-replica, read-only Deployment pinned to a tested OAuth relay image and a
 `discord-mcp-relay` Service. The generated encryption key lives in `discord-mcp-crypto`.
 The existing Discord application's ID and secret are saved in `discord-mcp-oauth`.
-Its only Discord redirect is `https://discord.mia.cx/auth/discord/callback`.
+The Discord redirect is the private configured public origin plus `/auth/discord/callback`.
 
-The native pod is Ready and Traefik routes `discord.mia.cx` to `discord-mcp-relay`.
+Traefik routes the configured public origin to `discord-mcp-relay`.
 The old Athena `t3code/implement-plan` PAT/OIDC stack and its data remain intact but are not
 on the public route. Restoring that backend requires an explicit recovery decision.
 
-`https://discord.mia.cx/mcp` reaches the live instance through public k3s Traefik. Mia manages DNS.
+Mia manages the deployment's DNS. Operator configuration supplies its public origin.
 Routing manifests, Athena relay units, and recovery instructions live in
 `mia-cx/yggdrasil-spec` under `argocd/discord-mcp/` and `hosts/athena-hephaestus/`.
 Consult those files when deploying the stateless relay or recovering its backend registration.
