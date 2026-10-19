@@ -6,8 +6,9 @@ Validate both grants with Discord and execute that request's tools as the suppli
 OAuth identifies a human; possession of the bot token determines bot access, not that human's guild permissions.
 
 Keep no bot credentials, authentication results, sessions, or Discord-response cache. Login grants
-travel in encrypted, audience-bound relay tokens. Only spent authorization-code hashes remain
-in memory for one minute. Use one process; an in-flight login fails on restart. Existing logins survive.
+travel in encrypted, audience-bound relay tokens. Spent authorization-code hashes expire after
+one minute; the next code exchange or process restart removes expired hashes. Use one process;
+an in-flight login fails on restart. Existing logins survive.
 Public clients sign in again when their grant expires, at most seven days. Refresh tokens would
 require durable replay protection; do not add an unrotated stateless refresh-token shortcut.
 
@@ -21,6 +22,8 @@ The executable uses the stable MCP SDK and supports the sessionless `2026-07-28`
 stateless compatibility for older clients. Local stdio uses the caller's environment token.
 HTTP supports OAuth discovery, dynamic client registration, browser-bound consent and S256 PKCE.
 `pnpm login` is the dependency-free browser login helper. Operators configure one Discord OAuth app.
+`scripts/client.mjs` connects local agents over stdio to the hosted HTTP relay, sharing private
+client-side login and bot files without putting credentials in each agent's configuration.
 Read `README.md` for tools, configuration, and current limitations.
 
 ## Deployment boundary

@@ -20,6 +20,24 @@ asks for or saves a bot token. Use `--no-open` to open the URL yourself,
 `--output PATH` for another credential file, or `--replace` to sign in again.
 `pnpm login` runs the same helper. It is not published to npm.
 
+### Share one login between local agent clients
+
+`node scripts/client.mjs` provides a dependency-free stdio connection to the hosted
+relay. Configure an agent to launch this command instead of copying credentials into
+its MCP settings. It reads these private client files on every request:
+
+- `~/.config/discord-mcp/login.json`, produced by the login helper above.
+- `~/.config/discord-mcp/bot.env`, containing `DISCORD_BOT_TOKEN=YOUR_BOT_TOKEN`.
+
+Keep the directory mode `0700` and both files mode `0600`. These files belong on the
+client machine, never in Git or on the hosted relay. `DISCORD_MCP_CONFIG_DIR` can
+select a different client directory. Replacing the files updates running bridge
+processes on their next request. An expired or revoked login still needs a fresh
+human OAuth sign-in; the bridge cannot refresh it automatically.
+
+The bridge forwards supported JSON-RPC messages and the relay's bounded legacy SSE
+responses. It does not run a local Discord server or bypass the hosted OAuth check.
+
 Supply both credentials on **every HTTP MCP request**, including discovery:
 
 ```http
