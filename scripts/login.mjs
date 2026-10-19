@@ -17,13 +17,17 @@ const { values, positionals } = parseArgs({
     help: { type: 'boolean' },
   },
 })
+const usage =
+  'Usage: node scripts/login.mjs https://HOST/mcp [--output PATH] [--replace] [--no-open]\n'
 if (values.help) {
-  process.stdout.write(
-    'Usage: node scripts/login.mjs [https://HOST/mcp] [--output PATH] [--replace] [--no-open]\n',
-  )
+  process.stdout.write(usage)
   process.exit(0)
 }
-const endpoint = new URL(positionals[0] ?? 'https://discord.mia.cx/mcp')
+if (positionals.length !== 1) {
+  process.stderr.write(`Ask your relay operator for its MCP URL.\n${usage}`)
+  process.exit(1)
+}
+const endpoint = new URL(positionals[0])
 if (
   endpoint.protocol !== 'https:' &&
   !(

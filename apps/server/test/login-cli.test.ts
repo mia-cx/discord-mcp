@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
@@ -7,6 +7,17 @@ import { toNodeHandler } from '@modelcontextprotocol/node'
 import { expect, it } from 'vitest'
 import { createRelay } from '../src/relay.ts'
 import { config, discordOAuth } from './login-fixture.ts'
+
+it('requires an operator-supplied relay URL before starting login', () => {
+  const child = spawnSync(process.execPath, ['scripts/login.mjs', '--no-open'], {
+    encoding: 'utf8',
+    timeout: 1000,
+  })
+  expect(child.status).toBe(1)
+  expect(child.stdout).toBe('')
+  expect(child.stderr).toContain('Ask your relay operator for its MCP URL.')
+  expect(child.stderr).toContain('Usage: node scripts/login.mjs https://HOST/mcp')
+})
 
 it('logs in through the CLI loopback callback and writes an owner-only credential file without bot secrets', async () => {
   const oauth = discordOAuth()
