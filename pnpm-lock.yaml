@@ -98,6 +98,9 @@ importers:
       effect:
         specifier: 4.0.0-beta.101
         version: 4.0.0-beta.101
+      jose:
+        specifier: 6.2.4
+        version: 6.2.4
     devDependencies:
       '@modelcontextprotocol/client':
         specifier: 2.3.1
