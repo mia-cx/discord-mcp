@@ -33,7 +33,7 @@ const credentials = async () => {
       headers: { Authorization: `Bearer ${login.access_token}`, 'X-Discord-Bot-Token': bot },
     }
   } catch {
-    throw new Error('Discord MCP needs setup. Run the private client setup wizard.')
+    throw new Error('Discord MCP needs setup. Follow the agent setup instructions in README.md.')
   }
 }
 
@@ -61,8 +61,14 @@ const forward = async (message) => {
     })
     if (response.status === 401)
       throw new Error('Discord login expired. Run the login helper again.')
-    if (response.status === 403)
+    if (response.status === 403) {
+      const error = await response.json().catch(() => undefined)
+      if (error?.error === 'access_denied')
+        throw new Error(
+          'Discord account is not on the relay allowlist. Ask the operator for access.',
+        )
       throw new Error('Discord rejected the bot token or its permissions.')
+    }
     if (!response.ok) throw new Error(`Discord MCP request failed (HTTP ${response.status}).`)
     const body = await response.text()
     if (!body.trim()) return

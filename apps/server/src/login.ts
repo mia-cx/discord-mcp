@@ -55,6 +55,8 @@ export interface LoginConfig {
   readonly clientSecret: Redacted.Redacted<string>
   /** A stable, random 32-byte base64 key. Rotation invalidates all issued credentials. */
   readonly encryptionKey: Redacted.Redacted<string>
+  /** Undefined allows any human; an empty list denies everyone. Checked on every request. */
+  readonly allowedUserIds?: ReadonlyArray<string>
 }
 
 const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
@@ -76,6 +78,7 @@ class DiscordUnavailable extends Error {
     super('Discord unavailable')
   }
 }
+class DiscordAccessDenied extends Error {}
 const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`)
 const safeRedirect = (value: string) => {
   const url = new URL(value)
@@ -124,6 +127,11 @@ export const createDiscordLogin = (
   authorize: (request: Request) => Promise<AuthInfo | Response>
   fetch: (request: Request) => Promise<Response | undefined>
 } => {
+  if (config.allowedUserIds?.some((id) => !/^\d{17,21}$/.test(id))) {
+    throw new Error('DISCORD_OAUTH_ALLOWED_USER_IDS must contain Discord user IDs.')
+  }
+  const allowedUsers =
+    config.allowedUserIds === undefined ? undefined : new Set(config.allowedUserIds)
   const base = new URL(config.publicBaseUrl)
   if (base.pathname !== '/' || base.search || base.hash || base.username || base.password) {
     throw new Error('PUBLIC_BASE_URL must be an origin, without a path or credentials.')
@@ -220,6 +228,9 @@ export const createDiscordLogin = (
       (subject !== undefined && auth.user.id !== subject)
     )
       throw new OAuthError(OAuthErrorCode.InvalidToken, 'Invalid Discord authorization.')
+    if (allowedUsers !== undefined && !allowedUsers.has(auth.user.id)) {
+      throw new DiscordAccessDenied('Your Discord account is not allowed to use this relay.')
+    }
     return auth.user.id
   }
   const exchange = async (parameters: Record<string, string>) => {
@@ -411,27 +422,32 @@ export const createDiscordLogin = (
     if (url.searchParams.has('error')) {
       destination.searchParams.set('error', 'access_denied')
     } else {
-      const tokens = await exchange({
-        grant_type: 'authorization_code',
-        code: text(url.searchParams.get('code')),
-        redirect_uri: callback,
-        code_verifier: text(flow.discordVerifier),
-      })
-      const subject = await identity(tokens.access_token)
-      destination.searchParams.set(
-        'code',
-        await seal(
+      try {
+        const tokens = await exchange({
+          grant_type: 'authorization_code',
+          code: text(url.searchParams.get('code')),
+          redirect_uri: callback,
+          code_verifier: text(flow.discordVerifier),
+        })
+        const subject = await identity(tokens.access_token)
+        destination.searchParams.set(
           'code',
-          {
-            clientId: flow.clientId,
-            redirect: flow.redirect,
-            challenge: flow.challenge,
-            sub: subject,
-            tokens,
-          },
-          CODE_SECONDS,
-        ),
-      )
+          await seal(
+            'code',
+            {
+              clientId: flow.clientId,
+              redirect: flow.redirect,
+              challenge: flow.challenge,
+              sub: subject,
+              tokens,
+            },
+            CODE_SECONDS,
+          ),
+        )
+      } catch (error) {
+        if (!(error instanceof DiscordAccessDenied)) throw error
+        destination.searchParams.set('error', 'access_denied')
+      }
     }
     destination.searchParams.set('state', String(flow.state))
     destination.searchParams.set('iss', issuer)
@@ -494,6 +510,9 @@ export const createDiscordLogin = (
       try {
         return await verifyBearerToken(request.headers.get('authorization'), bearerOptions)
       } catch (error) {
+        if (error instanceof DiscordAccessDenied) {
+          return json(403, { error: 'access_denied', error_description: error.message })
+        }
         if (error instanceof DiscordUnavailable)
           return json(
             error.status,

@@ -73,10 +73,28 @@ it('relays stdio requests with private credentials, legacy SSE, and credential r
   }
 })
 
-it('reports an expired login to the agent without leaking credentials or the server error body', async () => {
+it.each([
+  {
+    status: 401,
+    error: 'invalid_token',
+    message: 'Discord login expired. Run the login helper again.',
+  },
+  {
+    status: 403,
+    error: 'access_denied',
+    message: 'Discord account is not on the relay allowlist. Ask the operator for access.',
+  },
+  {
+    status: 403,
+    error: 'invalid_bot_token',
+    message: 'Discord rejected the bot token or its permissions.',
+  },
+])('reports $error without leaking credentials or the server error body', async (failure) => {
   const directory = await mkdtemp(join(tmpdir(), 'discord-mcp-client-'))
   const server = createServer((_request, response) =>
-    response.writeHead(401).end('private-error-body'),
+    response
+      .writeHead(failure.status, { 'content-type': 'application/json' })
+      .end(JSON.stringify({ error: failure.error, detail: 'private-error-body' })),
   )
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   const address = server.address()
@@ -99,7 +117,7 @@ it('reports an expired login to the agent without leaking credentials or the ser
     const output = (await lines.next()).value ?? ''
     expect(JSON.parse(output)).toMatchObject({
       id: 7,
-      error: { message: 'Discord login expired. Run the login helper again.' },
+      error: { message: failure.message },
     })
     expect(output).not.toContain('private-')
   } finally {

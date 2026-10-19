@@ -119,7 +119,7 @@ export const finishLogin = async (
     redirect_uri: started.redirect,
     resource: 'https://relay.test/mcp',
   }
-  return { params, discordUrl, callback }
+  return { params, discordUrl, callback, destination }
 }
 
 export const redeem = (relay: Relay, params: Record<string, string>) =>

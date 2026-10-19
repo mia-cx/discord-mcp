@@ -112,6 +112,47 @@ describe('Discord login for the relay', () => {
     expect((await relay.fetch(mcp(tokens.access_token))).status).toBe(401)
   })
 
+  it('allows listed humans and denies unlisted humans at login and on previously issued credentials', async () => {
+    const oauth = discordOAuth()
+    const unrestricted = createRelay(config, rest, oauth.fetch)
+    const { tokens } = await login(unrestricted)
+    const restricted = createRelay(
+      { ...config, login: { ...config.login, allowedUserIds: ['345678901234567890'] } },
+      rest,
+      oauth.fetch,
+    )
+    const denied = await restricted.fetch(mcp(tokens.access_token))
+    expect(denied.status).toBe(403)
+    expect(await denied.json()).toMatchObject({ error: 'access_denied' })
+    expect(denied.headers.get('www-authenticate')).toBeNull()
+    expect(denied.headers.get('cache-control')).toBe('no-store')
+
+    const started = await beginLogin(restricted)
+    const finished = await finishLogin(restricted, started)
+    expect(finished.destination.searchParams.get('error')).toBe('access_denied')
+    expect(finished.destination.searchParams.has('code')).toBe(false)
+
+    oauth.state.userId = '345678901234567890'
+    const accepted = await login(restricted)
+    expect((await restricted.fetch(mcp(accepted.tokens.access_token))).status).toBe(200)
+
+    const empty = createRelay(
+      { ...config, login: { ...config.login, allowedUserIds: [] } },
+      rest,
+      oauth.fetch,
+    )
+    expect((await empty.fetch(mcp(accepted.tokens.access_token))).status).toBe(403)
+  })
+
+  it('rejects malformed allowlist configuration instead of starting with unrestricted access', () => {
+    expect(() =>
+      createRelay({
+        ...config,
+        login: { ...config.login, allowedUserIds: ['not-a-discord-user-id'] },
+      }),
+    ).toThrow('DISCORD_OAUTH_ALLOWED_USER_IDS')
+  })
+
   it('binds single-use authorization codes to PKCE, client, redirect, resource and the current process', async () => {
     const oauth = discordOAuth()
     const relay = createRelay(config, rest, oauth.fetch)
