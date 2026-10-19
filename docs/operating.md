@@ -65,5 +65,7 @@ Changing the key invalidates all issued credentials. Unfinished logins must rest
 after a server restart; completed logins remain valid.
 
 Public routing and Athena's forwarding units live in `mia-cx/yggdrasil-spec`.
-Read `DIRECTION.md` before replacing the old live deployment. It has its own data
-and still uses PAT/OIDC authentication. Preserve that data independently.
+The public IngressRoute targets the native `discord-mcp-relay` Service.
+Read `DIRECTION.md` before changing deployment targets. The old Athena PAT/OIDC
+stack and its data remain intact but receive no public traffic. Preserve that
+data independently; restoring its route needs an explicit recovery decision.

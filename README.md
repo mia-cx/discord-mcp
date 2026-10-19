@@ -5,8 +5,7 @@ bot token. Every tool call acts as that bot under Discord's bot permissions.
 
 ## Connect
 
-Target endpoint: `https://discord.mia.cx/mcp`. This README describes `main`.
-The live instance still runs the earlier PAT-authenticated application until cutover.
+Endpoint: `https://discord.mia.cx/mcp`. The public endpoint runs the OAuth relay in k3s.
 
 Clients with MCP OAuth support discover the login flow automatically. Configure
 the bot token as a separate header. For manually configured clients, run:
