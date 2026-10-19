@@ -1,5 +1,8 @@
 # Discord MCP Control Plane and Sandboxed Workflow Runtime
 
+> Historical design. The project now targets a stateless bot-token API relay.
+> See DIRECTION.md and README.md for the current scope.
+
 A self-hosted Discord automation platform driven by an AI agent through MCP.
 
 ## Context
