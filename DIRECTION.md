@@ -1,10 +1,17 @@
 # Direction
 
-Provide a stateless Discord API relay over MCP. Every HTTP request supplies a Discord bot token.
-Validate it with Discord and execute that request's tools as that bot. Keep no credential,
-authentication, session, or Discord-response cache. Discord permissions determine authority.
+Provide a stateless Discord API relay over MCP. HTTP callers must log in with Discord OAuth.
+Every request supplies a relay OAuth bearer credential and a separate `X-Discord-Bot-Token` header.
+Validate both grants with Discord and execute that request's tools as the supplied bot.
+OAuth identifies a human; possession of the bot token determines bot access, not that human's guild permissions.
 
-The relay needs no database, local accounts, PATs, OAuth profiles, Gateway, workflow engine, or
+Keep no bot credentials, authentication results, sessions, or Discord-response cache. Login grants
+travel in encrypted, audience-bound relay tokens. Only spent authorization-code hashes remain
+in memory for one minute. Use one process; an in-flight login fails on restart. Existing logins survive.
+Public clients sign in again when their grant expires, at most seven days. Refresh tokens would
+require durable replay protection; do not add an unrotated stateless refresh-token shortcut.
+
+The relay needs no database, local accounts, PATs, stored OAuth profiles, Gateway, workflow engine, or
 sandbox supervisor. The earlier control-plane libraries remain in the workspace as legacy code;
 the server executable no longer starts them. `PLAN.md` describes that historical design.
 
@@ -12,6 +19,8 @@ the server executable no longer starts them. `PLAN.md` describes that historical
 
 The executable uses the stable MCP SDK and supports the sessionless `2026-07-28` revision plus
 stateless compatibility for older clients. Local stdio uses the caller's environment token.
+HTTP supports OAuth discovery, dynamic client registration, browser-bound consent and S256 PKCE.
+`pnpm login` is the dependency-free browser login helper. Operators configure one Discord OAuth app.
 Read `README.md` for tools, configuration, and current limitations.
 
 ## Deployment boundary
