@@ -61,6 +61,11 @@ const main = Effect.gen(function* () {
     trustProxyIdentity: false,
     trustedProxyCidrs: [],
   })
+  const oauth = yield* Config.all({
+    clientId: Config.string('DISCORD_OAUTH_CLIENT_ID'),
+    clientSecret: Config.redacted('DISCORD_OAUTH_CLIENT_SECRET'),
+    encryptionKey: Config.redacted('OAUTH_ENCRYPTION_KEY'),
+  })
   const relay = createRelay({
     allowedHosts: csv(config.allowedHosts),
     allowedOrigins: [
@@ -68,6 +73,10 @@ const main = Effect.gen(function* () {
       ...(config.publicBaseUrl === '' ? [] : [new URL(config.publicBaseUrl).origin]),
     ],
     rest,
+    login: {
+      ...oauth,
+      publicBaseUrl: config.publicBaseUrl || `http://127.0.0.1:${config.port}`,
+    },
   })
   const handle = toNodeHandler(relay)
   const server = yield* Effect.acquireRelease(

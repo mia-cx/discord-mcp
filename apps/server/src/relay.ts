@@ -13,11 +13,13 @@ import {
 } from '@discord-mcp/discord-api/relay'
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server'
 import { Effect, Layer, ManagedRuntime, Redacted } from 'effect'
+import { createDiscordLogin, type LoginConfig } from './login.ts'
 
 export interface RelayConfig {
   readonly allowedHosts: ReadonlyArray<string>
   readonly allowedOrigins: ReadonlyArray<string>
   readonly rest: Omit<RestConfig, 'token'>
+  readonly login: LoginConfig
 }
 
 /** The token lives only in this runtime, which the HTTP handler disposes after one response. */
@@ -55,45 +57,79 @@ const json = (status: number, body: unknown, headers: Record<string, string> = {
     headers: { 'content-type': 'application/json', 'cache-control': 'no-store', ...headers },
   })
 
-const unauthorized = () =>
-  json(
-    401,
-    {
-      error: 'invalid_token',
-      error_description: 'Supply a valid Discord bot token as Bearer auth.',
-    },
-    { 'www-authenticate': 'Bearer realm="discord-mcp", error="invalid_token"' },
-  )
+const invalidBot = () =>
+  json(403, {
+    error: 'invalid_bot_token',
+    error_description: 'Supply a valid bot token in X-Discord-Bot-Token.',
+  })
 
 const isBot = (value: unknown) =>
   typeof value === 'object' && value !== null && 'bot' in value && value.bot === true
 
+const allowedOrigin = (request: Request, origins: ReadonlyArray<string>) => {
+  const origin = request.headers.get('origin')
+  return origin === null || origin === new URL(request.url).origin || origins.includes(origin)
+}
+
+const discordFailure = (error: ReturnType<typeof renderCause>) => {
+  if (error.httpStatus === 401) return invalidBot()
+  if (error.code === 'DiscordRateLimitError') {
+    return json(
+      429,
+      { error: 'discord_rate_limited' },
+      {
+        'retry-after': String(Math.ceil((error.retryAfterMs ?? 1000) / 1000)),
+      },
+    )
+  }
+  return json(502, { error: 'discord_unavailable' })
+}
+
 /**
- * Stateless MCP HTTP relay. Discord validates every supplied token, including discovery requests.
- * No credential, identity, session, or Discord response survives the request.
+ * Stateless MCP HTTP relay. Discord validates both login and bot credentials on every request.
+ * Bot credentials, identities, and Discord responses never survive the request.
  * `restLayer` is the Discord network seam used by offline integration tests.
  */
 export const createRelay = (
   config: RelayConfig,
   restLayer: (token: Redacted.Redacted<string>) => Layer.Layer<DiscordRest> = (token) =>
     DiscordRest.layer({ ...config.rest, token }).pipe(Layer.provide(RateGuard.layer())),
-) => ({
-  fetch: async (request: Request): Promise<Response> => {
+  discordFetch: typeof fetch = fetch,
+) => {
+  const login = createDiscordLogin(config.login, discordFetch)
+  const handle = async (request: Request): Promise<Response> => {
     const url = new URL(request.url)
     if (config.allowedHosts.length > 0 && !config.allowedHosts.includes(url.hostname)) {
       return json(421, { error: 'misdirected_request' })
     }
-    const origin = request.headers.get('origin')
-    if (origin !== null && origin !== url.origin && !config.allowedOrigins.includes(origin)) {
-      return json(403, { error: 'invalid_origin' })
-    }
     if (url.pathname === '/health/live' || url.pathname === '/health/ready') {
       return json(200, { ok: true })
     }
+    const oauth = await login.fetch(request)
+    if (oauth !== undefined) return oauth
+    if (!allowedOrigin(request, config.allowedOrigins)) {
+      return json(403, { error: 'invalid_origin' })
+    }
     if (url.pathname !== '/mcp') return json(404, { error: 'not_found' })
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          'access-control-allow-methods': 'POST, GET, DELETE, OPTIONS',
+          'access-control-allow-headers':
+            'Authorization, X-Discord-Bot-Token, Content-Type, Accept, MCP-Method, MCP-Protocol-Version, MCP-Name, MCP-Session-Id, Last-Event-Id',
+          'cache-control': 'no-store',
+        },
+      })
+    }
 
-    const credential = /^Bearer\s+(\S+)$/i.exec(request.headers.get('authorization') ?? '')?.[1]
-    if (credential === undefined) return unauthorized()
+    const authenticated = await login.authorize(request)
+    if (authenticated instanceof Response) {
+      authenticated.headers.set('cache-control', 'no-store')
+      return authenticated
+    }
+    const credential = request.headers.get('x-discord-bot-token')
+    if (credential === null || !/^\S+$/.test(credential)) return invalidBot()
 
     const runtime = relayRuntime(restLayer(Redacted.make(credential)))
     const mcp = createMcpHandler(() => buildRelayServer(runtime), {
@@ -108,31 +144,44 @@ export const createRelay = (
         { signal: request.signal },
       )
       if (verified._tag === 'Failure') {
-        const error = renderCause(verified.cause)
-        if (error.httpStatus === 401) return unauthorized()
-        if (error.code === 'DiscordRateLimitError') {
-          return json(
-            429,
-            { error: 'discord_rate_limited' },
-            { 'retry-after': String(Math.ceil((error.retryAfterMs ?? 1000) / 1000)) },
-          )
-        }
-        return json(502, { error: 'discord_unavailable' })
+        return discordFailure(renderCause(verified.cause))
       }
-      if (!isBot(verified.value)) return unauthorized()
+      if (!isBot(verified.value)) return invalidBot()
 
-      const response = await mcp.fetch(request)
+      const response = await mcp.fetch(request, { authInfo: authenticated })
       // Complete the bounded response before releasing the runtime. The SDK's legacy fallback
       // can return an SSE body before its tool finishes.
       const body = await response.arrayBuffer()
       const headers = new Headers(response.headers)
       headers.set('cache-control', 'no-store')
-      return new Response(body.byteLength === 0 ? null : body, { status: response.status, headers })
+      return new Response(body.byteLength === 0 ? null : body, {
+        status: response.status,
+        headers,
+      })
     } catch {
       return json(502, { error: 'request_failed' })
     } finally {
       await mcp.close()
       await runtime.dispose()
     }
-  },
-})
+  }
+  return {
+    fetch: async (request: Request): Promise<Response> => {
+      const response = await handle(request)
+      const origin = request.headers.get('origin')
+      if (
+        new URL(request.url).pathname === '/mcp' &&
+        origin !== null &&
+        allowedOrigin(request, config.allowedOrigins)
+      ) {
+        response.headers.set('access-control-allow-origin', origin)
+        response.headers.set(
+          'access-control-expose-headers',
+          'WWW-Authenticate, MCP-Protocol-Version, MCP-Session-Id, Retry-After',
+        )
+        response.headers.append('vary', 'Origin')
+      }
+      return response
+    },
+  }
+}
