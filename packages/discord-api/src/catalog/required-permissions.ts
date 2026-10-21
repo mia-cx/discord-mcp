@@ -1328,7 +1328,7 @@ export const operationPermissions: Readonly<Record<string, OperationPermissions>
  */
 export const requiredPermissions = (operationId: string): OperationPermissions => {
   const entry = operationPermissions[operationId]
-  if (entry === undefined) {
+  if (!Object.hasOwn(operationPermissions, operationId) || entry === undefined) {
     throw new Error(`${operationId} has no permission entry. Run pnpm spec:check.`)
   }
   return entry

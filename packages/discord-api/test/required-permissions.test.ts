@@ -23,6 +23,23 @@ const call = (name: string, args: unknown) => {
 const operations = await run(Effect.map(OperationCatalog, (catalog) => catalog.all))
 
 describe('operation permission metadata', () => {
+  it.each(['constructor', 'toString', '__proto__', 'missing_operation'])(
+    'rejects %s as a missing permission entry',
+    (operationId) => {
+      expect(() => requiredPermissions(operationId)).toThrow(
+        `${operationId} has no permission entry. Run pnpm spec:check.`,
+      )
+    },
+  )
+
+  it('returns the documented guild membership requirement for get_guild', () => {
+    expect(requiredPermissions('get_guild')).toEqual({
+      requires: 'any-of',
+      anyOf: [{ permissions: [], scope: { level: 'guild', pathParam: 'guild_id' } }],
+      sources: ['https://docs.discord.com/developers/resources/guild#get-guild'],
+    })
+  })
+
   it('describes the permission, scope, and hierarchy rule Discord applies to a kick', async () => {
     const described = await call('discord_api_describe', { operationId: 'delete_guild_member' })
 
