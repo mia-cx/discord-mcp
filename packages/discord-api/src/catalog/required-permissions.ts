@@ -11,8 +11,8 @@ import type { OperationEntry } from './types.ts'
  * reach, then re-checks each call against the person's effective permissions from
  * {@link computeEffectivePermissions}.
  *
- * Every rule here is conservative by construction. A consumer that skips a part it cannot verify
- * ends up stricter than Discord, never looser:
+ * Each rule is conservative on its own terms. A consumer that skips a part of a rule it cannot
+ * verify ends up stricter than the rule, never looser:
  *
  * - `requires: 'none'` means Discord checks no permission bit and no ownership beyond a valid
  *   token. Routes on the caller's own account (`@me`) are `none`: the token is the ownership.
@@ -28,17 +28,26 @@ import type { OperationEntry } from './types.ts'
  * Scopes name where Discord computes permissions. Guild scope uses guild-level role permissions;
  * an empty permission list there means guild membership alone. Channel scope applies channel
  * overwrites as well, and always lists `ViewChannel`, because without it Discord ignores every
- * other channel permission. Threads inherit their parent's permissions; private threads also need
- * thread membership or `ManageThreads`. Channel requirements apply to guild channels only: DM and
- * group DM channels have no permission bits, only recipients.
+ * other channel permission. Threads inherit their parent's permissions. Channel requirements apply
+ * to guild channels only: DM and group DM channels have no permission bits, only recipients.
  *
  * Where an endpoint's documentation names no permission, the entry requires only access to its
  * scope. Effects without a rejection still count: `MentionEveryone` is listed where the call would
  * otherwise ping everyone, because a relay must not let a person do that through the bot.
- * Rendering-only permissions (`EmbedLinks`, `UseExternalEmojis`) are not listed. Timed-out members
- * other than the owner and administrators keep only `ViewChannel` and `ReadMessageHistory`, which
- * `computeEffectivePermissions` does not model. Guild-wide reads return what the bot can see, not
- * what the person can see.
+ *
+ * This table and `computeEffectivePermissions` together are not a complete authorization engine
+ * for a person. They state which permissions each operation needs; the consumer must enforce the
+ * rest itself:
+ *
+ * - Timeouts. A timed-out member, unless owner or administrator, keeps only `ViewChannel` and
+ *   `ReadMessageHistory`. `computeEffectivePermissions` does not model this.
+ * - Thread access. Resolve a thread with its parent's overwrites. Private threads also need thread
+ *   membership or `ManageThreads`, which nothing here checks.
+ * - Resource scope. The resolver computes permission bits only. The consumer verifies each `only`
+ *   and `when`, such as authorship or a body field, against the request and its target.
+ * - Response filtering. Guild-wide reads return what the bot can see, not what the person can see.
+ * - Rendering-only permissions. `EmbedLinks` and `UseExternalEmojis` are not listed, so a call that
+ *   passes this table still renders with the bot's permissions.
  */
 export type PermissionScope = { readonly level: 'guild' | 'channel' } & (
   | {
@@ -114,6 +123,7 @@ export const permissionSources = {
 const docs = (anchor: string) => `https://docs.discord.com/developers/${anchor}`
 const SPEC = permissionSources.spec
 const FLAGS = docs('topics/permissions#permissions-bitwise-permission-flags')
+const ALLOWED_MENTIONS = docs('resources/message#allowed-mentions-object')
 const HIERARCHY = docs('topics/permissions#permission-hierarchy')
 const IMPLICIT = docs('topics/permissions#implicit-permissions')
 const THREADS = docs('topics/threads#editing-%26-deleting-threads')
@@ -476,11 +486,19 @@ export const operationPermissions: Readonly<Record<string, OperationPermissions>
     [
       docs('resources/channel#start-thread-without-message'),
       docs('resources/channel#start-thread-in-forum-or-media-channel'),
+      ALLOWED_MENTIONS,
       FLAGS,
+      SPEC,
     ],
     {
       conditional: [
         when('channel_id is a forum or media channel', inChannel('SendMessages')),
+        when('the body attaches files', inChannel('AttachFiles')),
+        when('body message includes a poll', inChannel('SendPolls')),
+        when(
+          'body message mentions @everyone, @here, or a role that is not mentionable, and allowed_mentions permits it',
+          inChannel('MentionEveryone'),
+        ),
         when(
           'channel_id is a text or announcement channel and body type is PRIVATE_THREAD or omitted',
           inChannel('CreatePrivateThreads'),
@@ -490,6 +508,7 @@ export const operationPermissions: Readonly<Record<string, OperationPermissions>
           inChannel('CreatePublicThreads'),
         ),
       ],
+      note: 'The docs omit poll from the first message, but the spec accepts it.',
     },
   ),
   join_thread: requires([inChannel()], [docs('resources/channel#join-thread')], {
@@ -582,7 +601,17 @@ export const operationPermissions: Readonly<Record<string, OperationPermissions>
       holding(MESSAGE_AUTHOR, inChannel()),
       holding('The request changes only flags.', inChannel('ManageMessages')),
     ],
-    [docs('resources/message#edit-message')],
+    [docs('resources/message#edit-message'), ALLOWED_MENTIONS, FLAGS],
+    {
+      conditional: [
+        when('the body attaches files', inChannel('AttachFiles')),
+        when(
+          'the new content or components mention @everyone, @here, or a role that is not mentionable, and allowed_mentions permits it',
+          inChannel('MentionEveryone'),
+        ),
+      ],
+      note: 'Without allowed_mentions, Discord parses the edited content with default allowances.',
+    },
   ),
   delete_message: requires(
     [holding(MESSAGE_AUTHOR, inChannel()), inChannel('ManageMessages')],

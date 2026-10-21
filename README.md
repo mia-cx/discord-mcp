@@ -101,7 +101,13 @@ import { computeEffectivePermissions, requiredPermissions } from '@discord-mcp/d
 
 The package is a workspace library, not published to npm. Read the evaluation rules
 in [`required-permissions.ts`](./packages/discord-api/src/catalog/required-permissions.ts):
-a consumer that skips a condition it cannot verify stays stricter than Discord.
+a consumer that skips a condition it cannot verify stays stricter than the rule.
+
+The table and resolver are not a complete authorization engine for a person. The
+consumer must also enforce timeouts, private-thread membership, and the `only` and
+`when` conditions, and filter guild-wide responses, which return what the bot can
+see. Rendering permissions such as `EmbedLinks` are not listed, so content renders
+with the bot's permissions.
 
 Discord's OpenAPI specification has no permission data, so the table is written by
 hand from [Discord's developer documentation](https://docs.discord.com/developers).

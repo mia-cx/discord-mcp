@@ -55,6 +55,19 @@ describe('operation permission metadata', () => {
     })
   })
 
+  // Editing a message and opening a forum post both publish content, so a person who could not
+  // upload or ping everyone in a new message cannot do it through these routes either.
+  it.each([
+    { operationId: 'update_message', needs: ['AttachFiles', 'MentionEveryone'] },
+    { operationId: 'create_thread', needs: ['AttachFiles', 'MentionEveryone', 'SendPolls'] },
+  ])('requires $needs when $operationId publishes them', ({ operationId, needs }) => {
+    const entry = requiredPermissions(operationId)
+    const conditional = entry.requires === 'any-of' ? (entry.conditional ?? []) : []
+    const required = conditional.flatMap((c) => c.anyOf.flatMap((grant) => grant.permissions))
+
+    expect(required).toEqual(expect.arrayContaining(needs))
+  })
+
   it('covers every cataloged operation with a well-formed entry', () => {
     expect(permissionTableProblems(operations)).toEqual([])
   })
