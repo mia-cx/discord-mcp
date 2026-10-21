@@ -1,3 +1,4 @@
+export * from './catalog/required-permissions.ts'
 export * from './catalog/service.ts'
 export * from './catalog/types.ts'
 export * from './dispatch/dispatcher.ts'

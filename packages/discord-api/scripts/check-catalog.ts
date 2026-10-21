@@ -15,6 +15,7 @@ import {
   packedOperations,
   tokenTable,
 } from '../src/catalog/generated/index.ts'
+import { permissionTableProblems } from '../src/catalog/required-permissions.ts'
 import { type SchemaMap, unpackOperation } from '../src/catalog/types.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -141,6 +142,11 @@ for (const op of unexpectedlyOauthOnly) {
   )
 }
 
+// --- every operation states its Discord permission requirements -----------------------------
+// Discord's spec carries no permission metadata, so a new upstream operation needs a hand-written
+// entry before anything may use the table to authorize it.
+for (const problem of permissionTableProblems(operations)) fail('permissions', problem)
+
 // --- schema closures resolve ------------------------------------------------------------------
 const schemaMap = JSON.parse(readFileSync(join(GENERATED, 'schemas.json'), 'utf8')) as SchemaMap
 for (const [operationId, closure] of Object.entries(schemaMap.closures)) {
@@ -177,5 +183,5 @@ if (failures.length > 0) {
   process.exit(1)
 }
 process.stderr.write(
-  `spec:check passed: ${operations.length} operations, all classified, path-item merge intact, ${OAUTH_ONLY.length} bot-incompatible operations recorded, output deterministic.\n`,
+  `spec:check passed: ${operations.length} operations, all classified, path-item merge intact, ${OAUTH_ONLY.length} bot-incompatible operations recorded, permissions described, output deterministic.\n`,
 )
