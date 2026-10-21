@@ -7,7 +7,7 @@
 # The SDK is built here rather than copied from the host: `dist/` is gitignored, so a `COPY` of it
 # only works on a machine that happens to have run `pnpm build` first — which is never true of a
 # clean CI checkout.
-FROM node:24-alpine AS sdk
+FROM node:24.22.1-alpine AS sdk
 
 RUN corepack enable && corepack prepare pnpm@10.20.0 --activate
 WORKDIR /src
@@ -23,7 +23,7 @@ RUN pnpm install --frozen-lockfile --ignore-scripts
 # Only the SDK: this image needs its type declarations, not the control plane.
 RUN pnpm exec tsc --build packages/workflow-sdk
 
-FROM node:24-alpine
+FROM node:24.22.1-alpine
 
 # Installed globally rather than through corepack: corepack resolves and downloads on first use,
 # and this image runs as a user with no writable home and — by the time a build runs — a package
