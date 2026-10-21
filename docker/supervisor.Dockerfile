@@ -5,7 +5,7 @@
 #
 # Run this against **rootless** Docker. Under rootful Docker a container escape is a host root
 # escape, and none of the restrictions here would compensate.
-FROM node:24-alpine AS build
+FROM node:24.22.1-alpine AS build
 
 RUN corepack enable && corepack prepare pnpm@10.20.0 --activate
 
@@ -30,7 +30,7 @@ COPY scripts ./scripts
 RUN pnpm install --frozen-lockfile
 RUN pnpm build
 
-FROM node:24-alpine
+FROM node:24.22.1-alpine
 
 # The Docker CLI, because the supervisor shells out with argv arrays rather than speaking the HTTP
 # API. There is no shell in the path a caller controls, so there is nothing to inject into.

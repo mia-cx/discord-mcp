@@ -3,7 +3,7 @@
 # Deliberately close to empty. The artifact arrives on a read-only volume, the capability socket is
 # the only channel out, and there is no network — so anything else in this image is attack surface
 # for no benefit. In particular there is no shell utility set, no package manager, and no curl.
-FROM node:24-alpine
+FROM node:24.22.1-alpine
 
 # `nobody`. The supervisor also passes --user, so this is belt and braces rather than the control.
 USER 65534:65534

@@ -1,5 +1,5 @@
 # Stateless Discord MCP relay. HTTP credentials arrive with each request.
-FROM node:24-alpine AS build
+FROM node:24.22.1-alpine AS build
 
 RUN corepack enable && corepack prepare pnpm@10.20.0 --activate
 
@@ -24,7 +24,7 @@ COPY scripts ./scripts
 RUN pnpm install --frozen-lockfile
 RUN pnpm build
 
-FROM node:24-alpine
+FROM node:24.22.1-alpine
 
 # Run the relay as an unprivileged user.
 RUN addgroup -g 10000 discord-mcp && adduser -D -u 10001 -G discord-mcp discord-mcp
