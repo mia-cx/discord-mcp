@@ -1,5 +1,6 @@
 import { defineTool, type RiskClass, ValidationError } from '@discord-mcp/core'
 import { Effect, Schema } from 'effect'
+import { requiredPermissions } from '../catalog/required-permissions.ts'
 import { OperationCatalog } from '../catalog/service.ts'
 import type { OperationEntry } from '../catalog/types.ts'
 import {
@@ -33,7 +34,7 @@ const search = defineTool({
   name: 'discord_api_search',
   title: 'Search bot-authenticated Discord API operations',
   description:
-    'Find operations by words, HTTP method, or family. Read discord_api_describe for the exact parameters before calling an unfamiliar operation.',
+    'Find operations by words, HTTP method, or family. Each result lists the Discord permissions it needs. Read discord_api_describe for the exact parameters before calling an unfamiliar operation.',
   toolset: 'api',
   risk: 'read',
   scopes: [],
@@ -71,6 +72,7 @@ const search = defineTool({
             path: operation.path,
             family: operation.family,
             risk: operation.risk,
+            permissions: requiredPermissions(operation.operationId),
           })),
         ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
       }
@@ -81,7 +83,7 @@ const describe = defineTool({
   name: 'discord_api_describe',
   title: 'Describe a Discord API operation',
   description:
-    'Read the path and query parameters, request body schema, risk class, and dispatcher for one bot-authenticated operation.',
+    'Read the path and query parameters, request body schema, Discord permission requirements, risk class, and dispatcher for one bot-authenticated operation.',
   toolset: 'api',
   risk: 'read',
   scopes: [],
@@ -104,6 +106,7 @@ const describe = defineTool({
         bodySchema: (yield* catalog.bodySchema(operation.operationId)) ?? null,
         auditLogReason: operation.auditLogReason,
         risk: operation.risk,
+        permissions: requiredPermissions(operation.operationId),
         tool: `discord_api_${operation.risk === 'bot_admin' ? 'admin' : operation.risk}`,
       }
     }),
