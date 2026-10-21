@@ -154,8 +154,8 @@ everywhere it is installed, not just in one guild.",
       "readOnlyHint": true,
     },
     "description": "Full detail for one operation: parameters, request body schema with its transitive $defs,
-auth modes, required OAuth scopes, risk class, pagination style, audit-log support, and a
-ready-to-use dispatcher example.
+auth modes, required OAuth scopes, Discord permission requirements, risk class, pagination
+style, audit-log support, and a ready-to-use dispatcher example.
 
 Call this before dispatching an operation you have not used before. It costs no Discord request.",
     "inputSchema": {

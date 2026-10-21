@@ -1,5 +1,6 @@
 import { defineTool, type RiskClass, Snowflake } from '@discord-mcp/core'
 import { Effect, Schema } from 'effect'
+import { requiredPermissions } from '../catalog/required-permissions.ts'
 import { OperationCatalog } from '../catalog/service.ts'
 import { docsUrlFor, type OperationEntry } from '../catalog/types.ts'
 import { type AuthProfiles, dispatch, preview } from '../dispatch/dispatcher.ts'
@@ -70,6 +71,7 @@ export const apiSearch = defineTool<typeof SearchInput.Type, unknown, OperationC
           risk: operation.risk,
           family: operation.family,
           auth: operation.auth,
+          permissions: requiredPermissions(operation.operationId),
           ...(operation.curatedTool === undefined
             ? {}
             : { preferCuratedTool: operation.curatedTool }),
@@ -93,8 +95,8 @@ export const apiDescribe = defineTool<typeof DescribeInput.Type, unknown, Operat
   title: 'Describe a Discord API operation',
   description: [
     'Full detail for one operation: parameters, request body schema with its transitive $defs,',
-    'auth modes, required OAuth scopes, risk class, pagination style, audit-log support, and a',
-    'ready-to-use dispatcher example.',
+    'auth modes, required OAuth scopes, Discord permission requirements, risk class, pagination',
+    'style, audit-log support, and a ready-to-use dispatcher example.',
     '',
     'Call this before dispatching an operation you have not used before. It costs no Discord request.',
   ].join('\n'),
@@ -128,6 +130,7 @@ export const apiDescribe = defineTool<typeof DescribeInput.Type, unknown, Operat
         family: op.family,
         auth: op.auth,
         oauthScopes: op.oauthScopes,
+        permissions: requiredPermissions(op.operationId),
         pathParams: op.pathParams.map((name) => ({
           name,
           required: true,

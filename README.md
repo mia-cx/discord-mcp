@@ -58,8 +58,8 @@ Both paths require OAuth and bot credentials on every HTTP request.
 
 | Tool | Purpose |
 | --- | --- |
-| `discord_api_search` | Find bot-authenticated operations by words, method, or family. |
-| `discord_api_describe` | Read an operation's parameters and request body schema. |
+| `discord_api_search` | Find bot-authenticated operations and their Discord permission requirements. |
+| `discord_api_describe` | Read an operation's parameters, request body schema, and permission requirements. |
 | `discord_api_read` | Execute read operations. |
 | `discord_api_write` | Execute create/update operations. |
 | `discord_api_destructive` | Execute deletes and other destructive operations. |
@@ -80,6 +80,40 @@ agent conversations.
 Calls currently accept JSON payloads. Multipart file upload is not implemented.
 Discord rate limits and API errors are returned to the caller; the HTTP relay
 disables automatic retries and rate-limit waits.
+
+## Permission metadata
+
+Search and describe return each operation's `permissions`: the Discord permission
+names it needs, whether Discord evaluates them for the guild or a channel, and the
+path parameter or lookup that identifies it. Entries also record alternatives such
+as message authorship, requirements that depend on the request, and role-hierarchy
+rules. `none` means Discord requires no permission; `unknown` means Discord does not
+document the route.
+
+This relay reports the metadata but does not enforce it: Discord still checks every
+call against the bot. A relay acting for a person can import the table with the
+catalog and the effective-permission resolver, then re-check each call against that
+person's permissions:
+
+```ts
+import { computeEffectivePermissions, requiredPermissions } from '@discord-mcp/discord-api/catalog'
+```
+
+The package is a workspace library, not published to npm. Read the evaluation rules
+in [`required-permissions.ts`](./packages/discord-api/src/catalog/required-permissions.ts):
+a consumer that skips a condition it cannot verify stays stricter than the rule.
+
+The table and resolver are not a complete authorization engine for a person. The
+consumer must also enforce timeouts, private-thread membership, and the `only` and
+`when` conditions, and filter guild-wide responses, which return what the bot can
+see. Rendering permissions such as `EmbedLinks` are not listed, so content renders
+with the bot's permissions.
+
+Discord's OpenAPI specification has no permission data, so the table is written by
+hand from [Discord's developer documentation](https://docs.discord.com/developers).
+Each entry cites its sources, and `permissionSources` records the documentation
+commit last checked. `pnpm spec:check` fails until every cataloged operation has
+a well-formed entry.
 
 ## Run from source
 
@@ -158,7 +192,7 @@ Public routing lives in `mia-cx/yggdrasil-spec`. Consult
 
 ```sh
 corepack pnpm check        # Formatting, TypeScript build, and ordinary tests
-corepack pnpm spec:check   # Catalog coverage, classification, and deterministic generation
+corepack pnpm spec:check   # Catalog coverage, classification, permissions, and determinism
 ```
 
 Integration tests cover browser/CLI login, credential bindings, code replay,

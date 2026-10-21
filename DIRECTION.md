@@ -29,6 +29,13 @@ HTTP supports OAuth discovery, dynamic client registration, browser-bound consen
 `scripts/client.mjs` connects local agents over stdio to the hosted HTTP relay, sharing private
 client-side login and bot files without putting credentials in each agent's configuration.
 Read `README.md` for tools, configuration, and current limitations.
+
+Every cataloged operation carries hand-maintained Discord permission metadata: permission
+names, guild or channel scope, alternatives, conditions, and role-hierarchy rules, cited from
+Discord's docs. `spec:check` fails on a missing entry. `@discord-mcp/discord-api/catalog` exports
+it with the catalog and the effective-permission resolver, so a relay acting for a person can
+filter and re-check calls against that person's permissions. This relay reports it in search and
+describe but does not enforce it; Discord still decides each call against the bot.
 Public setup instructions use operator-supplied URLs. Keep deployment hostnames out of this
 repository's docs and helper defaults; the login helper requires an explicit relay URL.
 
