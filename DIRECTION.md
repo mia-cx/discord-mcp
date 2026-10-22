@@ -1,6 +1,7 @@
 # Direction
 
 Provide a stateless Discord API relay over MCP. HTTP callers must log in with Discord OAuth.
+Project code uses the MCX License v1.0; third-party materials retain their original licenses.
 Every request supplies a relay OAuth bearer credential and a separate `X-Discord-Bot-Token` header.
 Validate both grants with Discord and execute that request's tools as the supplied bot.
 OAuth identifies a human; possession of the bot token determines bot access, not that human's guild permissions.

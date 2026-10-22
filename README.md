@@ -208,3 +208,9 @@ Stateless HTTP was already possible before that revision.
 Its libraries and tests remain in the workspace, but the server executable no
 longer starts that application. Workflows, persistent templates/blueprints,
 PAT/OIDC administration, and the sandbox supervisor are outside the relay.
+
+## License
+
+Copyright © 2026 Mia and the discord-mcp contributors.
+Licensed under the [MCX License v1.0](./LICENSE).
+Third-party code and specifications retain their original licenses.
