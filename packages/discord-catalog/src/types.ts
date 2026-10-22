@@ -1,4 +1,20 @@
-import type { AuthMode, RiskClass } from '@discord-mcp/core'
+import { Schema } from 'effect'
+
+/**
+ * `credential` operations (OAuth exchange/refresh/revocation, webhook and interaction tokens) are
+ * handled only by dedicated services and are never exposed as a tool.
+ */
+export const RiskClass = Schema.Literals([
+  'read',
+  'write',
+  'destructive',
+  'bot_admin',
+  'credential',
+])
+export type RiskClass = typeof RiskClass.Type
+
+export const AuthMode = Schema.Literals(['bot', 'oauth2', 'webhook', 'interaction'])
+export type AuthMode = typeof AuthMode.Type
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 

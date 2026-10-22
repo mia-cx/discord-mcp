@@ -1,7 +1,7 @@
 import { defineTool, McpRequestContext, Snowflake, ValidationError } from '@discord-mcp/core'
+import { namesToBits, type PermissionName } from '@mia-cx/discord-catalog'
 import { Effect, Schema } from 'effect'
 import { hashArguments, PreviewTokens } from '../dispatch/preview.ts'
-import { namesToBits, type PermissionName } from '../permissions.ts'
 import { DiscordRest } from '../rest.ts'
 
 /**

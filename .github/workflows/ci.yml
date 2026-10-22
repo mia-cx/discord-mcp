@@ -29,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
 
       - uses: actions/setup-node@v4
         with:
@@ -51,11 +51,30 @@ jobs:
       - name: Check the catalog is regenerated
         run: |
           pnpm spec:generate
-          if ! git diff --quiet -- packages/discord-api/src/catalog/generated; then
+          if ! git diff --quiet -- packages/discord-catalog/src/generated; then
             echo "::error::The generated catalog is out of date. Run 'pnpm spec:generate' and commit the result."
-            git diff --stat -- packages/discord-api/src/catalog/generated
+            git diff --stat -- packages/discord-catalog/src/generated
             exit 1
           fi
+
+  package:
+    name: Package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Packs @mia-cx/discord-catalog, installs the tarball in a workspace of its own, and runs it
+      # in workerd with nodejs_compat off.
+      - run: pnpm package:verify
 
   images:
     name: ${{ matrix.image }} (${{ matrix.platform.arch }})

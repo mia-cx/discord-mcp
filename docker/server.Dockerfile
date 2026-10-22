@@ -17,9 +17,6 @@ COPY types ./types
 COPY packages ./packages
 COPY apps ./apps
 COPY vendor ./vendor
-# `pnpm build` runs scripts/copy-assets.mjs, which copies the generated catalog schemas into dist.
-# Without it the server starts and then fails at the first API call with a missing file.
-COPY scripts ./scripts
 
 RUN pnpm install --frozen-lockfile
 RUN pnpm build

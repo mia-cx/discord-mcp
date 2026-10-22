@@ -4,5 +4,10 @@
     "rootDir": "src",
     "outDir": "dist"
   },
-  "include": ["src/**/*", "../../types/globals.d.ts"]
+  "include": ["src/**/*", "../../types/globals.d.ts"],
+  "references": [
+    {
+      "path": "../discord-catalog"
+    }
+  ]
 }

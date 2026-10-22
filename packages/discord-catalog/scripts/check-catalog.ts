@@ -10,18 +10,15 @@ import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import {
-  source as generatedSource,
-  packedOperations,
-  tokenTable,
-} from '../src/catalog/generated/index.ts'
-import { permissionTableProblems } from '../src/catalog/required-permissions.ts'
-import { type SchemaMap, unpackOperation } from '../src/catalog/types.ts'
+import { source as generatedSource, packedOperations, tokenTable } from '../src/generated/index.ts'
+import { schemaMap } from '../src/generated/schemas.ts'
+import { permissionTableProblems } from '../src/required-permissions.ts'
+import { unpackOperation } from '../src/types.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(HERE, '../../..')
 const VENDOR = join(ROOT, 'vendor/discord')
-const GENERATED = join(HERE, '../src/catalog/generated')
+const GENERATED = join(HERE, '../src/generated')
 
 const failures: string[] = []
 const fail = (gate: string, detail: string) => failures.push(`${gate}: ${detail}`)
@@ -148,7 +145,6 @@ for (const op of unexpectedlyOauthOnly) {
 for (const problem of permissionTableProblems(operations)) fail('permissions', problem)
 
 // --- schema closures resolve ------------------------------------------------------------------
-const schemaMap = JSON.parse(readFileSync(join(GENERATED, 'schemas.json'), 'utf8')) as SchemaMap
 for (const [operationId, closure] of Object.entries(schemaMap.closures)) {
   for (const name of closure) {
     if (!(name in schemaMap.definitions))
@@ -158,7 +154,7 @@ for (const [operationId, closure] of Object.entries(schemaMap.closures)) {
 
 // --- generated output matches committed output ------------------------------------------------
 const before = readFileSync(join(GENERATED, 'index.ts'), 'utf8')
-const beforeSchemas = readFileSync(join(GENERATED, 'schemas.json'), 'utf8')
+const beforeSchemas = readFileSync(join(GENERATED, 'schemas.ts'), 'utf8')
 execFileSync('node', ['--experimental-strip-types', join(HERE, 'generate-catalog.ts')], {
   stdio: 'ignore',
   cwd: ROOT,
@@ -169,10 +165,10 @@ if (readFileSync(join(GENERATED, 'index.ts'), 'utf8') !== before) {
     'regenerating index.ts produced different output; commit the regenerated catalog',
   )
 }
-if (readFileSync(join(GENERATED, 'schemas.json'), 'utf8') !== beforeSchemas) {
+if (readFileSync(join(GENERATED, 'schemas.ts'), 'utf8') !== beforeSchemas) {
   fail(
     'determinism',
-    'regenerating schemas.json produced different output; commit the regenerated catalog',
+    'regenerating schemas.ts produced different output; commit the regenerated catalog',
   )
 }
 

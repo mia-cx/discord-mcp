@@ -34,18 +34,5 @@ export const Scope = Schema.Literals([
 ])
 export type Scope = typeof Scope.Type
 
-/**
- * `credential` operations (OAuth exchange/refresh/revocation, webhook and interaction tokens) are
- * handled only by dedicated services and are never exposed as a tool.
- */
-export const RiskClass = Schema.Literals([
-  'read',
-  'write',
-  'destructive',
-  'bot_admin',
-  'credential',
-])
-export type RiskClass = typeof RiskClass.Type
-
-export const AuthMode = Schema.Literals(['bot', 'oauth2', 'webhook', 'interaction'])
-export type AuthMode = typeof AuthMode.Type
+/** Owned by the published catalog, which classifies every operation with them. */
+export { AuthMode, RiskClass } from '@mia-cx/discord-catalog'

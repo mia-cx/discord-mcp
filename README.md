@@ -96,11 +96,13 @@ catalog and the effective-permission resolver, then re-check each call against t
 person's permissions:
 
 ```ts
-import { computeEffectivePermissions, requiredPermissions } from '@discord-mcp/discord-api/catalog'
+import { computeEffectivePermissions, requiredPermissions } from '@mia-cx/discord-catalog'
 ```
 
-The package is a workspace library, not published to npm. Read the evaluation rules
-in [`required-permissions.ts`](./packages/discord-api/src/catalog/required-permissions.ts):
+[`@mia-cx/discord-catalog`](./packages/discord-catalog) runs in Node and in Cloudflare
+Workers without `nodejs_compat`; `pnpm package:verify` proves it from the packed
+tarball. Read the evaluation rules
+in [`required-permissions.ts`](./packages/discord-catalog/src/required-permissions.ts):
 a consumer that skips a condition it cannot verify stays stricter than the rule.
 
 The table and resolver are not a complete authorization engine for a person. The

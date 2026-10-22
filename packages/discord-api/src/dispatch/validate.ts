@@ -1,8 +1,8 @@
 import { type AuthMode, ValidationError } from '@discord-mcp/core'
+import type { OperationEntry } from '@mia-cx/discord-catalog'
 import { Ajv2020 } from 'ajv/dist/2020.js'
 import * as ajvFormats from 'ajv-formats'
 import { Effect } from 'effect'
-import type { OperationEntry } from '../catalog/types.ts'
 
 /**
  * Local validation, all of it, before any network call.

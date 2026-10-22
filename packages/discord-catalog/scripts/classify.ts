@@ -1,5 +1,10 @@
-import type { AuthMode, RiskClass } from '@discord-mcp/core'
-import type { HttpMethod, OperationFamily, PaginationStyle } from '../src/catalog/types.ts'
+import type {
+  AuthMode,
+  HttpMethod,
+  OperationFamily,
+  PaginationStyle,
+  RiskClass,
+} from '../src/types.ts'
 
 /**
  * Risk, family, and pagination are derived from the operation, not hand-listed, so a new upstream

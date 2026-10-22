@@ -1,5 +1,5 @@
-import type { PermissionName } from '../permissions.ts'
 import { source } from './generated/index.ts'
+import type { PermissionName } from './permissions.ts'
 import type { OperationEntry } from './types.ts'
 
 /**

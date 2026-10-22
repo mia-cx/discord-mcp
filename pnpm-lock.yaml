@@ -126,6 +126,9 @@ importers:
 
   packages/core:
     dependencies:
+      '@mia-cx/discord-catalog':
+        specifier: workspace:*
+        version: link:../discord-catalog
       '@modelcontextprotocol/server':
         specifier: 2.3.1
         version: 2.3.1
@@ -150,15 +153,15 @@ importers:
       '@discordjs/rest':
         specifier: 2.6.3
         version: 2.6.3
+      '@mia-cx/discord-catalog':
+        specifier: workspace:*
+        version: link:../discord-catalog
       ajv:
         specifier: 8.20.0
         version: 8.20.0
       ajv-formats:
         specifier: 3.0.1
         version: 3.0.1(ajv@8.20.0)
-      discord-api-types:
-        specifier: 0.38.51
-        version: 0.38.51
       effect:
         specifier: 4.0.0-beta.101
         version: 4.0.0-beta.101
@@ -174,6 +177,16 @@ importers:
       '@discord-mcp/persistence':
         specifier: workspace:*
         version: link:../persistence
+      effect:
+        specifier: 4.0.0-beta.101
+        version: 4.0.0-beta.101
+
+  packages/discord-catalog:
+    dependencies:
+      discord-api-types:
+        specifier: 0.38.51
+        version: 0.38.51
+    devDependencies:
       effect:
         specifier: 4.0.0-beta.101
         version: 4.0.0-beta.101

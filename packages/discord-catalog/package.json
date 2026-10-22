@@ -1,0 +1,48 @@
+{
+  "name": "@mia-cx/discord-catalog",
+  "version": "0.1.0",
+  "description": "Every Discord HTTP API operation, the permissions Discord requires for each, and an effective-permission resolver. Runs in Node and Cloudflare Workers.",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mia-cx/discord-mcp.git",
+    "directory": "packages/discord-catalog"
+  },
+  "keywords": [
+    "discord",
+    "discord-api",
+    "permissions",
+    "openapi",
+    "effect",
+    "cloudflare-workers"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.map",
+    "!dist/**/*.tsbuildinfo"
+  ],
+  "scripts": {
+    "prepack": "tsc --build && cp ../../LICENSE LICENSE"
+  },
+  "dependencies": {
+    "discord-api-types": "0.38.51"
+  },
+  "peerDependencies": {
+    "effect": "4.0.0-beta.101"
+  },
+  "devDependencies": {
+    "effect": "4.0.0-beta.101"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

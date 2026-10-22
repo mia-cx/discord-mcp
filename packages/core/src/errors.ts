@@ -1,3 +1,4 @@
+import { OperationNotFoundError } from '@mia-cx/discord-catalog'
 import { Schema } from 'effect'
 
 /**
@@ -68,13 +69,8 @@ export class DiscordRateLimitError extends Schema.TaggedErrorClass<DiscordRateLi
   },
 ) {}
 
-export class OperationNotFoundError extends Schema.TaggedErrorClass<OperationNotFoundError>()(
-  'OperationNotFoundError',
-  {
-    operationId: Schema.String,
-    suggestion: Schema.String,
-  },
-) {}
+/** Owned by the published catalog, whose lookups fail with it. */
+export { OperationNotFoundError }
 
 export class RateGuardTrippedError extends Schema.TaggedErrorClass<RateGuardTrippedError>()(
   'RateGuardTrippedError',

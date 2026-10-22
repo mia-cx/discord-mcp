@@ -5,6 +5,9 @@
       "path": "./packages/workflow-sdk"
     },
     {
+      "path": "./packages/discord-catalog"
+    },
+    {
       "path": "./packages/core"
     },
     {
