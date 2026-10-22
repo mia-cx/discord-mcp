@@ -5,7 +5,7 @@ a resolver for a member's effective permissions. Runs in Node and in Cloudflare
 Workers without `nodejs_compat`.
 
 ```sh
-pnpm add @mia-cx/discord-catalog effect
+pnpm add @mia-cx/discord-catalog@0.1.0 effect@4.0.0-beta.101
 ```
 
 ## Check a person's permissions
