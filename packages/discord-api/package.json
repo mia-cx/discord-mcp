@@ -5,8 +5,8 @@
   "type": "module",
   "exports": {
     "./catalog": {
-      "types": "./dist/catalog/index.d.ts",
-      "default": "./dist/catalog/index.js"
+      "types": "./dist/catalog.d.ts",
+      "default": "./dist/catalog.js"
     },
     "./relay": {
       "types": "./dist/relay.d.ts",
@@ -21,10 +21,10 @@
     "@discord-mcp/core": "workspace:*",
     "@discord-mcp/discord-presentations": "workspace:*",
     "@discord-mcp/persistence": "workspace:*",
+    "@mia-cx/discord-catalog": "workspace:*",
     "@discordjs/rest": "2.6.3",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
-    "discord-api-types": "0.38.51",
     "effect": "4.0.0-beta.101"
   }
 }

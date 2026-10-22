@@ -1,13 +1,23 @@
-import { type AuthMode, OperationNotFoundError, type RiskClass } from '@discord-mcp/core'
-import { Context, Effect, Layer } from 'effect'
+import { Context, Effect, Layer, Schema } from 'effect'
 import { packedOperations, source, tokenTable } from './generated/index.ts'
 import {
+  type AuthMode,
   type HttpMethod,
   type OperationEntry,
   type OperationFamily,
+  type RiskClass,
   type SchemaMap,
   unpackOperation,
 } from './types.ts'
+
+/** No cataloged operation has this ID. `suggestion` tells a model what to do instead of guessing. */
+export class OperationNotFoundError extends Schema.TaggedErrorClass<OperationNotFoundError>()(
+  'OperationNotFoundError',
+  {
+    operationId: Schema.String,
+    suggestion: Schema.String,
+  },
+) {}
 
 export interface SearchQuery {
   readonly query?: string
@@ -127,13 +137,11 @@ export class OperationCatalog extends Context.Service<
         }
       }
 
-      // Memoized so the 400 KiB map is read at most once, and only if something asks for it.
+      // Memoized so the 400 KiB map is parsed at most once, and only if something asks for it.
       const schemas = yield* Effect.cached(
         Effect.promise(async () => {
-          const { readFile } = await import('node:fs/promises')
-          const { fileURLToPath } = await import('node:url')
-          const path = fileURLToPath(new URL('./generated/schemas.json', import.meta.url))
-          return JSON.parse(await readFile(path, 'utf8')) as SchemaMap
+          const { schemaMap } = await import('./generated/schemas.ts')
+          return schemaMap
         }),
       )
 

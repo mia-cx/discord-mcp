@@ -1,0 +1,55 @@
+name: Publish @mia-cx/discord-catalog
+
+# Publishes on a `discord-catalog-v<version>` tag through npm trusted publishing: npm exchanges this
+# workflow's OIDC token for a one-time publish credential, so no npm token is stored anywhere.
+# The tag must match the package version. Image releases keep their own `v*` tags.
+#
+# npm accepts a trusted publisher only for a package that already exists. Publish the first version
+# by hand from a verified tarball, then add this repository and `npm-publish.yml` as the trusted
+# publisher in the package's npm settings. Every later version goes through this workflow.
+on:
+  push:
+    tags: ['discord-catalog-v*']
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # Trusted publishing and the provenance attestation both need the OIDC token.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Check the tag matches the package version
+        run: |
+          version="$(node -p "require('./packages/discord-catalog/package.json').version")"
+          if [ "${GITHUB_REF_NAME}" != "discord-catalog-v${version}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package version ${version}."
+            exit 1
+          fi
+
+      - run: pnpm check
+      - run: pnpm spec:check
+      - run: pnpm package:verify
+
+      # pnpm packs, so the manifest is the one package:verify tested; npm publishes, because npm
+      # performs the trusted-publishing exchange.
+      - name: Publish
+        run: |
+          pnpm --dir packages/discord-catalog pack --pack-destination "$RUNNER_TEMP"
+          npm publish "$RUNNER_TEMP"/mia-cx-discord-catalog-*.tgz --access public --provenance

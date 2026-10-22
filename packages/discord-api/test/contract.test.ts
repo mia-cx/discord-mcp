@@ -1,7 +1,7 @@
 import { type McpSchema, toMcpInputJsonSchema } from '@discord-mcp/core'
+import { OperationCatalog } from '@mia-cx/discord-catalog'
 import { Effect, ManagedRuntime } from 'effect'
 import { describe, expect, it } from 'vitest'
-import { OperationCatalog } from '../src/catalog/service.ts'
 import { apiTools } from '../src/tools/api-tools.ts'
 import { messageTools } from '../src/tools/message-tools.ts'
 import { operatorTools } from '../src/tools/operator-tools.ts'

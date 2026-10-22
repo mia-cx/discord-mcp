@@ -1,8 +1,7 @@
 import { defineTool, type RiskClass, ValidationError } from '@discord-mcp/core'
+import type { OperationEntry } from '@mia-cx/discord-catalog'
+import { OperationCatalog, requiredPermissions } from '@mia-cx/discord-catalog'
 import { Effect, Schema } from 'effect'
-import { requiredPermissions } from '../catalog/required-permissions.ts'
-import { OperationCatalog } from '../catalog/service.ts'
-import type { OperationEntry } from '../catalog/types.ts'
 import {
   buildRoute,
   validateAuditLogReason,

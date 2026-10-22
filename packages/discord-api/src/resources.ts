@@ -1,6 +1,6 @@
 import { defineResource } from '@discord-mcp/core'
+import { OperationCatalog } from '@mia-cx/discord-catalog'
 import { Effect } from 'effect'
-import { OperationCatalog } from './catalog/service.ts'
 
 /**
  * Catalog detail as resources.

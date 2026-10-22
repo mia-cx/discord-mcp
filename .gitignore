@@ -3,3 +3,5 @@ dist/
 *.tsbuildinfo
 .env
 *.sqlite*
+packages/discord-catalog/LICENSE
+*.tgz

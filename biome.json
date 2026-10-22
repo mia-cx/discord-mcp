@@ -6,7 +6,7 @@
       "!**/dist",
       "!**/*.tsbuildinfo",
       "!spike",
-      "!**/src/catalog/generated",
+      "!packages/discord-catalog/src/generated",
       "!vendor/discord/openapi.json"
     ]
   },

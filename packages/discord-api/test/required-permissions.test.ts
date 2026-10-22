@@ -1,12 +1,12 @@
-import { Effect } from 'effect'
-import { describe, expect, it } from 'vitest'
 import {
   OperationCatalog,
   type OperationPermissions,
   operationPermissions,
   permissionTableProblems,
   requiredPermissions,
-} from '../src/catalog/index.ts'
+} from '@mia-cx/discord-catalog'
+import { Effect } from 'effect'
+import { describe, expect, it } from 'vitest'
 import { relayTools } from '../src/tools/relay-tools.ts'
 
 const run = <A, E>(effect: Effect.Effect<A, E, OperationCatalog>) =>

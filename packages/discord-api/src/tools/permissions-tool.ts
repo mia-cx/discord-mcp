@@ -1,12 +1,12 @@
 import { defineTool, Snowflake } from '@discord-mcp/core'
-import { Effect, Schema } from 'effect'
 import {
   computeEffectivePermissions,
   explainMissing,
   type OverwriteLike,
   type PermissionName,
   type RoleLike,
-} from '../permissions.ts'
+} from '@mia-cx/discord-catalog'
+import { Effect, Schema } from 'effect'
 import { DiscordRest } from '../rest.ts'
 
 const GuildPayload = Schema.Struct({ owner_id: Schema.String })

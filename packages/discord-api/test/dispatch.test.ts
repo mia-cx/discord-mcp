@@ -1,7 +1,7 @@
 import { McpRequestContext, type Principal, type Scope } from '@discord-mcp/core'
+import { OperationCatalog } from '@mia-cx/discord-catalog'
 import { Effect, Layer, ManagedRuntime } from 'effect'
 import { describe, expect, it } from 'vitest'
-import { OperationCatalog } from '../src/catalog/service.ts'
 import { AuthProfiles, dispatch, preview } from '../src/dispatch/dispatcher.ts'
 import { PreviewTokens } from '../src/dispatch/preview.ts'
 import { DiscordRest } from '../src/rest.ts'

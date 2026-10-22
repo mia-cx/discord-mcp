@@ -4,9 +4,9 @@ import {
   type RiskClass,
   ValidationError,
 } from '@discord-mcp/core'
+import type { OperationEntry } from '@mia-cx/discord-catalog'
+import { OperationCatalog } from '@mia-cx/discord-catalog'
 import { Context, Effect, Layer } from 'effect'
-import { OperationCatalog } from '../catalog/service.ts'
-import type { OperationEntry } from '../catalog/types.ts'
 import { DiscordRest } from '../rest.ts'
 import { hashArguments, PreviewTokens } from './preview.ts'
 import {

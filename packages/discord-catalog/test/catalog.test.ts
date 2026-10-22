@@ -1,8 +1,8 @@
 import { Effect } from 'effect'
 import { describe, expect, it } from 'vitest'
-import { packedOperations, tokenTable } from '../src/catalog/generated/index.ts'
-import { OperationCatalog } from '../src/catalog/service.ts'
-import { unpackOperation } from '../src/catalog/types.ts'
+import { packedOperations, tokenTable } from '../src/generated/index.ts'
+import { OperationCatalog } from '../src/service.ts'
+import { unpackOperation } from '../src/types.ts'
 
 const run = <A, E>(effect: Effect.Effect<A, E, OperationCatalog>) =>
   Effect.runPromise(Effect.provide(effect, OperationCatalog.layer) as Effect.Effect<A, E>)
