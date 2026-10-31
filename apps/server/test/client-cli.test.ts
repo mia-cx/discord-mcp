@@ -9,7 +9,7 @@ import { toNodeHandler } from '@modelcontextprotocol/node'
 import { Effect, Layer } from 'effect'
 import { expect, it } from 'vitest'
 import { createRelay } from '../src/relay.ts'
-import { config, discordOAuth, login } from './login-fixture.ts'
+import { BOT_ID, botToken, config, discordOAuth, executor, login } from './login-fixture.ts'
 
 it('relays stdio requests with private credentials, legacy SSE, and credential replacement', async () => {
   const received: Array<{ authorization: string | undefined; bot: string | string[] | undefined }> =
@@ -98,11 +98,12 @@ it('serialises concurrent bridge refreshes into one valid login and refreshes on
   const issuer = `http://127.0.0.1:${address.port}`
   const relay = createRelay(
     { ...config, allowedHosts: ['127.0.0.1'], login: { ...config.login, publicBaseUrl: issuer } },
-    () =>
+    executor(() =>
       Layer.succeed(DiscordRest)({
         raw: undefined as never,
-        request: () => Effect.succeed({ id: '345678901234567890', bot: true }),
+        request: () => Effect.succeed({ id: BOT_ID, bot: true }),
       }),
+    ),
     oauth.fetch,
   )
   handle = toNodeHandler(relay)
@@ -117,7 +118,7 @@ it('serialises concurrent bridge refreshes into one valid login and refreshes on
     ...tokens,
     expires_at: Math.floor(Date.now() / 1000) + 3600,
   })
-  await writeFile(join(directory, 'bot.env'), 'DISCORD_BOT_TOKEN=private-bot\n', { mode: 0o600 })
+  await writeFile(join(directory, 'bot.env'), `DISCORD_BOT_TOKEN=${botToken()}\n`, { mode: 0o600 })
   const bridges = Array.from({ length: 3 }, () => {
     const child = spawn(process.execPath, ['scripts/client.mjs'], {
       env: { ...process.env, DISCORD_MCP_CONFIG_DIR: directory },

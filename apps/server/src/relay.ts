@@ -6,20 +6,22 @@ import {
   renderCause,
 } from '@discord-mcp/core'
 import {
+  createRateLimiter,
+  DEFAULT_WINDOW_MS,
   DiscordRest,
   OperationCatalog,
-  RateGuard,
+  type RateLimiter,
   type RestConfig,
   relayTools,
 } from '@discord-mcp/discord-api/relay'
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server'
 import { Effect, Layer, ManagedRuntime, Redacted } from 'effect'
 import { createDiscordLogin, type LoginConfig } from './login.ts'
+import { botIdFromToken } from './router.ts'
 
 export interface RelayConfig {
   readonly allowedHosts: ReadonlyArray<string>
   readonly allowedOrigins: ReadonlyArray<string>
-  readonly rest: Omit<RestConfig, 'token'>
   readonly login: LoginConfig
 }
 
@@ -52,7 +54,11 @@ export const buildRelayServer = (runtime: ReturnType<typeof relayRuntime>) => {
   return server
 }
 
-const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
+export const json = (
+  status: number,
+  body: unknown,
+  headers: Record<string, string> = {},
+): Response =>
   new Response(JSON.stringify(body), {
     status,
     headers: { 'content-type': 'application/json', 'cache-control': 'no-store', ...headers },
@@ -92,17 +98,107 @@ const discordFailure = (error: ReturnType<typeof renderCause>) => {
 }
 
 /**
- * MCP HTTP relay. Discord validates both login and bot credentials on every request.
- * Without `bots`, bot credentials, identities, and Discord responses never survive the request.
- * With `bots`, each verified call keeps its bot online and stores its token encrypted.
- * `restLayer` is the Discord network seam used by offline integration tests.
+ * Runs one authenticated MCP request as the bot whose token it carries. `botId` is the ID that
+ * token names, which routing used; whoever runs the request still checks the token with Discord.
+ */
+export type Execute = (request: Request, credential: string, botId: string) => Promise<Response>
+
+/** An idle bot's limiter lasts as long as its guard remembers rejections, so neither resets early. */
+const LIMITER_IDLE_MS = DEFAULT_WINDOW_MS
+
+export interface ExecutorOptions {
+  readonly rest: Omit<RestConfig, 'token'>
+  /** Discord's network, for REST. */
+  readonly discordFetch?: typeof fetch
+  /** With `bots`, each verified call keeps its bot online and stores its token encrypted. */
+  readonly bots?: Pick<BotRuntimes, 'use'> | undefined
+  /** The Discord REST seam used by offline integration tests. */
+  readonly restLayer?: (
+    token: Redacted.Redacted<string>,
+    limiter: RateLimiter,
+  ) => Layer.Layer<DiscordRest>
+}
+
+/**
+ * Runs requests the way a bot host does: Discord checks the bot token on every request, and every
+ * request for one bot queues in that bot's one rate limiter. Limiters hold no token, so without
+ * `bots`, bot credentials, identities, and Discord responses never outlive the request.
+ */
+export const createExecutor = ({
+  rest,
+  discordFetch = fetch,
+  bots,
+  restLayer = DiscordRest.shared,
+}: ExecutorOptions): Execute => {
+  const limiters = new Map<string, { limiter: RateLimiter; active: number; idleSince: number }>()
+  const acquire = (botId: string) => {
+    const now = Date.now()
+    for (const [id, entry] of limiters) {
+      if (entry.active > 0 || now - entry.idleSince < LIMITER_IDLE_MS) continue
+      limiters.delete(id)
+      entry.limiter.close()
+    }
+    const entry = limiters.get(botId) ?? {
+      limiter: createRateLimiter(rest, discordFetch),
+      active: 0,
+      idleSince: now,
+    }
+    limiters.set(botId, entry)
+    entry.active += 1
+    return entry
+  }
+
+  return async (request, credential, botId) => {
+    const lane = acquire(botId)
+    const runtime = relayRuntime(restLayer(Redacted.make(credential), lane.limiter))
+    const mcp = createMcpHandler(() => buildRelayServer(runtime), {
+      legacy: 'stateless',
+      maxSubscriptions: 0,
+    })
+    try {
+      const verified = await runtime.runPromiseExit(
+        Effect.flatMap(DiscordRest, (rest) =>
+          rest.request({ method: 'GET', route: '/users/@me', operationFamily: 'authentication' }),
+        ),
+        { signal: request.signal },
+      )
+      if (verified._tag === 'Failure') {
+        return discordFailure(renderCause(verified.cause))
+      }
+      // A token whose first segment names another bot was routed by a lie.
+      if (!isBot(verified.value) || verified.value.id !== botId) return invalidBot()
+      // Hosting never delays or fails the agent's call; `use` logs its own failures.
+      void bots?.use(botId, credential)
+
+      const response = await mcp.fetch(request)
+      // Complete the bounded response before releasing the runtime. The SDK's legacy fallback
+      // can return an SSE body before its tool finishes.
+      const body = await response.arrayBuffer()
+      const headers = new Headers(response.headers)
+      headers.set('cache-control', 'no-store')
+      return new Response(body.byteLength === 0 ? null : body, {
+        status: response.status,
+        headers,
+      })
+    } catch {
+      return json(502, { error: 'request_failed' })
+    } finally {
+      await mcp.close()
+      await runtime.dispose()
+      lane.active -= 1
+      lane.idleSince = Date.now()
+    }
+  }
+}
+
+/**
+ * The MCP HTTP front: OAuth, the allowlist, origins, and the bot token's shape. `execute` runs each
+ * request, in this process or on the bot host that owns its bot.
  */
 export const createRelay = (
   config: RelayConfig,
-  restLayer: (token: Redacted.Redacted<string>) => Layer.Layer<DiscordRest> = (token) =>
-    DiscordRest.layer({ ...config.rest, token }).pipe(Layer.provide(RateGuard.layer())),
+  execute: Execute,
   discordFetch: typeof fetch = fetch,
-  bots?: Pick<BotRuntimes, 'use'>,
 ) => {
   const login = createDiscordLogin(config.login, discordFetch)
   const handle = async (request: Request): Promise<Response> => {
@@ -138,42 +234,9 @@ export const createRelay = (
     }
     const credential = request.headers.get('x-discord-bot-token')
     if (credential === null || !/^\S+$/.test(credential)) return invalidBot()
-
-    const runtime = relayRuntime(restLayer(Redacted.make(credential)))
-    const mcp = createMcpHandler(() => buildRelayServer(runtime), {
-      legacy: 'stateless',
-      maxSubscriptions: 0,
-    })
-    try {
-      const verified = await runtime.runPromiseExit(
-        Effect.flatMap(DiscordRest, (rest) =>
-          rest.request({ method: 'GET', route: '/users/@me', operationFamily: 'authentication' }),
-        ),
-        { signal: request.signal },
-      )
-      if (verified._tag === 'Failure') {
-        return discordFailure(renderCause(verified.cause))
-      }
-      if (!isBot(verified.value)) return invalidBot()
-      // Hosting never delays or fails the agent's call; `use` logs its own failures.
-      void bots?.use(verified.value.id, credential)
-
-      const response = await mcp.fetch(request, { authInfo: authenticated })
-      // Complete the bounded response before releasing the runtime. The SDK's legacy fallback
-      // can return an SSE body before its tool finishes.
-      const body = await response.arrayBuffer()
-      const headers = new Headers(response.headers)
-      headers.set('cache-control', 'no-store')
-      return new Response(body.byteLength === 0 ? null : body, {
-        status: response.status,
-        headers,
-      })
-    } catch {
-      return json(502, { error: 'request_failed' })
-    } finally {
-      await mcp.close()
-      await runtime.dispose()
-    }
+    const botId = botIdFromToken(credential)
+    if (botId === undefined) return invalidBot()
+    return execute(request, credential, botId)
   }
   return {
     fetch: async (request: Request): Promise<Response> => {

@@ -9,7 +9,8 @@ import { toNodeHandler } from '@modelcontextprotocol/node'
 import { serveStdio } from '@modelcontextprotocol/server/stdio'
 import { Cause, Config, Effect, Layer, Logger, Redacted } from 'effect'
 import { checkPublicExposure } from './public-exposure.ts'
-import { buildRelayServer, createRelay, relayRuntime } from './relay.ts'
+import { buildRelayServer, createExecutor, createRelay, relayRuntime } from './relay.ts'
+import { createBotHost, forwardToBotHosts } from './tiers.ts'
 
 const StderrLogging = Layer.succeed(Logger.LogToStderr)(true)
 const csv = (value: string) =>
@@ -74,6 +75,87 @@ const startBotHosting = (allowedUserIds: ReadonlyArray<string> | undefined) =>
     )
   })
 
+/** Undefined allows any human. */
+const allowedUsers = Config.string('DISCORD_OAUTH_ALLOWED_USER_IDS').pipe(
+  Config.withDefault('*'),
+  Config.map((ids) => (ids === '*' ? undefined : csv(ids))),
+)
+
+const BOT_HOST_SECRET_MIN_LENGTH = 32
+
+const origin = (url: string) => {
+  const parsed = URL.canParse(url) ? new URL(url) : undefined
+  return parsed?.protocol === 'http:' || parsed?.protocol === 'https:' ? parsed.origin : undefined
+}
+
+/** The bot hosts central routes to, and the secret central proves itself to them with. */
+const membership = Effect.gen(function* () {
+  const { hosts, secret } = yield* Config.all({
+    hosts: Config.string('BOT_HOSTS').pipe(Config.map((list) => csv(list).map(origin))),
+    secret: Config.redacted('BOT_HOST_SECRET'),
+  })
+  if (hosts.length === 0 || hosts.includes(undefined)) {
+    return yield* Effect.fail(
+      new ConfigurationError({
+        variable: 'BOT_HOSTS',
+        message:
+          'BOT_HOSTS must list every bot host\'s base URL, comma-separated, for example "http://bot-host-0.bot-host:3001,http://bot-host-1.bot-host:3001".',
+      }),
+    )
+  }
+  if (Redacted.value(secret).length < BOT_HOST_SECRET_MIN_LENGTH) {
+    return yield* Effect.fail(
+      new ConfigurationError({
+        variable: 'BOT_HOST_SECRET',
+        message: `Expected at least ${BOT_HOST_SECRET_MIN_LENGTH} characters. Generate one with: openssl rand -base64 32`,
+      }),
+    )
+  }
+  return { hosts: hosts.filter((host) => host !== undefined), secret: Redacted.value(secret) }
+})
+
+/** Serve `handler` over HTTP until the program stops. */
+const serve = (
+  handler: { fetch: (request: Request) => Promise<Response> },
+  host: string,
+  port: number,
+  name: string,
+) =>
+  Effect.gen(function* () {
+    const handle = toNodeHandler(handler)
+    const server = yield* Effect.acquireRelease(
+      Effect.tryPromise(
+        () =>
+          new Promise<ReturnType<typeof createServer>>((resolve, reject) => {
+            const server = createServer((request, response) => {
+              void handle(
+                {
+                  method: request.method ?? 'GET',
+                  url: request.url ?? '/',
+                  headers: request.headers,
+                  [Symbol.asyncIterator]: () => request[Symbol.asyncIterator](),
+                },
+                response,
+              )
+            })
+            server.once('error', reject)
+            server.listen(port, host, () => resolve(server))
+          }),
+      ),
+      (server) =>
+        Effect.promise(
+          () =>
+            new Promise<void>((resolve, reject) => {
+              server.close((error) => (error === undefined ? resolve() : reject(error)))
+            }),
+        ),
+    )
+    const address = server.address()
+    const bound = typeof address === 'object' && address !== null ? address.port : port
+    yield* Effect.log(`${name} listening on http://${host}:${bound}/mcp`)
+    return yield* Effect.never
+  })
+
 const main = Effect.gen(function* () {
   const config = yield* Config.all({
     transport: Config.string('MCP_TRANSPORT').pipe(Config.withDefault('http')),
@@ -112,6 +194,34 @@ const main = Effect.gen(function* () {
     )
   }
 
+  const tier = yield* Config.string('DISCORD_MCP_TIER').pipe(Config.withDefault('all'))
+  const allowlist = yield* allowedUsers
+  const listen = (handler: { fetch: (request: Request) => Promise<Response> }) =>
+    serve(handler, config.host, config.port, tier === 'all' ? 'discord-mcp' : `discord-mcp ${tier}`)
+
+  if (tier === 'bot-host') {
+    const members = yield* membership
+    const self = yield* Config.string('BOT_HOST_URL').pipe(Config.map(origin))
+    if (self === undefined || !members.hosts.includes(self)) {
+      return yield* Effect.fail(
+        new ConfigurationError({
+          variable: 'BOT_HOST_URL',
+          message: "BOT_HOST_URL must be this bot host's base URL, exactly as BOT_HOSTS lists it.",
+        }),
+      )
+    }
+    const bots = yield* startBotHosting(allowlist)
+    return yield* listen(createBotHost({ ...members, self }, createExecutor({ rest, bots })))
+  }
+  if (tier !== 'all' && tier !== 'central') {
+    return yield* Effect.fail(
+      new ConfigurationError({
+        variable: 'DISCORD_MCP_TIER',
+        message: 'DISCORD_MCP_TIER must be "all", "central", or "bot-host".',
+      }),
+    )
+  }
+
   yield* checkPublicExposure({
     bindHost: config.host,
     publicBaseUrl: config.publicBaseUrl || undefined,
@@ -119,14 +229,16 @@ const main = Effect.gen(function* () {
     trustProxyIdentity: false,
     trustedProxyCidrs: [],
   })
-  const { allowedUserIds, ...oauth } = yield* Config.all({
+  const oauth = yield* Config.all({
     clientId: Config.string('DISCORD_OAUTH_CLIENT_ID'),
     clientSecret: Config.redacted('DISCORD_OAUTH_CLIENT_SECRET'),
     encryptionKey: Config.redacted('OAUTH_ENCRYPTION_KEY'),
-    allowedUserIds: Config.string('DISCORD_OAUTH_ALLOWED_USER_IDS').pipe(Config.withDefault('*')),
   })
-  const allowlist = allowedUserIds === '*' ? undefined : csv(allowedUserIds)
-  const bots = yield* startBotHosting(allowlist)
+  // Central holds no bot tokens: it only forwards them to the bot host that owns each bot.
+  const execute =
+    tier === 'central'
+      ? forwardToBotHosts(yield* membership)
+      : createExecutor({ rest, bots: yield* startBotHosting(allowlist) })
   const relay = createRelay(
     {
       allowedHosts: csv(config.allowedHosts),
@@ -134,49 +246,15 @@ const main = Effect.gen(function* () {
         ...csv(config.allowedOrigins),
         ...(config.publicBaseUrl === '' ? [] : [new URL(config.publicBaseUrl).origin]),
       ],
-      rest,
       login: {
         ...oauth,
         ...(allowlist === undefined ? {} : { allowedUserIds: allowlist }),
         publicBaseUrl: config.publicBaseUrl || `http://127.0.0.1:${config.port}`,
       },
     },
-    undefined,
-    fetch,
-    bots,
+    execute,
   )
-  const handle = toNodeHandler(relay)
-  const server = yield* Effect.acquireRelease(
-    Effect.tryPromise(
-      () =>
-        new Promise<ReturnType<typeof createServer>>((resolve, reject) => {
-          const server = createServer((request, response) => {
-            void handle(
-              {
-                method: request.method ?? 'GET',
-                url: request.url ?? '/',
-                headers: request.headers,
-                [Symbol.asyncIterator]: () => request[Symbol.asyncIterator](),
-              },
-              response,
-            )
-          })
-          server.once('error', reject)
-          server.listen(config.port, config.host, () => resolve(server))
-        }),
-    ),
-    (server) =>
-      Effect.promise(
-        () =>
-          new Promise<void>((resolve, reject) => {
-            server.close((error) => (error === undefined ? resolve() : reject(error)))
-          }),
-      ),
-  )
-  const address = server.address()
-  const port = typeof address === 'object' && address !== null ? address.port : config.port
-  yield* Effect.log(`discord-mcp listening on http://${config.host}:${port}/mcp`)
-  return yield* Effect.never
+  return yield* listen(relay)
 })
 
 const program = Layer.launch(Layer.effectDiscard(main)).pipe(
