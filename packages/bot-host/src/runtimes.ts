@@ -26,14 +26,17 @@ export interface BotRuntimes {
   readonly use: (botId: string, token: string) => Promise<void>
   /**
    * Bring back every bot a previous process left online, resuming its stored session so Discord
-   * replays the events it missed. Each starts a fresh 24-hour idle timer. Failures are logged.
+   * replays the events it missed. A session marked stale at shutdown is replaced by a new one,
+   * without a replay. Each starts a fresh 24-hour idle timer. Failures are logged.
    */
   readonly resume: () => Promise<void>
   /** The voice of a bot this process runs, or `undefined` when it is offline. */
   readonly voice: (botId: string) => BotVoice | undefined
   /**
    * Disconnect every bot without ending its session, so the next process can resume it. Voice
-   * cannot move between processes, so bots leave their voice channels first. Resolves once every
+   * cannot move between processes, so bots leave their voice channels first. A bot whose leave
+   * could not reach Discord keeps its session marked stale, so the next process brings it back
+   * with a new session rather than one that still has it in a channel. Resolves once every
    * pending storage write has settled.
    */
   readonly close: () => Promise<void>
