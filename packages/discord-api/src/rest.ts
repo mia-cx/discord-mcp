@@ -70,6 +70,46 @@ const readError = (
   }
 }
 
+const restClient = (config: Omit<RestConfig, 'token'>, makeRequest?: typeof fetch) =>
+  new REST({
+    version: '10',
+    timeout: config.timeoutMs,
+    retries: config.retries,
+    // Absorb short waits inside the client; fail fast on long ones so a tool call
+    // returns an actionable rate-limit error instead of hanging.
+    rejectOnRateLimit: (info) => info.timeToReset > config.maxRateLimitWaitMs,
+    // @discordjs/rest types `init` with its own undici's RequestInit; at runtime it is the standard one.
+    ...(makeRequest === undefined
+      ? {}
+      : { makeRequest: (url: string, init: unknown) => makeRequest(url, init as RequestInit) }),
+  })
+
+/**
+ * One bot's rate-limit state: `@discordjs/rest`'s bucket queues and the rejection guard. It holds
+ * no token, so it can outlive the requests that share it. `close` stops its sweep timers.
+ */
+export interface RateLimiter {
+  readonly client: REST
+  readonly guard: RateGuard['Service']
+  readonly close: () => void
+}
+
+/** `makeRequest` is the network seam; the default is `@discordjs/rest`'s own undici client. */
+export const createRateLimiter = (
+  config: Omit<RestConfig, 'token'>,
+  makeRequest?: typeof fetch,
+): RateLimiter => {
+  const client = restClient(config, makeRequest)
+  return {
+    client,
+    guard: Effect.runSync(RateGuard.make()),
+    close: () => {
+      client.clearHashSweeper()
+      client.clearHandlerSweeper()
+    },
+  }
+}
+
 /**
  * The single holder of the bot token.
  *
@@ -92,78 +132,83 @@ export class DiscordRest extends Context.Service<
         const guard = yield* RateGuard
 
         const rest = yield* Effect.acquireRelease(
-          Effect.sync(() => {
-            const client = new REST({
-              version: '10',
-              timeout: config.timeoutMs,
-              retries: config.retries,
-              // Absorb short waits inside the client; fail fast on long ones so a tool call
-              // returns an actionable rate-limit error instead of hanging.
-              rejectOnRateLimit: (info) => info.timeToReset > config.maxRateLimitWaitMs,
-            })
-            client.setToken(Redacted.value(config.token))
-            return client
-          }),
+          Effect.sync(() => restClient(config).setToken(Redacted.value(config.token))),
           // The token is process-lifetime; there is no socket to close, but clearing it keeps the
           // credential out of a heap snapshot taken after shutdown.
           (client) => Effect.sync(() => client.setToken('')),
         )
-
-        const request = (req: DiscordRequest) =>
-          Effect.gen(function* () {
-            const scope = rateGuardScope('bot', req.operationFamily)
-            yield* guard.check(scope)
-
-            // The caller's cancellation signal, when there is a caller. Passing it to
-            // @discordjs/rest aborts the in-flight HTTP request rather than abandoning it.
-            const signal = yield* requestSignal
-
-            const options: RequestData = {
-              ...(req.query === undefined ? {} : { query: req.query }),
-              ...(req.body === undefined ? {} : { body: req.body }),
-              ...(req.auditLogReason === undefined ? {} : { reason: req.auditLogReason }),
-              ...(signal === undefined ? {} : { signal }),
-            }
-
-            const result = yield* Effect.tryPromise({
-              try: () => {
-                switch (req.method) {
-                  case 'GET':
-                    return rest.get(req.route, options)
-                  case 'POST':
-                    return rest.post(req.route, options)
-                  case 'PUT':
-                    return rest.put(req.route, options)
-                  case 'PATCH':
-                    return rest.patch(req.route, options)
-                  case 'DELETE':
-                    return rest.delete(req.route, options)
-                }
-              },
-              catch: (cause) => cause,
-            }).pipe(
-              Effect.catch((cause) =>
-                Effect.gen(function* () {
-                  const { status, body, retryAfterMs, global } = readError(cause)
-                  yield* countIfAvailable('discord.request.failed')
-                  if (retryAfterMs !== undefined) yield* countIfAvailable('discord.rate_limit_wait')
-                  // 400s are free against Cloudflare's budget; only 401/403/429 are counted.
-                  if (isCountedRejection(status)) yield* guard.recordRejection(scope)
-                  return yield* Effect.fail(
-                    mapDiscordError(status, body, {
-                      ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
-                      ...(global === undefined ? {} : { global }),
-                    }),
-                  )
-                }),
-              ),
-            )
-
-            yield* countIfAvailable('discord.request')
-            return result
-          })
-
-        return { request, raw: rest }
+        return perform(rest, guard, config.token)
       }),
     )
+
+  /**
+   * Requests as `token` through a bot's shared limiter, so concurrent requests for that bot queue
+   * in one set of buckets. The token travels with each request and never enters the limiter.
+   */
+  static readonly shared = (token: Redacted.Redacted<string>, limiter: RateLimiter) =>
+    Layer.succeed(DiscordRest)(perform(limiter.client, limiter.guard, token))
+}
+
+const perform = (
+  rest: REST,
+  guard: RateGuard['Service'],
+  token: Redacted.Redacted<string>,
+): DiscordRest['Service'] => {
+  const request = (req: DiscordRequest) =>
+    Effect.gen(function* () {
+      const scope = rateGuardScope('bot', req.operationFamily)
+      yield* guard.check(scope)
+
+      // The caller's cancellation signal, when there is a caller. Passing it to
+      // @discordjs/rest aborts the in-flight HTTP request rather than abandoning it.
+      const signal = yield* requestSignal
+
+      const options: RequestData = {
+        ...(req.query === undefined ? {} : { query: req.query }),
+        ...(req.body === undefined ? {} : { body: req.body }),
+        ...(req.auditLogReason === undefined ? {} : { reason: req.auditLogReason }),
+        ...(signal === undefined ? {} : { signal }),
+        auth: false,
+        headers: { authorization: `Bot ${Redacted.value(token)}` },
+      }
+
+      const result = yield* Effect.tryPromise({
+        try: () => {
+          switch (req.method) {
+            case 'GET':
+              return rest.get(req.route, options)
+            case 'POST':
+              return rest.post(req.route, options)
+            case 'PUT':
+              return rest.put(req.route, options)
+            case 'PATCH':
+              return rest.patch(req.route, options)
+            case 'DELETE':
+              return rest.delete(req.route, options)
+          }
+        },
+        catch: (cause) => cause,
+      }).pipe(
+        Effect.catch((cause) =>
+          Effect.gen(function* () {
+            const { status, body, retryAfterMs, global } = readError(cause)
+            yield* countIfAvailable('discord.request.failed')
+            if (retryAfterMs !== undefined) yield* countIfAvailable('discord.rate_limit_wait')
+            // 400s are free against Cloudflare's budget; only 401/403/429 are counted.
+            if (isCountedRejection(status)) yield* guard.recordRejection(scope)
+            return yield* Effect.fail(
+              mapDiscordError(status, body, {
+                ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+                ...(global === undefined ? {} : { global }),
+              }),
+            )
+          }),
+        ),
+      )
+
+      yield* countIfAvailable('discord.request')
+      return result
+    })
+
+  return { request, raw: rest }
 }
