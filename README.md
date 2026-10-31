@@ -155,10 +155,23 @@ client.on(Events.MessageCreate, async (message) => {
 client.login(process.env.DISCORD_TOKEN)
 ```
 
-`discord_workflow_publish` loads the source once in workerd to find the events its clients
-listen for and the intents they declare, then stores it as the workflow's next immutable
-revision. `discord_workflow_enable` runs a revision and returns its grants and intents;
-Discord's privileged intents must be on in the Developer Portal first. While any workflow is
+`discord_workflow_publish` bundles the source with esbuild and loads it once in workerd to
+find the events its clients listen for and the intents they declare, then stores the bundle as
+the workflow's next immutable revision.
+
+A workflow may import npm packages listed in `dependencies`, with a version, range, or tag;
+pass a `package-lock.json` as `lockfile` to pin every version. npm installs them from the
+public registry with install scripts off, through a proxy that reaches only the registry.
+Each revision records every package version it was built with. Publishing fails, before any
+revision is stored, on a package that can't be bundled or loaded in workerd, such as a native
+addon, and on code that can't work when each event runs in a fresh isolate: collectors,
+`awaitMessages`, and URL attachments. These checks read the workflow's own syntax, so a call
+built at runtime, or made inside a dependency, gets past them. Installs are capped at 256 MB
+and two at a time per bot host. discord.js and `textile` always come from the platform, even
+for a package that installs its own.
+
+`discord_workflow_enable` runs a revision and returns its grants and intents; Discord's
+privileged intents must be on in the Developer Portal first. While any workflow is
 enabled, the bot stays online without agent calls. After a restart, workflows also run the
 events Discord replays.
 
@@ -327,7 +340,8 @@ bot keeps its shard count and gets a new 24-hour timer.
 Set `DATABASE_URL`, `TOKEN_VAULT_KEY` (generate it like `OAUTH_ENCRYPTION_KEY`), and a
 `DISCORD_OAUTH_ALLOWED_USER_IDS` list. Without that list, the server logs a warning and
 serves the plain relay. Back up the vault key apart from the database: without it, stored
-tokens cannot be decrypted.
+tokens cannot be decrypted. Publishing a workflow with dependencies runs `npm` from `PATH`
+and needs HTTPS access to `registry.npmjs.org`.
 
 #### Voice
 

@@ -29,6 +29,13 @@
       "when": 1793462062528,
       "tag": "0003_workflow_state",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1793466372119,
+      "tag": "0004_workflow_bundles",
+      "breakpoints": true
     }
   ]
 }
