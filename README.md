@@ -269,7 +269,8 @@ only the bots that host gains or loses. A host answers 503 with `Retry-After: 1`
 its list says it does not own, so a central still on an old list costs a retry, not a second
 owner. Two hosts on different lists can both own a bot that moved, each with its own rate
 limiter, so change `BOT_HOSTS` by stopping every bot host and then starting them all on the new
-list. Centrals can update in any order. Keep bot hosts off the public network: the hop from central is plain HTTP and
+list. Centrals can update in any order. Each bot host resumes the stored sessions of the bots
+it owns when it starts, so a bot that moved comes back online on its new host. Keep bot hosts off the public network: the hop from central is plain HTTP and
 carries bot tokens.
 
 A login must finish on the central replica that started it, because each replica tracks its

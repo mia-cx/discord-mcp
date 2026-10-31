@@ -154,3 +154,30 @@ it('clears an idle bot’s session even when the clear fails during shutdown', a
   await gateway.close()
   await storage.close()
 })
+
+it('resumes only the bots this host owns, when bot hosts share a database', async () => {
+  const OTHER_BOT_ID = '456789012345678901'
+  const storage = await inMemoryStorage()
+  const gateway = await fakeGateway()
+  const options = { clock: manualClock(), log: () => {}, gatewayUrl: gateway.url }
+  const before = createBotRuntimes({ vault: createTokenVault(KEY, storage), ...options })
+  await before.use(BOT_ID, 'private-token-a')
+  await before.use(OTHER_BOT_ID, 'private-token-b')
+  await vi.waitFor(() => expect(gateway.connections).toHaveLength(2))
+  await vi.waitFor(async () =>
+    expect(await createTokenVault(KEY, storage).loadSessions()).toHaveLength(2),
+  )
+  await before.close()
+
+  const after = createBotRuntimes({ vault: createTokenVault(KEY, storage), ...options })
+  await after.resume((botId) => botId === BOT_ID)
+  await vi.waitFor(() =>
+    expect(gateway.connections[2]?.received[0]).toMatchObject({ d: { token: 'private-token-a' } }),
+  )
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  expect(gateway.connections).toHaveLength(3)
+
+  await after.close()
+  await gateway.close()
+  await storage.close()
+})

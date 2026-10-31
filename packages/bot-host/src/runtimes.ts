@@ -24,10 +24,11 @@ export interface BotRuntimes {
    */
   readonly use: (botId: string, token: string) => Promise<void>
   /**
-   * Bring back every bot a previous process left online, resuming its stored session so Discord
-   * replays the events it missed. Each starts a fresh 24-hour idle timer. Failures are logged.
+   * Bring back every bot a previous process left online that `owns` accepts, resuming its stored
+   * session so Discord replays the events it missed. Each starts a fresh 24-hour idle timer.
+   * Failures are logged.
    */
-  readonly resume: () => Promise<void>
+  readonly resume: (owns?: (botId: string) => boolean) => Promise<void>
   /**
    * Disconnect every bot without ending its session, so the next process can resume it.
    * Resolves once every pending storage write has settled.
@@ -168,14 +169,14 @@ export const createBotRuntimes = ({
         },
       )
     },
-    resume: async () => {
+    resume: async (owns = () => true) => {
       const stored = await vault.loadSessions().catch((cause) => {
         log(`Could not resume bots from storage: ${reason(cause)}`)
         return []
       })
       for (const { botId, token, session } of stored) {
-        // An agent call brought it online first.
-        if (running.has(botId)) continue
+        // Another bot host's, or an agent call brought it online first.
+        if (!owns(botId) || running.has(botId)) continue
         connect(botId, add(botId, token), session)
       }
     },

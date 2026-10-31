@@ -11,6 +11,7 @@ import { serveStdio } from '@modelcontextprotocol/server/stdio'
 import { Cause, Config, Effect, Layer, Logger, Redacted } from 'effect'
 import { checkPublicExposure } from './public-exposure.ts'
 import { buildRelayServer, createExecutor, createRelay, relayRuntime } from './relay.ts'
+import { ownerOf } from './router.ts'
 import { createBotHost, forwardToBotHosts } from './tiers.ts'
 
 const StderrLogging = Layer.succeed(Logger.LogToStderr)(true)
@@ -27,7 +28,10 @@ const VAULT_KEY_BYTES = 32
  * the previous process left online. It starts only with a database and an allowlist naming who
  * may use it; otherwise the process stays a plain relay.
  */
-const startBotHosting = (allowedUserIds: ReadonlyArray<string> | undefined) =>
+const startBotHosting = (
+  allowedUserIds: ReadonlyArray<string> | undefined,
+  owns?: (botId: string) => boolean,
+) =>
   Effect.gen(function* () {
     const databaseUrl = yield* Config.string('DATABASE_URL').pipe(Config.withDefault(''))
     if (databaseUrl === '') return undefined
@@ -72,7 +76,7 @@ const startBotHosting = (allowedUserIds: ReadonlyArray<string> | undefined) =>
           clock: systemClock,
           log,
         })
-        await bots.resume()
+        await bots.resume(owns)
         return bots
       }),
       (bots) => Effect.promise(() => bots.close()),
@@ -229,7 +233,11 @@ const main = Effect.gen(function* () {
         }),
       )
     }
-    const bots = yield* startBotHosting(allowlist)
+    // Every bot host shares the database, so each resumes only the bots it owns.
+    const bots = yield* startBotHosting(
+      allowlist,
+      (botId) => ownerOf(members.hosts, botId) === self,
+    )
     return yield* listen(
       createBotHost({ ...members, self }, createExecutor({ rest, bots, scripts })),
     )
