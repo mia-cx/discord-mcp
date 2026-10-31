@@ -6,6 +6,7 @@ import type { Clock } from '../src/clock.ts'
 import {
   type BotRuntimesOptions,
   createBotRuntimes,
+  DISCORD_API_URL,
   IDLE_TIMEOUT_MS,
   RECONCILE_MS,
 } from '../src/runtimes.ts'
@@ -859,6 +860,34 @@ it('keeps the REST lease of a bot its list gives it, once the previous holder le
   await before.close()
   clock.advance(RECONCILE_MS)
   await vi.waitFor(() => expect(after.serves(BOT_ID)).toBe(true))
+
+  await after.close()
+  await gateway.close()
+  await storage.close()
+})
+
+it('leaves the next host’s sessions alone when Discord answers after this host closed', async () => {
+  const storage = await inMemoryStorage()
+  const gateway = await fakeGateway(1000 * HOUR)
+  const clock = manualClock()
+  let answer = (_: Response) => {}
+  const late: typeof fetch = () =>
+    new Promise((resolve) => {
+      answer = resolve
+    })
+  const before = startHost(storage, clock, late, { self: 'host-a' })
+  void before.use(BOT_ID, 'private-token-a')
+  await vi.waitFor(async () => expect(await storage.loadBot(BOT_ID)).toBeDefined())
+  await before.close()
+
+  // The next host brings the bot online, and its shard saves a session.
+  const after = startHost(storage, clock, gateway.discordFetch(), { self: 'host-b' })
+  await after.use(BOT_ID, 'private-token-a')
+  await vi.waitFor(async () => expect(await storedSequences(storage)).toEqual({ 0: 1 }))
+
+  answer(await gateway.discordFetch()(`${DISCORD_API_URL}/gateway/bot`))
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  expect(await storedSequences(storage)).toEqual({ 0: 1 })
 
   await after.close()
   await gateway.close()

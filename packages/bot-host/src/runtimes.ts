@@ -763,6 +763,7 @@ export const createBotRuntimes = ({
     try {
       gateway = await gatewayBot(token)
     } catch (cause) {
+      if (closed) return
       log(
         `Bot ${botId} is offline: asking Discord how to shard it failed: ${reason(cause)}. Retrying in a minute.`,
       )
@@ -775,6 +776,9 @@ export const createBotRuntimes = ({
       )
       return
     }
+    // Closed while Discord answered: another host may already have the bot online, and bringing
+    // it online again would end the sessions it saved.
+    if (closed) return
     if (gateway === undefined) return void (await reject(botId, token))
     await storage.setBotOnline(botId, {
       shardCount: gateway.shards,
@@ -808,6 +812,8 @@ export const createBotRuntimes = ({
     write(lifecycle(botId), async () => {
       const latest = unrecorded.get(botId) ?? token
       unrecorded.delete(botId)
+      // Queued behind work that outlasted close: another host serves the bot now.
+      if (closed) return
       const stored = await vault.load(botId)
       if (stored?.token === latest) {
         // Discord refused it on the Gateway; a new token, or for intents new workflows, bring the
@@ -831,6 +837,7 @@ export const createBotRuntimes = ({
       if (intents === undefined) holding.delete(botId)
       else holding.add(botId)
       await write(lifecycle(botId), async () => {
+        if (closed) return
         // Storage reads the hold and its intents from the enabled workflows; releasing starts the
         // idle timer over.
         if (intents === undefined)

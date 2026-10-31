@@ -293,4 +293,38 @@ describe('workflow schedules', () => {
       expect(a.ticks()).toHaveLength(1)
     },
   )
+
+  it.skipIf(database === undefined)(
+    'leave the bot’s lock to the bot host that can fire for it',
+    async () => {
+      // Its own database: the test above drops the shared one.
+      const own = await postgresTestDatabase()
+      if (own === undefined) return
+      cleanup.push(own.drop)
+      const storageA = await connectStorage(own.url, () => {})
+      const storageB = await connectStorage(own.url, () => {})
+      cleanup.push(
+        () => storageB.close(),
+        () => storageA.close(),
+      )
+      // Both believe they own the bot, but only A holds its REST traffic, so only A can fire.
+      const a = botHost(storageA)
+      const b = botHost(storageB)
+      b.setOnline(false)
+      await b.start()
+      await enableSchedules(storageB, b.host, ['*/5 * * * *'])
+      // B syncs first, at 08:59, and would take the lock for a bot it can't fire for.
+      await b.nextMinute()
+      await a.start()
+
+      for (let minute = 0; minute < 3; minute += 1) {
+        await b.nextMinute()
+        await a.nextMinute()
+      }
+      await vi.waitFor(() =>
+        expect(a.ticks()).toEqual([tick('*/5 * * * *', '2026-11-02T09:00:00.000Z')]),
+      )
+      expect(b.ticks()).toEqual([])
+    },
+  )
 })
