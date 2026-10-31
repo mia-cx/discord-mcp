@@ -1,5 +1,12 @@
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto'
-import type { BotGateway, BotOnline, Fence, Storage, StoredBot } from '@discord-mcp/storage'
+import type {
+  BotGateway,
+  BotOnline,
+  BotRanAs,
+  Fence,
+  Storage,
+  StoredBot,
+} from '@discord-mcp/storage'
 import type { ShardSession } from './shard.ts'
 
 const ALGORITHM = 'aes-256-gcm'
@@ -36,7 +43,7 @@ export interface TokenVault {
     token: string,
     options: {
       readonly rejectedCode?: number
-      readonly ranAs?: { readonly shardCount: number; readonly intents: number }
+      readonly ranAs?: BotRanAs
     },
   ) => Promise<boolean>
   /** Store a shard's resumable session while `fence` holds. The bot's token must be stored first. */

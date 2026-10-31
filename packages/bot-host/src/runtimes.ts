@@ -1,4 +1,4 @@
-import type { Storage, VoiceOptOutChange } from '@discord-mcp/storage'
+import type { BotRanAs, Storage, VoiceOptOutChange } from '@discord-mcp/storage'
 import { shardOwner } from './assign.ts'
 import type { Clock } from './clock.ts'
 import { createConsent } from './consent.ts'
@@ -315,8 +315,14 @@ export const createBotRuntimes = ({
    * token never overwrites its successor.
    */
   const writes = new Map<string, Promise<void>>()
-  /** Sessions waiting in their bot's write chain, by bot and shard. Only the newest is written. */
-  const unsaved = new Map<string, ShardSession | undefined>()
+  /**
+   * Sessions waiting in their bot's write chain, by bot and shard, each with the hold of the
+   * shard's lease it was made under. Only the newest is written.
+   */
+  const unsaved = new Map<
+    string,
+    { readonly session: ShardSession | undefined; readonly tenure: object | undefined }
+  >()
   /** Failed session writes waiting to retry, by bot and shard. A newer write replaces one. */
   const retries = new Map<
     string,
@@ -360,26 +366,34 @@ export const createBotRuntimes = ({
 
   // A crash loses the writes still queued or waiting to retry, so the next host finds an older
   // session or none. It may replay events twice or identify afresh. Writes land only while this
-  // host holds the shard's lease, so a host that lost a shard never overwrites its new owner's.
+  // host holds the shard's lease, so a host that lost a shard never overwrites its new owner's;
+  // and only within the hold they were made under, since once this host takes the shard back, a
+  // session from before is older than the one its owner meanwhile saved.
   const saveSession = (botId: string, shardId: number, session: ShardSession | undefined) => {
     const key = shardLease(botId, shardId)
     forgetRetry(key)
     const queued = unsaved.has(key)
-    unsaved.set(key, session)
+    unsaved.set(key, { session, tenure: leases.tenure(key) })
     if (queued) return
     let latest: ShardSession | undefined
-    write(botId, () => {
-      latest = unsaved.get(key)
+    let tenure: object | undefined
+    write(botId, async () => {
+      const next = unsaved.get(key)
       unsaved.delete(key)
+      latest = next?.session
+      tenure = next?.tenure
+      // Once the hold lapses here the fence decides; a newer hold means the shard came back.
+      const current = leases.tenure(key)
+      if (current !== undefined && current !== tenure) return
       const fence = { lease: key, holder: leases.holder }
       return latest === undefined
         ? vault.clearSession(botId, shardId, fence)
         : vault.storeSession(botId, shardId, latest, fence)
     }).catch((cause) => {
       log(`Saving bot ${botId}'s shard ${shardId} Gateway session failed: ${reason(cause)}`)
-      // A newer session is already queued behind this one. Without the shard's lease it can never
-      // land, and taking the shard again later it would overwrite its next owner's newer session.
-      if (unsaved.has(key) || !leases.holds(key)) return
+      // A newer session is already queued behind this one. Without the hold it was made under, it
+      // can never land, or would land over its next owner's newer session.
+      if (unsaved.has(key) || !leases.holds(key) || leases.tenure(key) !== tenure) return
       // Retry until storage recovers. A lost store can leave an online shard unresumable, since
       // READY may be its last dispatch.
       const cancel = clock.schedule(() => saveSession(botId, shardId, latest), RETRY_MS)
@@ -572,13 +586,21 @@ export const createBotRuntimes = ({
    * The bots online in storage, after taking offline those a shard here was closed for good and
    * those idle for 24 hours without workflows to hold them.
    */
+  /**
+   * What a shard Discord closed for good was refused for, which must still hold for the close to
+   * take the bot offline: once brought back with another shard count or other intents, by any
+   * host, the close says nothing about it. A refused token is refused however the bot runs.
+   */
+  const ranAs = ({ fatal, shardCount, intents }: Running): BotRanAs => {
+    const code = fatal?.rejectedCode
+    if (code === undefined) return { shardCount }
+    return INTENT_CLOSE_CODES.has(code) ? { intents } : {}
+  }
+
   const onlineBots = async () => {
     for (const run of running.values()) {
       if (run.fatal === undefined) continue
-      // Only while the bot is online as the shard ran it: once brought back, by any host, a close
-      // from before says nothing about it.
-      const { shardCount, intents } = run
-      await vault.setOffline(run.botId, run.token, { ...run.fatal, ranAs: { shardCount, intents } })
+      await vault.setOffline(run.botId, run.token, { ...run.fatal, ranAs: ranAs(run) })
       // Every shard on this token ends with it, at once: should this pass fail, the bot may come
       // back online with the same token before a shard closed later could take it offline again.
       const ended = [...running].filter(

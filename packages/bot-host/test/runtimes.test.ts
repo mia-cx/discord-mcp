@@ -1259,3 +1259,116 @@ it('leaves a bot another host brought back online when a shard here closed befor
   await gateway.close()
   await storage.close()
 })
+
+it('retries no session write that fails after the host took its shard back', async () => {
+  const storage = await inMemoryStorage()
+  const gateway = await fakeGateway(100 * HOUR)
+  const clock = manualClock()
+  const vault = createTokenVault(KEY, storage)
+  const lease = `shard:${BOT_ID}:0`
+  let failing: { readonly fail: () => void } | undefined
+  let holdSave = false
+  let handOver = false
+  const bots = startHost(
+    {
+      ...storage,
+      renewLeases: async (holder, names, ...rest) => {
+        if (!handOver) return storage.renewLeases(holder, names, ...rest)
+        handOver = false
+        // Another host takes the shard, resumes it, and saves a newer sequence, then lets go.
+        const renewed = await storage.renewLeases(
+          holder,
+          names.filter((name) => name !== lease),
+          ...rest,
+        )
+        await storage.releaseLease(lease, holder)
+        await storage.claimLease(lease, 'host-b', clock.date(), HOUR)
+        const [bot] = await vault.loadOnline()
+        const session = bot?.sessions.get(0)
+        if (session === undefined) throw new Error('no stored session')
+        await vault.storeSession(
+          BOT_ID,
+          0,
+          { ...session, sequence: 9 },
+          { lease, holder: 'host-b' },
+        )
+        await storage.releaseLease(lease, 'host-b')
+        return renewed
+      },
+    },
+    clock,
+    gateway.discordFetch(),
+    {
+      vault: {
+        ...vault,
+        storeSession: (...args) => {
+          if (!holdSave) return vault.storeSession(...args)
+          holdSave = false
+          // Postgres takes its time over this write, then drops the connection.
+          return new Promise((_, reject) => {
+            failing = { fail: () => reject(new Error('Connection terminated unexpectedly')) }
+          })
+        },
+      },
+    },
+  )
+  await bots.use(BOT_ID, 'private-token-a')
+  await vi.waitFor(async () => expect(await storedSequences(storage)).toEqual({ 0: 1 }))
+  holdSave = true
+  gateway.connections[0]?.send({ op: 0, t: 'MESSAGE_CREATE', s: 2, d: {} })
+  await vi.waitFor(() => expect(failing).toBeDefined())
+
+  // The shard moves away and back while the write of sequence 2 is still out, then it fails.
+  handOver = true
+  clock.advance(RECONCILE_MS)
+  await vi.waitFor(() => expect(handOver).toBe(false))
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  failing?.fail()
+
+  await vi.waitFor(() =>
+    expect(gateway.connections[1]?.received[0]).toMatchObject({ op: 6, d: { seq: 9 } }),
+  )
+
+  await bots.close()
+  await gateway.close()
+  await storage.close()
+})
+
+it('takes a bot Discord rejected the token of offline, even if its workflows changed since', async () => {
+  const storage = await inMemoryStorage()
+  const gateway = await fakeGateway(100 * HOUR)
+  const clock = manualClock()
+  let paused: Promise<void> | undefined
+  let resume = () => {}
+  const bots = startHost(
+    {
+      ...storage,
+      renewLeases: async (...args) => {
+        await paused
+        return storage.renewLeases(...args)
+      },
+    },
+    clock,
+    gateway.discordFetch(),
+  )
+  await bots.use(BOT_ID, 'private-token-a')
+  await vi.waitFor(() => expect(gateway.connections[0]?.received[0]?.op).toBe(2))
+
+  // The token is reset, and a workflow is enabled before the next pass.
+  paused = new Promise((resolve) => {
+    resume = resolve
+  })
+  gateway.connections[0]?.close(4004)
+  await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(4004))
+  await enableWorkflow(storage, 'greeter', 512)
+  paused = undefined
+  resume()
+  clock.advance(RECONCILE_MS)
+
+  await vi.waitFor(async () => expect((await storage.loadBot(BOT_ID))?.rejectedCode).toBe(4004))
+  expect((await storage.loadBot(BOT_ID))?.online).toBeUndefined()
+
+  await bots.close()
+  await gateway.close()
+  await storage.close()
+})

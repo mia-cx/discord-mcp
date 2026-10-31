@@ -18,6 +18,11 @@ export interface Leases {
   readonly claim: (name: string) => Promise<boolean>
   /** Whether this process holds `name` and renewed it recently enough to rely on. */
   readonly holds: (name: string) => boolean
+  /**
+   * This process's current hold of `name`, from the claim that took it until it is lost or
+   * released; `undefined` while it holds none. Compare by identity: a later claim is a new hold.
+   */
+  readonly tenure: (name: string) => object | undefined
   /** The names of the leases this process holds. */
   readonly names: () => ReadonlyArray<string>
   /** Extend every lease this process holds; any it lost go to `onLost`. */
@@ -46,8 +51,8 @@ export const createLeases = (
   ttlMs = LEASE_TTL_MS,
 ): Leases => {
   const holder = randomUUID()
-  /** Held leases, each with the time until which it may be relied on. */
-  const held = new Map<string, { until: number }>()
+  /** Held leases, each with the time until which it may be relied on, and its hold. */
+  const held = new Map<string, { until: number; readonly tenure: object }>()
   let turns = 0
   let cancelLapse = () => {}
 
@@ -72,12 +77,14 @@ export const createLeases = (
       const since = clock.date()
       const lease = await storage.claimLease(name, holder, since, ttlMs)
       if (lease.holder !== holder) return false
-      held.set(name, { until: reliableUntil(since) })
+      // Extending a lease this process still holds keeps the same hold.
+      held.set(name, { until: reliableUntil(since), tenure: held.get(name)?.tenure ?? {} })
       // An answer slow enough to outlast the reliable window holds nothing.
       lapse()
       return held.has(name)
     },
     holds: (name) => (held.get(name)?.until ?? 0) > clock.date(),
+    tenure: (name) => held.get(name)?.tenure,
     names: () => [...held.keys()],
     renew: async () => {
       const since = clock.date()

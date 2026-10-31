@@ -205,9 +205,8 @@ export const createStorage = (
             eq(bots.id, botId),
             idleAt === undefined ? undefined : and(sql`not ${held}`, lte(bots.onlineUntil, idleAt)),
             sealedToken === undefined ? undefined : eq(bots.sealedToken, sealedToken),
-            ranAs === undefined
-              ? undefined
-              : and(eq(bots.shardCount, ranAs.shardCount), sql`${intents} = ${ranAs.intents}`),
+            ranAs?.shardCount === undefined ? undefined : eq(bots.shardCount, ranAs.shardCount),
+            ranAs?.intents === undefined ? undefined : sql`${intents} = ${ranAs.intents}`,
           ),
         )
         .returning({ id: bots.id })
