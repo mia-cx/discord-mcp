@@ -124,6 +124,25 @@ it('counts reservations still held at the reset against the new window', () => {
   expect(waitToReserve(gate)).toBe(DAY)
 })
 
+it('counts Identifies sent after the reset against the new window, even before anyone reserves', () => {
+  const clock = manualClock()
+  const gate = createIdentifyGate(clock, {
+    total: 6,
+    remaining: 6,
+    resetAfter: HOUR,
+    maxConcurrency: 1,
+  })
+  const [beforeReset, afterReset, alsoAfterReset] = [gate.reserve(), gate.reserve(), gate.reserve()]
+  beforeReset?.spend()
+
+  clock.advance(HOUR)
+  afterReset?.spend()
+  alsoAfterReset?.spend()
+  // The new window holds three, and two went out in it.
+  expect(waitToReserve(gate)).toBe(0)
+  expect(waitToReserve(gate)).toBe(DAY)
+})
+
 it('reserves half the daily total once the budget resets, then waits a day', () => {
   const clock = manualClock()
   const gate = createIdentifyGate(clock, { ...LIMIT, remaining: 0, resetAfter: HOUR })

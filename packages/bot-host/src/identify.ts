@@ -101,6 +101,8 @@ export const createIdentifyGate = (clock: Clock, limit: SessionStartLimit): Iden
       const settle = (refund: boolean) => {
         if (settled) return
         settled = true
+        // A reset this reservation waited through must charge it before it stops being held.
+        refill()
         held -= 1
         if (refund) allowance += 1
       }
