@@ -4,8 +4,8 @@ import { OperationCatalog } from '@mia-cx/discord-catalog'
 import { Effect } from 'effect'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { makeIsolateHost } from '../src/isolate-host.ts'
+import { fixtureRegistry } from '../src/testing.ts'
 import { makeWorkflowHost } from '../src/workflows.ts'
-import { fixtureRegistry } from './registry.ts'
 
 const BOT = { id: '345678901234567890', username: 'textile', discriminator: '0', bot: true }
 const HUMAN = '234567890123456789'

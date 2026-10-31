@@ -167,6 +167,7 @@ export interface WorkflowListing {
       readonly events: ReadonlyArray<string>
       readonly intents: ReadonlyArray<string>
       readonly grants: WorkflowGrants
+      readonly packages: ReadonlyArray<string>
     } | null
   }>
   readonly changes: Awaited<ReturnType<Storage['workflowChanges']>>
@@ -744,6 +745,7 @@ export const makeWorkflowHost = ({
                     events: revision.events,
                     intents: intentNames(revision.intents),
                     grants: revision.grants,
+                    packages: revision.packages,
                   },
           }
         }),
