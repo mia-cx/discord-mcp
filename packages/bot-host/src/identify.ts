@@ -27,6 +27,14 @@ export interface IdentifyGate {
   readonly whenFree: (shardId: number, identify: () => void) => () => void
 }
 
+interface Bucket {
+  /** Shards waiting to identify, first come first served. */
+  readonly waiting: Array<() => void>
+  freeAt: number
+  /** Cancels the wake-up for the first waiting shard. */
+  cancel: () => void
+}
+
 /**
  * Discord resets a bot's token once it spends its daily Identifies. The gate spends about half of
  * what remains, leaving the rest to the bot's other clients and to the next process. Shards that
@@ -35,8 +43,7 @@ export interface IdentifyGate {
 export const createIdentifyGate = (clock: Clock, limit: SessionStartLimit): IdentifyGate => {
   let allowance = Math.floor(limit.remaining / 2)
   let resetsAt = clock.now() + limit.resetAfter
-  /** When each concurrency bucket next frees. */
-  const freeAt = new Map<number, number>()
+  const buckets = new Map<number, Bucket>()
   /** Reopen the budget once Discord's window resets. Returns the current time. */
   const refill = () => {
     const now = clock.now()
@@ -46,10 +53,32 @@ export const createIdentifyGate = (clock: Clock, limit: SessionStartLimit): Iden
     }
     return now
   }
-  const charge = (identify: () => void) => {
+  // Identify the bucket's next shard if it is free, else wake when it frees. Spacing counts from
+  // each Identify actually sent, so timers that fire late never send two at once.
+  const drain = (bucket: Bucket) => {
+    const [next] = bucket.waiting
+    if (next === undefined) return
+    const now = clock.now()
+    if (now < bucket.freeAt) {
+      bucket.cancel = clock.schedule(() => drain(bucket), bucket.freeAt - now)
+      return
+    }
+    bucket.waiting.shift()
+    bucket.freeAt = now + IDENTIFY_INTERVAL_MS
     refill()
     allowance -= 1
-    identify()
+    next()
+    drain(bucket)
+  }
+  const bucketOf = (shardId: number) => {
+    const key = shardId % limit.maxConcurrency
+    const bucket = buckets.get(key) ?? {
+      waiting: [],
+      freeAt: Number.NEGATIVE_INFINITY,
+      cancel: () => {},
+    }
+    buckets.set(key, bucket)
+    return bucket
   }
   return {
     budgetWait: () => {
@@ -57,16 +86,19 @@ export const createIdentifyGate = (clock: Clock, limit: SessionStartLimit): Iden
       return allowance > 0 ? 0 : resetsAt - now
     },
     whenFree: (shardId, identify) => {
-      const bucket = shardId % limit.maxConcurrency
-      const now = clock.now()
-      const at = Math.max(now, freeAt.get(bucket) ?? now)
-      // A withdrawn ask keeps its slot, delaying the bucket by at most one interval.
-      freeAt.set(bucket, at + IDENTIFY_INTERVAL_MS)
-      if (at === now) {
-        charge(identify)
-        return () => {}
+      const bucket = bucketOf(shardId)
+      // Its own function, so withdrawing removes this ask and no other.
+      const ask = () => identify()
+      bucket.waiting.push(ask)
+      if (bucket.waiting.length === 1) drain(bucket)
+      return () => {
+        const index = bucket.waiting.indexOf(ask)
+        if (index === -1) return
+        bucket.waiting.splice(index, 1)
+        if (index > 0) return
+        bucket.cancel()
+        drain(bucket)
       }
-      return clock.schedule(() => charge(identify), at - now)
     },
   }
 }

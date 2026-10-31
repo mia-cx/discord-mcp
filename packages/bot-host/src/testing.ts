@@ -122,10 +122,15 @@ export const manualClock = (random = 0.5) => {
         const [due] = [...pending].filter((t) => t.at <= target).sort((a, b) => a.at - b.at)
         if (due === undefined) break
         pending.delete(due)
-        now = due.at
+        // A timer overdue after `stall` runs late, as a real one would.
+        now = Math.max(now, due.at)
         due.run()
       }
       now = target
     },
-  } satisfies Clock & { advance: (ms: number) => void }
+    /** Move time forward without running timers, like a blocked event loop. */
+    stall: (ms: number) => {
+      now += ms
+    },
+  } satisfies Clock & { advance: (ms: number) => void; stall: (ms: number) => void }
 }

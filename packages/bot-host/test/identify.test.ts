@@ -38,6 +38,34 @@ it.each([
   expect(at).toEqual(identified)
 })
 
+it('keeps five seconds between Identifies when their timers fire late', () => {
+  const clock = manualClock()
+  const gate = createIdentifyGate(clock, LIMIT)
+  const at: number[] = []
+  for (const shardId of [0, 1, 2]) gate.whenFree(shardId, () => at.push(clock.now()))
+
+  // The event loop blocks past both waiting shards' turns.
+  clock.stall(11_000)
+  clock.advance(DAY)
+  expect(at).toEqual([0, 11_000, 16_000])
+})
+
+it('gives a withdrawn turn to the next shard in its bucket', () => {
+  const clock = manualClock()
+  const gate = createIdentifyGate(clock, LIMIT)
+  const at: Array<[shardId: number, ms: number]> = []
+  for (const shardId of [0, 1, 2]) {
+    const withdraw = gate.whenFree(shardId, () => at.push([shardId, clock.now()]))
+    if (shardId === 1) withdraw()
+  }
+
+  clock.advance(DAY)
+  expect(at).toEqual([
+    [0, 0],
+    [2, 5_000],
+  ])
+})
+
 it.each([
   {
     case: 'half of what Discord says remains, then a wait for its reset',
