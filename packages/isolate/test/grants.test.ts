@@ -19,9 +19,21 @@ describe('script grants', () => {
     ['DELETE', '/channels/1/messages/2', 'delete_message', true, 'a named destructive call runs'],
     ['PATCH', '/users/@me', 'update_my_user', true, 'a named admin call runs'],
     ['GET', '/guilds/1', 'get_guild', false, 'an ungranted family is refused'],
-    ['POST', '/webhooks/1/token', 'execute_webhook', false, 'a token route is refused even if named'],
+    [
+      'POST',
+      '/webhooks/1/token',
+      'execute_webhook',
+      false,
+      'a token route is refused even if named',
+    ],
     ['GET', '/oauth2/applications/@me', 'get_my_oauth2_application', false, 'credentials stay out'],
-    ['POST', '/channels/1/messages/bulk-delete', 'bulk_delete_messages', false, 'literal beats param'],
+    [
+      'POST',
+      '/channels/1/messages/bulk-delete',
+      'bulk_delete_messages',
+      false,
+      'literal beats param',
+    ],
     ['GET', '/users/@me', 'get_my_user', false, '@me beats {user_id}'],
   ])('%s %s is %s: allowed %s (%s)', (method, path, operationId, allowed) => {
     const operation = matchOperation(catalog.all, method, path)
