@@ -59,15 +59,31 @@ const isUrl = (node: unknown): boolean => {
 }
 
 /**
- * A collector reached as a member, `channel.awaitMessages` or `discord.MessageCollector`, or
- * called or constructed by a bare name, as after destructuring. A data key of the same name isn't.
+ * A collector reached as a member, `channel.awaitMessages` or `discord.MessageCollector`, or taken
+ * out by destructuring, `const { MessageCollector: C } = discord`. A data key of the same name isn't.
  */
 const collects = (node: Node) => {
   if (node.type === 'MemberExpression') {
     return COLLECTORS.has(nameOf(node.property, node.computed) ?? '')
   }
-  if (node.type !== 'NewExpression' && node.type !== 'CallExpression') return false
-  return COLLECTORS.has(nameOf(node.callee, false) ?? '')
+  return (
+    node.type === 'ObjectPattern' &&
+    (node.properties as ReadonlyArray<Node>).some(
+      (property) =>
+        property.type === 'Property' &&
+        COLLECTORS.has(nameOf(property.key, property.computed) ?? ''),
+    )
+  )
+}
+
+/** The compiled source's syntax tree, or undefined for what acorn can't read, like deep nesting. */
+const syntaxOf = (code: string) => {
+  try {
+    // CommonJS allows a top-level return.
+    return parse(code, { ecmaVersion: 'latest', allowReturnOutsideFunction: true })
+  } catch {
+    return undefined
+  }
 }
 
 const uploadsUrl = (node: Node) => {
@@ -94,8 +110,8 @@ const uploadsUrl = (node: Node) => {
  * What in a workflow's own source can't work when each event runs in a fresh isolate: collectors
  * and `awaitMessages`, and URL attachments. Read from its syntax, so text that only mentions them
  * passes, and names reached through an import alias or namespace are caught. Code that builds the
- * call at runtime, or a dependency that makes it, still gets past. Source that does not compile
- * yields nothing here; bundling reports why.
+ * call at runtime, or a dependency that makes it, still gets past. Source that does not compile,
+ * or that the parser can't read, yields nothing here; bundling decides whether it publishes.
  */
 export const unsupportedUses = async (source: string): Promise<ReadonlyArray<string>> => {
   // CommonJS output turns every imported binding into a property of its module, `a.MessageCollector`.
@@ -106,9 +122,10 @@ export const unsupportedUses = async (source: string): Promise<ReadonlyArray<str
     target: 'es2023',
     logLevel: 'silent',
   }).catch(() => undefined)
-  if (compiled === undefined) return []
+  const syntax = compiled === undefined ? undefined : syntaxOf(compiled.code)
+  if (syntax === undefined) return []
   const found = new Set<string>()
-  for (const node of nodes(parse(compiled.code, { ecmaVersion: 'latest' }) as unknown as Node)) {
+  for (const node of nodes(syntax as unknown as Node)) {
     if (collects(node)) found.add(COLLECTOR_ISSUE)
     if (uploadsUrl(node)) found.add(ATTACHMENT_ISSUE)
   }

@@ -27,6 +27,16 @@ describe('finding what a fresh isolate per event cannot run', () => {
       "const { MessageCollector } = require('discord.js'); new MessageCollector(m.channel)",
       [COLLECTOR],
     ],
+    [
+      'a collector class destructured under another name',
+      "const { MessageCollector: C } = require('discord.js'); new C(m.channel)",
+      [COLLECTOR],
+    ],
+    [
+      'a collector after a top-level return, which CommonJS allows',
+      'if (!m) return\nm.channel.awaitMessages()',
+      [COLLECTOR],
+    ],
     ['a computed collector method', "m.channel['createMessageCollector']()", [COLLECTOR]],
     [
       'a URL in files',
@@ -50,6 +60,12 @@ describe('finding what a fresh isolate per event cannot run', () => {
     ['a URL sent as text', "m.reply({ content: 'https://example.com/cat.png' })", []],
     ['a local file', "m.reply({ files: ['./cat.png'] })", []],
     ['source that does not compile', 'm.reply(', []],
+    // Bundling, not this check, decides whether such source publishes.
+    [
+      'source nested past the parser’s stack',
+      `m.reply(${'['.repeat(5_000)}${']'.repeat(5_000)})`,
+      [],
+    ],
   ])('%s', async (_, source, issues) => {
     expect(await unsupportedUses(source)).toEqual(issues)
   })
