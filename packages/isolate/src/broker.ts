@@ -116,6 +116,7 @@ export const makeBroker = (options: BrokerOptions): Broker => {
           Effect.map(replyFor),
           Effect.catch((error) => Effect.succeed(failureFor(error))),
         ),
+      { signal: request.signal },
     )
   }
 

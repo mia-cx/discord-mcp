@@ -63,9 +63,9 @@ const config :Workerd.Config = (
 
 /**
  * Serves the broker to workerd. Proxy-style requests carry the full URL the isolate fetched, and
- * no `Host` header.
+ * no `Host` header. `signal` ends the execution, aborting whatever the broker still has in flight.
  */
-const serveBroker = (broker: Broker) =>
+const serveBroker = (broker: Broker, signal: AbortSignal) =>
   createServer({ requireHostHeader: false }, async (incoming, outgoing) => {
     try {
       const headers = new Headers()
@@ -77,6 +77,7 @@ const serveBroker = (broker: Broker) =>
         new Request(incoming.url ?? '', {
           method: incoming.method ?? 'GET',
           headers,
+          signal,
           ...(hasBody ? { body: Readable.toWeb(incoming) as ReadableStream, duplex: 'half' } : {}),
         }),
       )
@@ -142,10 +143,10 @@ const execute = async (execution: ScriptExecution): Promise<ScriptOutcome> => {
   const dir = await mkdtemp(join(tmpdir(), 'textile-script-'))
   const brokerSocket = join(dir, 'broker.sock')
   const runSocket = join(dir, 'run.sock')
-  const server = serveBroker(execution.broker)
   const stop = new AbortController()
   const signal =
     execution.signal === undefined ? stop.signal : AbortSignal.any([stop.signal, execution.signal])
+  const server = serveBroker(execution.broker, signal)
   let stderr = ''
   try {
     await listen(server, brokerSocket)

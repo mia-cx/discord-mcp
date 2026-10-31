@@ -109,7 +109,11 @@ export const fetchPublic = async (
   )
   const send = url.protocol === 'https:' ? httpsRequest : httpRequest
   const response = await new Promise<IncomingMessage>((resolve, reject) => {
-    const outgoing = send(url, { method: request.method, headers, lookup: pinned }, resolve)
+    const outgoing = send(
+      url,
+      { method: request.method, headers, lookup: pinned, signal: request.signal },
+      resolve,
+    )
     outgoing.on('error', reject)
     if (request.body === null) outgoing.end()
     else Readable.fromWeb(request.body).pipe(outgoing)
