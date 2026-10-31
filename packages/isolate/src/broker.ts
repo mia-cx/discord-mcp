@@ -65,30 +65,47 @@ const MAX_ACTIVITY_TYPE = 5
 /** Far below the Gateway's 4096-byte payload limit, and above any presence a bot can show. */
 const PRESENCE_LIMIT_BYTES = 2048
 
+const optionalString = (value: unknown) => value === undefined || typeof value === 'string'
+
 /**
- * A malformed or oversized presence makes Discord drop the bot's whole Gateway connection, and
- * every workflow's events with it, so check its shape and size.
+ * The presence an isolate asked for, rebuilt from the fields discord.js's setPresence sends, or
+ * undefined when malformed or oversized. Such a presence makes Discord drop the bot's whole
+ * Gateway connection, and the shard repeats it on every identify.
  */
-const isPresence = (value: unknown): value is Presence => {
-  if (typeof value !== 'object' || value === null) return false
-  if (Buffer.byteLength(JSON.stringify(value)) > PRESENCE_LIMIT_BYTES) return false
+const parsePresence = (value: unknown): Presence | undefined => {
+  if (typeof value !== 'object' || value === null) return undefined
+  if (Buffer.byteLength(JSON.stringify(value)) > PRESENCE_LIMIT_BYTES) return undefined
   const { since, activities, status, afk } = value as Record<string, unknown>
-  return (
-    (since === null || typeof since === 'number') &&
-    typeof afk === 'boolean' &&
-    typeof status === 'string' &&
-    STATUSES.has(status) &&
-    Array.isArray(activities) &&
-    activities.every(
-      (activity: unknown) =>
-        typeof activity === 'object' &&
-        activity !== null &&
-        typeof (activity as { name?: unknown }).name === 'string' &&
-        Number.isInteger((activity as { type?: unknown }).type) &&
-        (activity as { type: number }).type >= 0 &&
-        (activity as { type: number }).type <= MAX_ACTIVITY_TYPE,
-    )
-  )
+  if (
+    !(since === null || typeof since === 'number') ||
+    typeof afk !== 'boolean' ||
+    typeof status !== 'string' ||
+    !STATUSES.has(status) ||
+    !Array.isArray(activities)
+  ) {
+    return undefined
+  }
+  const parsed: Array<Record<string, unknown>> = []
+  for (const activity of activities as ReadonlyArray<Record<string, unknown> | null>) {
+    const { name, type, state, url } = activity ?? {}
+    if (
+      typeof name !== 'string' ||
+      !Number.isInteger(type) ||
+      (type as number) < 0 ||
+      (type as number) > MAX_ACTIVITY_TYPE ||
+      !optionalString(state) ||
+      !optionalString(url)
+    ) {
+      return undefined
+    }
+    parsed.push({
+      name,
+      type,
+      ...(state === undefined ? {} : { state }),
+      ...(url === undefined ? {} : { url }),
+    })
+  }
+  return { since, afk, status, activities: parsed }
 }
 
 /** A Discord-shaped error body, so discord.js inside the isolate raises its usual DiscordAPIError. */
@@ -239,9 +256,10 @@ export const makeBroker = (options: BrokerOptions): Broker => {
     if (op !== PRESENCE_UPDATE) {
       return refuse(request, `Gateway opcode ${String(op)} is not supported; only setPresence is.`)
     }
-    if (!isPresence(d)) return refuse(request, 'The presence is malformed.')
+    const presence = parsePresence(d)
+    if (presence === undefined) return refuse(request, 'The presence is malformed.')
     try {
-      await options.updatePresence(d)
+      await options.updatePresence(presence)
     } catch (error) {
       return discordError(503, error instanceof Error ? error.message : String(error))
     }

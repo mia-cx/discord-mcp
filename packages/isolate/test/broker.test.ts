@@ -16,10 +16,20 @@ const setPresence = (activity: Record<string, unknown>) =>
   })
 
 it.each([
-  [{ name: 'tests', type: 0 }, 204, 'a presence discord.js sends'],
-  [{ name: 'x'.repeat(16_000), type: 0 }, 403, 'one Discord would close the connection over'],
-  [{ name: 'tests', type: 99 }, 403, 'an activity type Discord does not define'],
-])('answers setPresence(%o) with %i: %s', async (activity, status) => {
+  [{ name: 'tests', type: 0 }, { name: 'tests', type: 0 }, 'a presence discord.js sends'],
+  [
+    { name: 'tests', type: 1, url: 'https://twitch.tv/x', emoji: { id: 1 } },
+    { name: 'tests', type: 1, url: 'https://twitch.tv/x' },
+    'fields discord.js never sends are dropped',
+  ],
+  [
+    { name: 'x'.repeat(16_000), type: 0 },
+    undefined,
+    'too large: Discord would close the connection',
+  ],
+  [{ name: 'tests', type: 99 }, undefined, 'an activity type Discord does not define'],
+  [{ name: 'tests', type: 1, url: 123 }, undefined, 'a URL that is not a string'],
+])('forwards setPresence(%o) as %o: %s', async (activity, forwarded) => {
   const updatePresence = vi.fn(async () => {})
   const broker = makeBroker({
     operations: catalog.all,
@@ -31,6 +41,10 @@ it.each([
 
   const response = await broker(setPresence(activity))
 
-  expect(response.status).toBe(status)
-  expect(updatePresence).toHaveBeenCalledTimes(status === 204 ? 1 : 0)
+  expect(response.status).toBe(forwarded === undefined ? 403 : 204)
+  expect(updatePresence.mock.calls).toEqual(
+    forwarded === undefined
+      ? []
+      : [[{ since: null, afk: false, status: 'online', activities: [forwarded] }]],
+  )
 })
