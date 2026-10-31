@@ -44,7 +44,7 @@ describe('bot hosting', () => {
     const clock = manualClock()
     const log = vi.fn()
     const vault = createTokenVault(Buffer.alloc(32, 1), storage)
-    const bots = createBotRuntimes({ vault, clock, log, gatewayUrl: gateway.url })
+    const bots = createBotRuntimes({ vault, clock, log, discordFetch: gateway.discordFetch() })
     const relay = createRelay(
       config,
       executor(

@@ -73,7 +73,11 @@ export const createTokenVault = (key: Buffer, storage: Storage): TokenVault => {
           botId,
           shardId,
           token: open(botId, sealedToken),
-          session: JSON.parse(open(sessionContext(botId, shardId), sealedSession)),
+          // Sessions sealed before bots sharded carry no count: they were all shard 0 of 1.
+          session: {
+            shardCount: 1,
+            ...JSON.parse(open(sessionContext(botId, shardId), sealedSession)),
+          },
         }),
       ),
   }
