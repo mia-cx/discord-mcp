@@ -12,6 +12,8 @@ const BOT = { id: '345678901234567890', username: 'textile', discriminator: '0',
 const TOKEN = botToken(BOT.id)
 const GUILD = '223456789012345678'
 const CHANNEL = '123456789012345678'
+/** A guild text channel that scheduled workflows post to. */
+const DIGEST_CHANNEL = '123456789012345679'
 const HUMAN_A = '234567890123456789'
 const HUMAN_B = '234567890123456780'
 const MINUTE = 60 * 1000
@@ -20,6 +22,8 @@ const HOUR = 60 * MINUTE
 const START = Date.parse('2026-11-02T08:58:30.000Z')
 /** Guilds, GuildMessages, and MessageContent. */
 const PING_INTENTS = 1 | (1 << 9) | (1 << 15)
+/** `GUILDS` and `GUILD_VOICE_STATES`, which every bot identifies with for voice. */
+const VOICE_INTENTS = 129
 /** The application flag that allows the MessageContent intent. */
 const GATEWAY_MESSAGE_CONTENT = 1 << 18
 
@@ -74,6 +78,36 @@ const message = (sequence: number, content: string) => ({
   },
 })
 
+const INTERACTION_TOKEN = 'interaction-token'
+
+/** `/hello`, as Discord delivers it with the token that answers it. */
+const slashCommand = (sequence: number) => ({
+  op: 0,
+  s: sequence,
+  t: 'INTERACTION_CREATE',
+  d: {
+    id: '700000000000000001',
+    application_id: BOT.id,
+    type: 2,
+    token: INTERACTION_TOKEN,
+    version: 1,
+    guild_id: GUILD,
+    channel_id: CHANNEL,
+    channel: { id: CHANNEL, type: 0 },
+    member: {
+      user: { id: HUMAN_A, username: 'mia', discriminator: '0' },
+      roles: [],
+      permissions: '0',
+      joined_at: '2026-01-01T00:00:00.000Z',
+    },
+    app_permissions: '0',
+    locale: 'en-US',
+    entitlements: [],
+    authorizing_integration_owners: {},
+    data: { id: '800000000000000001', name: 'hello', type: 1 },
+  },
+})
+
 const cleanup: Array<() => unknown> = []
 afterEach(async () => {
   for (const step of cleanup.splice(0).reverse()) await step()
@@ -111,7 +145,13 @@ const platform = async (shards = 1) => {
         })
         if (call.route === '/users/@me') return BOT
         if (call.route === '/applications/@me') return { flags: discord.applicationFlags }
-        if (call.route === `/channels/${CHANNEL}`) return { id: CHANNEL, type: 0, guild_id: GUILD }
+        // A response that quotes the credential it was sent with.
+        if (call.route === `/channels/${CHANNEL}`) {
+          return { id: CHANNEL, type: 0, echo: Redacted.value(credential) }
+        }
+        if (call.route === `/channels/${DIGEST_CHANNEL}`) {
+          return { id: DIGEST_CHANNEL, type: 0, guild_id: GUILD }
+        }
         if (call.route.endsWith('/callback')) return new ArrayBuffer(0)
         return sent((call.body as { content?: unknown } | undefined)?.content)
       }),
@@ -262,7 +302,7 @@ describe('workflows', () => {
       grants: { operations: [], families: ['message', 'interaction', 'webhook'], hosts: [] },
       enabled: true,
     })
-    const connection = await identifiedWith(PING_INTENTS, 1)
+    const connection = await identifiedWith(PING_INTENTS | VOICE_INTENTS, 1)
 
     // Two days without an agent call: the bot stays online for its workflow.
     clock.advance(48 * HOUR)
@@ -280,32 +320,7 @@ describe('workflows', () => {
       }),
     )
 
-    connection.send({
-      op: 0,
-      s: 3,
-      t: 'INTERACTION_CREATE',
-      d: {
-        id: '700000000000000001',
-        application_id: BOT.id,
-        type: 2,
-        token: 'interaction-token',
-        version: 1,
-        guild_id: GUILD,
-        channel_id: CHANNEL,
-        channel: { id: CHANNEL, type: 0 },
-        member: {
-          user: { id: HUMAN_A, username: 'mia', discriminator: '0' },
-          roles: [],
-          permissions: '0',
-          joined_at: '2026-01-01T00:00:00.000Z',
-        },
-        app_permissions: '0',
-        locale: 'en-US',
-        entitlements: [],
-        authorizing_integration_owners: {},
-        data: { id: '800000000000000001', name: 'hello', type: 1 },
-      },
-    })
+    connection.send(slashCommand(3))
     await vi.waitFor(() => expect(calls.filter((call) => call.auth === false)).toHaveLength(3))
     expect(
       calls.filter((call) => call.auth === false).map((call) => [call.method, call.route]),
@@ -349,7 +364,7 @@ describe('workflows', () => {
         import { Client } from 'discord.js'
         const client = new Client({ intents: [], schedules: ['0 9 * * *'] })
         client.on('schedule', async ({ scheduledAt }) => {
-          const channel = await client.channels.fetch('${CHANNEL}')
+          const channel = await client.channels.fetch('${DIGEST_CHANNEL}')
           await channel.send('Digest for ' + scheduledAt.toISOString().slice(0, 10))
         })`,
       grants: { families: ['channel', 'message'] },
@@ -361,7 +376,9 @@ describe('workflows', () => {
     await asA('discord_workflow_enable', { name: 'digest' })
     const digests = () =>
       calls
-        .filter((call) => call.method === 'POST' && call.route === `/channels/${CHANNEL}/messages`)
+        .filter(
+          (call) => call.method === 'POST' && call.route === `/channels/${DIGEST_CHANNEL}/messages`,
+        )
         .map(({ token, body }) => [token, (body as { content: string }).content])
 
     // 08:59, then 09:00, with no agent call from here on.
@@ -377,6 +394,17 @@ describe('workflows', () => {
         [TOKEN, 'Digest for 2026-11-02'],
         [TOKEN, 'Digest for 2026-11-04'],
       ]),
+    )
+    // Each tick is a run the agent can read, like an event's.
+    await vi.waitFor(async () =>
+      expect(
+        (await asA('discord_workflow_logs', { name: 'digest' })).structuredContent.data,
+      ).toMatchObject({
+        runs: [
+          { event: 'schedule 0 9 * * *', outcome: 'completed' },
+          { event: 'schedule 0 9 * * *', outcome: 'completed' },
+        ],
+      }),
     )
   }, 30_000)
 
@@ -395,7 +423,7 @@ describe('workflows', () => {
     await asA('discord_workflow_publish', { name: 'ping', source: PING_PONG, grants })
     await asA('discord_workflow_enable', { name: 'hog' })
     await asA('discord_workflow_enable', { name: 'ping' })
-    const connection = await identifiedWith(PING_INTENTS)
+    const connection = await identifiedWith(PING_INTENTS | VOICE_INTENTS)
     const pongs = () => calls.filter((call) => call.route === `/channels/${CHANNEL}/messages`)
 
     connection.send(message(2, 'ping'))
@@ -411,6 +439,99 @@ describe('workflows', () => {
       { timeout: 20_000 },
     )
   }, 30_000)
+})
+
+describe('workflow state and logs', () => {
+  it('count messages in KV, and show agents each run without its tokens', async () => {
+    const { agent, calls, identifiedWith, log } = await platform()
+    const asA = await agent(HUMAN_A)
+    await asA('discord_workflow_publish', {
+      name: 'counter',
+      source: `
+        import { Client } from 'discord.js'
+        import { kv } from 'textile'
+
+        const client = new Client({ intents: [1, 512, 32768] })
+
+        client.on('messageCreate', async (message) => {
+          if (message.content === 'shout') throw new Error('x'.repeat(100000))
+          if (message.content === 'hoard') {
+            await kv.set('a', 'x'.repeat(600000))
+            await kv.set('b', 'x'.repeat(600000))
+          }
+          const count = ((await kv.get('count')) ?? 0) + 1
+          await kv.set('count', count)
+          console.log('message', count)
+          if (message.content === 'count') await message.reply(String(count))
+        })
+
+        client.on('interactionCreate', async (interaction) => {
+          const channel = await client.rest.get('/channels/' + interaction.channelId)
+          console.log(interaction.token, JSON.stringify(channel))
+          await kv.set('.', 'dot')
+          const refused = await kv.get(interaction.token + '\\0').catch((error) => error.message)
+          console.log(await kv.get('.'), refused, 'nul\\0 lone\\uD800')
+          throw new Error('failed with ' + interaction.token)
+        })`,
+      grants: { families: ['message', 'channel'] },
+    })
+    await asA('discord_workflow_enable', { name: 'counter' })
+    const connection = await identifiedWith(PING_INTENTS | VOICE_INTENTS)
+
+    connection.send(message(2, 'one'))
+    connection.send(message(3, 'hoard'))
+    connection.send(message(4, 'count'))
+    connection.send(slashCommand(5))
+    connection.send(message(6, 'shout'))
+
+    // The run past the limit stored nothing and counted nothing.
+    await vi.waitFor(
+      () =>
+        expect(calls).toContainEqual(
+          expect.objectContaining({
+            route: `/channels/${CHANNEL}/messages`,
+            body: expect.objectContaining({ content: '2' }),
+          }),
+        ),
+      { timeout: 20_000 },
+    )
+    type Runs = {
+      runs: Array<{ event: string; outcome: string; error: string | null; logs: string[] }>
+    }
+    const runs = async (args: Record<string, unknown> = {}) =>
+      (await asA('discord_workflow_logs', args)).structuredContent.data as Runs
+    await vi.waitFor(async () => expect((await runs()).runs).toHaveLength(5), { timeout: 20_000 })
+
+    expect((await runs({ name: 'counter', limit: 1 })).runs).toHaveLength(1)
+    const failed = await runs({ failed: true })
+    expect(failed.runs).toHaveLength(3)
+    // A listener's error is cut like its logs, however long the message it throws.
+    expect(failed.runs).toContainEqual(
+      expect.objectContaining({ error: `Error: ${'x'.repeat(16_377)} [truncated]` }),
+    )
+    expect(failed.runs).toContainEqual(
+      expect.objectContaining({
+        event: 'MESSAGE_CREATE',
+        outcome: 'threw',
+        error: expect.stringContaining('past its limit of 1048576'),
+      }),
+    )
+    expect(failed.runs).toContainEqual(
+      expect.objectContaining({
+        event: 'INTERACTION_CREATE',
+        outcome: 'threw',
+        error: 'Error: failed with [redacted]',
+        logs: [
+          `[redacted] {"id":"${CHANNEL}","type":0,"echo":"[redacted]"}`,
+          // Keys URL parsing would drop, and text Postgres refuses, both still work.
+          'dot A KV key is a non-empty string without NUL characters. nul\uFFFD lone\uFFFD',
+        ],
+      }),
+    )
+    const everything = JSON.stringify([await runs(), log.mock.calls])
+    expect(everything).not.toContain(INTERACTION_TOKEN)
+    expect(everything).not.toContain(TOKEN)
+  }, 60_000)
 })
 
 describe("a bot's shared limiter", () => {

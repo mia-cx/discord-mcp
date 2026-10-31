@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { createServer } from 'node:http'
+import { createServer, type IncomingMessage } from 'node:http'
+import type { Duplex } from 'node:stream'
 import {
   type BotRuntimes,
   createBotRuntimes,
@@ -25,10 +26,12 @@ import {
   createBotLimiters,
   createExecutor,
   createRelay,
+  createTokenCheck,
   relayRuntime,
 } from './relay.ts'
 import { ownerOf } from './router.ts'
-import { createBotHost, forwardToBotHosts } from './tiers.ts'
+import { createBotHost, forwardToBotHosts, forwardVoiceToBotHosts } from './tiers.ts'
+import { createVoiceUpgrade } from './voice.ts'
 
 const StderrLogging = Layer.succeed(Logger.LogToStderr)(true)
 const csv = (value: string) =>
@@ -168,41 +171,62 @@ const membership = Effect.gen(function* () {
   return { hosts, secret: Redacted.value(secret) }
 })
 
+interface Handler {
+  readonly fetch: (request: Request) => Promise<Response>
+  /** Takes over WebSocket upgrades: the voice socket. */
+  readonly upgrade?: (request: IncomingMessage, socket: Duplex, head: Buffer) => void
+  /** Runs at shutdown before the server closes, such as taking bots offline. */
+  readonly close?: () => Promise<void>
+}
+
 /** Serve `handler` over HTTP until the program stops. */
-const serve = (
-  handler: { fetch: (request: Request) => Promise<Response> },
-  host: string,
-  port: number,
-  name: string,
-) =>
+const serve = (handler: Handler, host: string, port: number, name: string) =>
   Effect.gen(function* () {
     const handle = toNodeHandler(handler)
+    /** Upgraded sockets, which would hold the server open at shutdown. */
+    const upgraded = new Set<Duplex>()
     const server = yield* Effect.acquireRelease(
       Effect.tryPromise(
         () =>
           new Promise<ReturnType<typeof createServer>>((resolve, reject) => {
-            const server = createServer((request, response) => {
-              void handle(
-                {
-                  method: request.method ?? 'GET',
-                  url: request.url ?? '/',
-                  headers: request.headers,
-                  [Symbol.asyncIterator]: () => request[Symbol.asyncIterator](),
-                },
-                response,
-              )
+            const server = createServer(
+              // Only WebSocket upgrades go to the voice socket. Others, such as h2c, stay requests.
+              {
+                shouldUpgradeCallback: (request) =>
+                  handler.upgrade !== undefined &&
+                  request.headers.upgrade?.toLowerCase() === 'websocket',
+              },
+              (request, response) => {
+                void handle(
+                  {
+                    method: request.method ?? 'GET',
+                    url: request.url ?? '/',
+                    headers: request.headers,
+                    [Symbol.asyncIterator]: () => request[Symbol.asyncIterator](),
+                  },
+                  response,
+                )
+              },
+            )
+            server.on('upgrade', (request, socket, head) => {
+              upgraded.add(socket)
+              socket.once('close', () => upgraded.delete(socket))
+              handler.upgrade?.(request, socket, head)
             })
             server.once('error', reject)
             server.listen(port, host, () => resolve(server))
           }),
       ),
       (server) =>
-        Effect.promise(
-          () =>
-            new Promise<void>((resolve, reject) => {
-              server.close((error) => (error === undefined ? resolve() : reject(error)))
-            }),
-        ),
+        Effect.promise(async () => {
+          // Bots going offline close their voice sockets with 1001; whatever is left, such as a
+          // central's relayed socket, is cut.
+          await handler.close?.()
+          for (const socket of upgraded) socket.destroy()
+          await new Promise<void>((resolve, reject) => {
+            server.close((error) => (error === undefined ? resolve() : reject(error)))
+          })
+        }),
     )
     const address = server.address()
     const bound = typeof address === 'object' && address !== null ? address.port : port
@@ -266,8 +290,13 @@ const main = Effect.gen(function* () {
   const allowlist = yield* allowedUsers
   // Running agent code is a platform feature, which an unrestricted relay never offers.
   const scripts = allowlist !== undefined
-  const listen = (handler: { fetch: (request: Request) => Promise<Response> }) =>
+  const listen = (handler: Handler) =>
     serve(handler, config.host, config.port, tier === 'all' ? 'discord-mcp' : `discord-mcp ${tier}`)
+  /** Voice sockets for this process's bots, which bot hosting serves. */
+  const voiceFor = (hosting: { readonly bots: BotRuntimes } | undefined) =>
+    hosting && createVoiceUpgrade({ bots: hosting.bots, checkToken: createTokenCheck({ rest }) })
+  const closing = (hosting: { readonly bots: BotRuntimes } | undefined) =>
+    hosting === undefined ? {} : { close: () => hosting.bots.close() }
 
   if (tier === 'bot-host') {
     const members = yield* membership
@@ -286,9 +315,14 @@ const main = Effect.gen(function* () {
       rest,
       (botId) => ownerOf(members.hosts, botId) === self,
     )
-    return yield* listen(
-      createBotHost({ ...members, self }, createExecutor({ rest, scripts, ...hosting })),
-    )
+    return yield* listen({
+      ...createBotHost(
+        { ...members, self },
+        createExecutor({ rest, scripts, ...hosting }),
+        voiceFor(hosting),
+      ),
+      ...closing(hosting),
+    })
   }
 
   yield* checkPublicExposure({
@@ -304,10 +338,13 @@ const main = Effect.gen(function* () {
     encryptionKey: Config.redacted('OAUTH_ENCRYPTION_KEY'),
   })
   // Central holds no bot tokens: it only forwards them to the bot host that owns each bot.
+  const members = tier === 'central' ? yield* membership : undefined
+  const hosting = members === undefined ? yield* startBotHosting(allowlist, rest) : undefined
   const execute =
-    tier === 'central'
-      ? forwardToBotHosts(yield* membership)
-      : createExecutor({ rest, scripts, ...(yield* startBotHosting(allowlist, rest)) })
+    members === undefined
+      ? createExecutor({ rest, scripts, ...hosting })
+      : forwardToBotHosts(members)
+  const upgrade = members === undefined ? voiceFor(hosting) : forwardVoiceToBotHosts(members)
   const relay = createRelay(
     {
       allowedHosts: csv(config.allowedHosts),
@@ -322,8 +359,10 @@ const main = Effect.gen(function* () {
       },
     },
     execute,
+    fetch,
+    upgrade,
   )
-  return yield* listen(relay)
+  return yield* listen({ ...relay, ...closing(hosting) })
 })
 
 const program = Layer.launch(Layer.effectDiscard(main)).pipe(

@@ -1,14 +1,16 @@
 import { McpRequestContext, type Principal, ValidationError } from '@discord-mcp/core'
 import type { DiscordRest } from '@discord-mcp/discord-api/relay'
 import type {
+  RecordedWorkflowRun,
   ScheduledWorkflow,
   Storage,
   WorkflowGrants,
   WorkflowRevision,
+  WorkflowRunOutcome,
 } from '@discord-mcp/storage'
 import type { OperationEntry } from '@mia-cx/discord-catalog'
 import { Effect, Redacted } from 'effect'
-import { makeBroker, type Presence } from './broker.ts'
+import { type KvStore, makeBroker, type Presence } from './broker.ts'
 import { prepareScript, ScriptBuildError, type ScriptModule } from './bundle.ts'
 import { checkScheduleFloor, MIN_SCHEDULE_INTERVAL_MINUTES, parseCron } from './cron.ts'
 import type { GatewayEvent, IsolateHost, ScheduleTick, ScriptOutcome } from './isolate-host.ts'
@@ -101,6 +103,18 @@ const PROBE_TIMEOUT_MS = 10_000
 const INTERACTION_ADMISSION_MS = 2_000
 /** How long one workflow may take over one event. */
 export const EVENT_TIMEOUT_MS = 30_000
+/** What a workflow's KV keys and values may take together. */
+export const KV_LIMIT_BYTES = 1024 * 1024
+export const KV_KEY_LIMIT_BYTES = 512
+const HOUR_MS = 60 * 60 * 1000
+/** How long a run's record stays readable, and how many records each workflow keeps at most. */
+export const RUN_RETENTION_MS = 7 * 24 * HOUR_MS
+export const RUNS_KEPT = 1000
+/** A run's console output, and its error, are each stored up to this many characters. */
+const RUN_LOG_LIMIT_CHARS = 16 * 1024
+/** How often expired run records are deleted, at most. */
+const PRUNE_INTERVAL_MS = HOUR_MS
+const REDACTED = '[redacted]'
 
 /** A Gateway event for an online bot, with the token a run acts with. */
 export interface WorkflowEvent {
@@ -123,7 +137,7 @@ export interface WorkflowHostOptions {
   readonly storage: Storage
   readonly isolates: IsolateHost
   readonly bots: WorkflowBots
-  /** The wall clock schedules fire by. */
+  /** The wall clock schedules fire and run records are dated by. */
   readonly clock: SchedulerClock
   readonly operations: ReadonlyArray<OperationEntry>
   /**
@@ -186,11 +200,17 @@ export interface WorkflowHost {
   ) => Promise<WorkflowRevision>
   readonly disable: (caller: WorkflowCaller, name: string) => Promise<void>
   readonly delete: (caller: WorkflowCaller, name: string) => Promise<void>
+  /** The bot's most recent unexpired workflow runs, newest first. */
+  readonly runs: (
+    botId: string,
+    query: { readonly name?: string; readonly failed?: boolean; readonly limit: number },
+  ) => Promise<ReadonlyArray<RecordedWorkflowRun>>
   /** Run every enabled workflow that listens for this event. Events of one guild run in order. */
   readonly dispatch: (event: WorkflowEvent) => void
   /**
-   * Keep every bot with enabled workflows that `owns` accepts online, and fire their schedules.
-   * Called once at startup, before the bot host resumes stored sessions.
+   * Keep every bot with enabled workflows that `owns` accepts online, fire their schedules, and
+   * delete expired run records. Called once at startup, before the bot host resumes stored
+   * sessions.
    */
   readonly restore: (owns?: (botId: string) => boolean) => Promise<void>
   /** Stop firing schedules. */
@@ -209,6 +229,36 @@ const failure = (outcome: Exclude<ScriptOutcome, { outcome: 'completed' }>) => {
     case 'crashed':
       return outcome.message
   }
+}
+
+/**
+ * Replaces each secret in `text`. A workflow can log the interaction it handles, token included,
+ * and Discord's errors can quote a request's path.
+ */
+const redactor =
+  (secrets: ReadonlyArray<string>) =>
+  (text: string): string =>
+    secrets.reduce((redacted, secret) => redacted.replaceAll(secret, REDACTED), text)
+
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g
+
+/** `text` as Postgres can store it: it refuses NUL and lone surrogates, which JavaScript allows. */
+const storable = (text: string) => text.replaceAll('\0', '�').replace(LONE_SURROGATE, '�')
+
+/** A run's error, cut to what a record keeps. Its listener can throw any message. */
+const clippedError = (text: string) =>
+  text.length > RUN_LOG_LIMIT_CHARS ? `${text.slice(0, RUN_LOG_LIMIT_CHARS)} [truncated]` : text
+
+/** A run's console lines, cut to what a record keeps. */
+const storedLogs = (lines: ReadonlyArray<string>) => {
+  const kept: string[] = []
+  let chars = 0
+  for (const line of lines) {
+    chars += line.length
+    if (chars > RUN_LOG_LIMIT_CHARS) return [...kept, '[logs truncated]']
+    kept.push(line)
+  }
+  return kept
 }
 
 /** Workflows call Discord from their listeners only, never while loading. */
@@ -331,6 +381,7 @@ export const makeWorkflowHost = ({
   rest,
   log,
 }: WorkflowHostOptions): WorkflowHost => {
+  const now = clock.date
   /** Each bot's enabled revisions, compiled once and dropped whenever they change. */
   const enabled = new Map<string, Promise<ReadonlyArray<Enabled>>>()
   /** Routing for one bot runs in event order, so its guilds' queues fill in event order. */
@@ -413,6 +464,41 @@ export const makeWorkflowHost = ({
     return user
   }
 
+  /** A workflow's own KV store, whichever revision runs. Its failures reach the operator. */
+  const kvFor = (workflowId: string, label: string, redact: (text: string) => string): KvStore => {
+    const reported = <A>(operation: Promise<A>) =>
+      operation.catch((error: unknown) => {
+        log(`${label}: KV failed: ${redact(String(error))}`)
+        throw error
+      })
+    return {
+      get: (key) => reported(storage.loadWorkflowValue(workflowId, key)),
+      set: async (key, value) => {
+        if (Buffer.byteLength(key) > KV_KEY_LIMIT_BYTES) {
+          return `A KV key takes at most ${KV_KEY_LIMIT_BYTES} bytes.`
+        }
+        const { stored, bytes } = await reported(
+          storage.storeWorkflowValue(workflowId, key, value, KV_LIMIT_BYTES),
+        )
+        return stored
+          ? undefined
+          : `The workflow's KV keys and values would take ${bytes} bytes, past its limit of ${KV_LIMIT_BYTES}. Delete keys to make room.`
+      },
+      delete: (key) => reported(storage.deleteWorkflowValue(workflowId, key)),
+    }
+  }
+
+  let prunedAt = Number.NEGATIVE_INFINITY
+  /** Delete expired run records, at most once an interval. Every bot host does, harmlessly. */
+  const prune = () => {
+    const at = now()
+    if (at - prunedAt < PRUNE_INTERVAL_MS) return
+    prunedAt = at
+    storage
+      .pruneWorkflowRuns(new Date(at - RUN_RETENTION_MS))
+      .catch((error: unknown) => log(`Pruning workflow runs failed: ${String(error)}`))
+  }
+
   /**
    * Queue one workflow's run of one Gateway event or schedule tick. Enqueues before returning, so
    * callers keep order.
@@ -428,10 +514,39 @@ export const makeWorkflowHost = ({
     const { client, release } = rest(botId, Redacted.make(token))
     const dispatch = 'event' in trigger ? trigger.event : undefined
     const d = dispatch?.d ?? {}
-    const { name, revision, grants } = workflow.revision
+    const { workflowId, name, revision, grants } = workflow.revision
     const label = `Workflow ${name} (revision ${revision}) of bot ${botId}`
+    /** What it ran for, as its logs and run record name it. */
     const cause = dispatch?.t ?? `schedule ${'tick' in trigger ? trigger.tick.cron : ''}`
     const isInteraction = dispatch?.t === 'INTERACTION_CREATE'
+    const receivedAt = new Date(now())
+    const redact = redactor([
+      token,
+      ...(isInteraction && typeof d.token === 'string' && d.token !== '' ? [d.token] : []),
+    ])
+    /** Record this run. `error` arrives redacted and clipped; logs are redacted and cut here. */
+    const record = (
+      outcome: WorkflowRunOutcome,
+      error: string | null,
+      logs: ReadonlyArray<string>,
+    ) =>
+      storage
+        .recordWorkflowRun(
+          {
+            workflowId,
+            revision,
+            event: cause,
+            outcome,
+            error: error === null ? null : storable(error),
+            logs: storedLogs(logs.map((line) => storable(redact(line)))),
+            receivedAt,
+            finishedAt: new Date(now()),
+          },
+          RUNS_KEPT,
+        )
+        .then(prune, (error: unknown) =>
+          log(`${label}: its run was not recorded: ${String(error)}`),
+        )
     return isolates
       .run({
         // Each workflow sees a guild's events, and a direct message channel's, in order, and never
@@ -477,19 +592,24 @@ export const makeWorkflowHost = ({
               }
             : {}),
           updatePresence: async (presence) => bots.updatePresence(botId, presence),
+          kv: kvFor(workflowId, label, redact),
           // The URL can hold an interaction token, so only the reason is logged.
           onDenied: ({ method, reason }) => log(`${label}: refused ${method}: ${reason}`),
         }),
       })
       .then(
         (outcome) => {
-          if (outcome.outcome !== 'completed') {
-            log(`${label} failed on ${cause}: ${failure(outcome)}`)
-          }
+          if (outcome.outcome === 'completed') return record('completed', null, outcome.logs)
+          const reason = clippedError(redact(failure(outcome)))
+          log(`${label} failed on ${cause}: ${reason}`)
+          return record(outcome.outcome, reason, 'logs' in outcome ? outcome.logs : [])
         },
         (error: unknown) => {
           // Disabled or deleted while queued or running.
-          if (!workflow.stop.signal.aborted) log(`${label} did not run: ${String(error)}`)
+          if (workflow.stop.signal.aborted) return
+          const reason = clippedError(redact(String(error)))
+          log(`${label} did not run: ${reason}`)
+          return record('skipped', reason, [])
         },
       )
       .finally(release)
@@ -723,6 +843,9 @@ export const makeWorkflowHost = ({
       await refresh(caller.botId)
     },
 
+    runs: (botId, query) =>
+      storage.workflowRuns(botId, { ...query, since: new Date(now() - RUN_RETENTION_MS) }),
+
     dispatch: (event) => {
       const next = (routing.get(event.botId) ?? Promise.resolve())
         .then(() => route(event))
@@ -733,6 +856,7 @@ export const makeWorkflowHost = ({
     },
 
     restore: async (owns = () => true) => {
+      prune()
       const intents = new Map<string, number>()
       for (const { botId, intents: own } of await storage.enabledRevisions()) {
         // Bot hosts share the database; each holds only the bots it owns.

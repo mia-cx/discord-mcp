@@ -60,6 +60,10 @@ export interface ShardSession {
    * resumed from stored sessions keeps it.
    */
   readonly shardCount: number
+  /** The intents it was identified with. A resumed session delivers only those events. */
+  readonly intents: number
+  /** The next process must identify afresh rather than resume, but still brings the bot online. */
+  readonly stale?: true
 }
 
 export interface ShardOptions {
@@ -88,9 +92,13 @@ export interface ShardOptions {
   readonly onIdentifyBudgetSpent: (waitMs: number) => void
   /** Hears every dispatch, `READY` and replayed ones included. */
   readonly onDispatch?: (event: string, data: unknown) => void
+  /** The connection is gone; nothing can be sent until the next `READY` or `RESUMED`. */
+  readonly onDrop?: () => void
 }
 
 export interface Shard {
+  /** Send a payload once the connection's session has started. False before then. */
+  readonly send: (payload: { readonly op: number; readonly d: unknown }) => boolean
   /** Identify a new session with different intents. */
   readonly setIntents: (intents: number) => void
   /**
@@ -100,8 +108,11 @@ export interface Shard {
   readonly updatePresence: (presence: Presence) => void
   /** End the session, so Discord shows the bot offline, and stop reconnecting. */
   readonly stop: () => void
-  /** Disconnect and stop reconnecting, but leave the session resumable for the next process. */
-  readonly suspend: () => void
+  /**
+   * Disconnect and stop reconnecting, but keep the session for the next process. It resumes the
+   * session, or with `identifyAfresh` it brings the bot back with a new one.
+   */
+  readonly suspend: (identifyAfresh?: boolean) => void
 }
 
 /**
@@ -123,6 +134,7 @@ export const startShard = ({
   onFatal,
   onIdentifyBudgetSpent,
   onDispatch,
+  onDrop,
 }: ShardOptions): Shard => {
   let intents = initialIntents
   let presence = ONLINE
@@ -136,7 +148,9 @@ export const startShard = ({
   /** The current connection's session has started: READY or RESUMED arrived. */
   let authenticated = false
   let socket: WebSocket | undefined
-  let session = saved
+  // A session identified with other intents, or saved before sessions recorded them, would
+  // resume without the events these intents need, so it identifies afresh.
+  let session = saved?.intents === initialIntents && saved.stale === undefined ? saved : undefined
   /** A connection to this session's resume URL closed before Hello. */
   let resumeUrlFailed = false
   /** The current connection got Hello. */
@@ -165,6 +179,7 @@ export const startShard = ({
     const current = socket
     socket = undefined
     current?.close(code)
+    onDrop?.()
   }
 
   // Discord invalidated the session: identify afresh. The stored copy stays until the next READY
@@ -217,6 +232,7 @@ export const startShard = ({
         resumeGatewayUrl: ready.resume_gateway_url,
         sequence,
         shardCount,
+        intents,
       }
       resumeUrlFailed = false
     } else if (session !== undefined) {
@@ -346,6 +362,9 @@ export const startShard = ({
   if (session === undefined) connectToIdentify()
   else connect()
   return {
+    // Discord closes a session with 4003 for any payload before Identify or Resume, and Identify
+    // may wait its turn after Hello, so sends wait for the session to start.
+    send: (payload) => authenticated && send(payload),
     setIntents: (next) => {
       if (next === intents) return
       intents = next
@@ -366,9 +385,10 @@ export const startShard = ({
       drop(NORMAL_CLOSURE)
       end()
     },
-    suspend: () => {
+    suspend: (identifyAfresh = false) => {
       cancelPresence?.()
       drop(RECONNECT_CLOSURE)
+      if (identifyAfresh && session !== undefined) onSession({ ...session, stale: true })
     },
   }
 }

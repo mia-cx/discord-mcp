@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process'
+import { once } from 'node:events'
+import { request } from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { createBotRuntimes, createTokenVault } from '@discord-mcp/bot-host'
 import { fakeGateway, manualClock } from '@discord-mcp/bot-host/testing'
@@ -129,6 +131,12 @@ describe('the allowlist gate', () => {
       expect(server.stderr).toContain('Bot hosting is off')
       const health = await fetch(`http://127.0.0.1:${server.port}/health/live`)
       expect(health.status).toBe(200)
+      // An h2c upgrade offer, as `curl --http2` sends over http://, is still an ordinary request.
+      const h2c = request(`http://127.0.0.1:${server.port}/health/live`, {
+        headers: { connection: 'Upgrade, HTTP2-Settings', upgrade: 'h2c', 'http2-settings': '' },
+      }).end()
+      const [response] = await once(h2c, 'response')
+      expect(response.statusCode).toBe(200)
     } finally {
       server.stop()
     }

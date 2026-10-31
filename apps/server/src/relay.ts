@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto'
-import type { BotRuntimes } from '@discord-mcp/bot-host'
+import type { IncomingMessage } from 'node:http'
+import type { Duplex } from 'node:stream'
+import type { BotRuntimes, BotVoice } from '@discord-mcp/bot-host'
 import {
   authorizeWithPrincipal,
   type Principal,
@@ -30,6 +32,14 @@ import { createMcpHandler, McpServer } from '@modelcontextprotocol/server'
 import { Effect, Layer, ManagedRuntime, Redacted } from 'effect'
 import { createDiscordLogin, type LoginConfig } from './login.ts'
 import { botIdFromToken } from './router.ts'
+import {
+  keepAlive,
+  refuseUpgrade,
+  upgradeRequest,
+  VOICE_PATH,
+  type VoiceUpgrade,
+  voiceTools,
+} from './voice.ts'
 
 export interface RelayConfig {
   readonly allowedHosts: ReadonlyArray<string>
@@ -62,6 +72,8 @@ export interface RelayFeatures {
   readonly scripts: boolean
   /** The workflow lifecycle tools, which need bot hosting. */
   readonly workflows: boolean
+  /** The request bot's voice, for the voice tools, which need bot hosting. */
+  readonly voice?: (() => BotVoice | undefined) | undefined
 }
 
 /** Register the same fixed bot-only tools for HTTP requests and local stdio, plus `features`. */
@@ -87,6 +99,7 @@ export const buildRelayServer = (
       ...relayTools,
       ...(features.scripts ? [scriptRun] : []),
       ...(features.workflows ? workflowTools : []),
+      ...(features.voice === undefined ? [] : voiceTools(features.voice)),
     ],
     selection: { toolsets: new Set(['operator', 'api']), enabledGates: new Set(['always']) },
     runtime,
@@ -239,8 +252,11 @@ export interface ExecutorOptions {
   readonly rest: Omit<RestConfig, 'token'>
   /** Discord's network, for REST. */
   readonly discordFetch?: typeof fetch
-  /** With `bots`, each verified call keeps its bot online and stores its token encrypted. */
-  readonly bots?: Pick<BotRuntimes, 'use'> | undefined
+  /**
+   * With `bots`, each verified call keeps its bot online and stores its token encrypted, and the
+   * voice tools play audio through it.
+   */
+  readonly bots?: Pick<BotRuntimes, 'use' | 'voice'> | undefined
   /**
    * Offer `discord_script_run`, which runs agent code on this host. Running agent code is a
    * platform feature, which an unrestricted relay never offers.
@@ -364,6 +380,7 @@ export const createExecutor = ({
       return await run(request, relayRuntime(restLayer(token, limiter), isolates, access), {
         scripts,
         workflows: access !== undefined,
+        voice: bots === undefined ? undefined : () => bots.voice(botId),
       })
     } finally {
       if (lane !== undefined) release(lane)
@@ -372,15 +389,69 @@ export const createExecutor = ({
 }
 
 /**
+ * Checks a bot token with Discord, on a limiter of its own, for requests that don't run through a
+ * bot's shared limiter. Resolves to a refusal, or `undefined` once Discord accepts it as `botId`.
+ */
+export const createTokenCheck =
+  ({
+    rest,
+    discordFetch = fetch,
+    restLayer = DiscordRest.shared,
+  }: Pick<ExecutorOptions, 'rest' | 'discordFetch' | 'restLayer'>) =>
+  async (credential: string, botId: string): Promise<Response | undefined> => {
+    const limiter = createRateLimiter(rest, discordFetch)
+    try {
+      const verified = await Effect.runPromiseExit(
+        Effect.flatMap(DiscordRest, (rest) =>
+          rest.request({ method: 'GET', route: '/users/@me', operationFamily: 'authentication' }),
+        ).pipe(Effect.provide(restLayer(Redacted.make(credential), limiter))),
+      )
+      if (verified._tag === 'Failure') return discordFailure(renderCause(verified.cause))
+      return isBot(verified.value) && verified.value.id === botId ? undefined : invalidBot()
+    } finally {
+      limiter.close()
+    }
+  }
+
+/**
  * The MCP HTTP front: OAuth, the allowlist, origins, and the bot token's shape. `execute` runs each
- * request, in this process or on the bot host that owns its bot.
+ * request, and `upgrade` takes over each voice socket, in this process or on the bot host that
+ * owns its bot.
  */
 export const createRelay = (
   config: RelayConfig,
   execute: Execute,
   discordFetch: typeof fetch = fetch,
+  upgrade?: VoiceUpgrade,
 ) => {
   const login = createDiscordLogin(config.login, discordFetch)
+
+  /** The voice socket's front: the same checks as `/mcp`, then the owner takes it over. */
+  const admitVoice = async (incoming: IncomingMessage) => {
+    // Inside the async function, so a malformed Host rejects rather than throwing at the listener.
+    const request = upgradeRequest(incoming)
+    const url = new URL(request.url)
+    if (config.allowedHosts.length > 0 && !config.allowedHosts.includes(url.hostname)) {
+      return json(421, { error: 'misdirected_request' })
+    }
+    if (!allowedOrigin(request, config.allowedOrigins)) {
+      return json(403, { error: 'invalid_origin' })
+    }
+    if (url.pathname !== VOICE_PATH || upgrade === undefined) {
+      return json(404, { error: 'not_found' })
+    }
+    const authenticated = await login.authorize(request)
+    if (authenticated instanceof Response) {
+      authenticated.headers.set('cache-control', 'no-store')
+      return authenticated
+    }
+    const credential = request.headers.get('x-discord-bot-token')
+    if (credential === null || !/^\S+$/.test(credential)) return invalidBot()
+    const botId = botIdFromToken(credential)
+    if (botId === undefined) return invalidBot()
+    return { upgrade, credential, botId }
+  }
+
   const handle = async (request: Request): Promise<Response> => {
     const url = new URL(request.url)
     if (config.allowedHosts.length > 0 && !config.allowedHosts.includes(url.hostname)) {
@@ -436,6 +507,20 @@ export const createRelay = (
         response.headers.append('vary', 'Origin')
       }
       return response
+    },
+    /** Serves the voice WebSocket; attach it to the HTTP server's `upgrade` event. */
+    upgrade: (request: IncomingMessage, socket: Duplex, head: Buffer) => {
+      // Node hands the socket over without an error listener; a reset while the login is checked
+      // would otherwise crash the process.
+      socket.on('error', () => socket.destroy())
+      keepAlive(request)
+      admitVoice(request).then(
+        (admitted) => {
+          if (admitted instanceof Response) return refuseUpgrade(socket, admitted)
+          admitted.upgrade(request, socket, head, admitted.credential, admitted.botId)
+        },
+        () => socket.destroy(),
+      )
     },
   }
 }

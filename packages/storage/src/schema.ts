@@ -96,3 +96,42 @@ export const workflowChanges = pgTable(
   },
   (table) => [index().on(table.botId, table.id)],
 )
+
+/**
+ * Each workflow's key-value state, kept across revisions and restarts and deleted with the
+ * workflow. `value` is JSON text; a workflow's keys and values together count toward its limit.
+ */
+export const workflowKv = pgTable(
+  'workflow_kv',
+  {
+    workflowId: uuid('workflow_id')
+      .notNull()
+      .references(() => workflows.id, { onDelete: 'cascade' }),
+    key: text('key').notNull(),
+    value: text('value').notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.workflowId, table.key] })],
+)
+
+/** What each workflow run did: its outcome, error, and console output. Pruned by age and count. */
+export const workflowRuns = pgTable(
+  'workflow_runs',
+  {
+    id: bigint('id', { mode: 'number' }).primaryKey().generatedAlwaysAsIdentity(),
+    workflowId: uuid('workflow_id')
+      .notNull()
+      .references(() => workflows.id, { onDelete: 'cascade' }),
+    revision: integer('revision').notNull(),
+    /** What it ran for: a Gateway dispatch, such as MESSAGE_CREATE, or `schedule <cron>`. */
+    event: text('event').notNull(),
+    outcome: text('outcome', {
+      enum: ['completed', 'threw', 'timed_out', 'crashed', 'skipped'],
+    }).notNull(),
+    error: text('error'),
+    logs: jsonb('logs').$type<ReadonlyArray<string>>().notNull(),
+    receivedAt: timestamp('received_at', { withTimezone: true }).notNull(),
+    finishedAt: timestamp('finished_at', { withTimezone: true }).notNull(),
+  },
+  (table) => [index().on(table.workflowId, table.id), index().on(table.finishedAt)],
+)

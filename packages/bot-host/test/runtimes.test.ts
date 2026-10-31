@@ -4,6 +4,8 @@ import { createBotRuntimes, IDLE_TIMEOUT_MS } from '../src/runtimes.ts'
 import { fakeGateway, manualClock } from '../src/testing.ts'
 import { createTokenVault } from '../src/vault.ts'
 
+/** `GUILDS` and `GUILD_VOICE_STATES`, which every bot identifies with for voice. */
+const VOICE_INTENTS = 129
 const BOT_ID = '345678901234567890'
 const KEY = Buffer.alloc(32, 1)
 const HOUR = 60 * 60 * 1000
@@ -410,7 +412,7 @@ it('keeps a bot with enabled workflows online from its stored token until they a
   await vi.waitFor(() =>
     expect(gateway.connections[0]?.received[0]).toMatchObject({
       op: 2,
-      d: { token: 'private-token-a', intents: 512 },
+      d: { token: 'private-token-a', intents: 512 | VOICE_INTENTS },
     }),
   )
   clock.advance(2 * IDLE_TIMEOUT_MS)
@@ -451,7 +453,10 @@ it("tries again once its workflows change after Discord refused a bot's intents"
   await bots.hold(BOT_ID, 1)
 
   await vi.waitFor(() =>
-    expect(gateway.connections[1]?.received[0]).toMatchObject({ op: 2, d: { intents: 1 } }),
+    expect(gateway.connections[1]?.received[0]).toMatchObject({
+      op: 2,
+      d: { intents: 1 | VOICE_INTENTS },
+    }),
   )
   await bots.close()
   await gateway.close()

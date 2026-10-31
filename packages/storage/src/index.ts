@@ -14,6 +14,8 @@ export interface WorkflowGrants {
 
 /** One immutable revision of a bot's workflow. */
 export interface WorkflowRevision {
+  /** Stable across revisions; a workflow deleted and published again gets a new one. */
+  readonly workflowId: string
   readonly botId: string
   readonly name: string
   readonly revision: number
@@ -43,6 +45,38 @@ export interface WorkflowChange {
   readonly revision: number | null
   readonly actorId: string
   readonly at: Date
+}
+
+/** How a workflow run ended. `skipped` runs never started, as when no process slot freed in time. */
+export type WorkflowRunOutcome = 'completed' | 'threw' | 'timed_out' | 'crashed' | 'skipped'
+
+/** One run of a workflow on one event. */
+export interface WorkflowRun {
+  readonly workflowId: string
+  readonly revision: number
+  /** What it ran for: a Gateway dispatch, such as MESSAGE_CREATE, or `schedule <cron>`. */
+  readonly event: string
+  readonly outcome: WorkflowRunOutcome
+  readonly error: string | null
+  readonly logs: ReadonlyArray<string>
+  readonly receivedAt: Date
+  readonly finishedAt: Date
+}
+
+/** A recorded run, as an agent reads it back. */
+export interface RecordedWorkflowRun extends Omit<WorkflowRun, 'workflowId'> {
+  readonly id: number
+  readonly workflowName: string
+}
+
+export interface WorkflowRunQuery {
+  /** One workflow's runs; every workflow's when omitted. */
+  readonly name?: string
+  /** Only runs that did not complete. */
+  readonly failed?: boolean
+  /** Runs that finished before this are expired, even before pruning removes them. */
+  readonly since: Date
+  readonly limit: number
 }
 
 export interface PublishWorkflow {
@@ -127,6 +161,29 @@ export interface Storage {
    */
   readonly lockSchedules: (botId: string) => Promise<boolean>
   readonly unlockSchedules: (botId: string) => Promise<void>
+  /** A workflow's stored value for `key`, as JSON text. */
+  readonly loadWorkflowValue: (workflowId: string, key: string) => Promise<string | undefined>
+  /**
+   * Store `value`, JSON text, under `key`, unless the workflow's keys and values would then take
+   * more than `limitBytes`. Writes to one workflow take turns, so concurrent ones cannot overshoot.
+   * `bytes` is what the workflow's state takes with the value stored, or would have taken.
+   */
+  readonly storeWorkflowValue: (
+    workflowId: string,
+    key: string,
+    value: string,
+    limitBytes: number,
+  ) => Promise<{ readonly stored: boolean; readonly bytes: number }>
+  readonly deleteWorkflowValue: (workflowId: string, key: string) => Promise<void>
+  /** Record a run, then delete all but its workflow's newest `keep`. */
+  readonly recordWorkflowRun: (run: WorkflowRun, keep: number) => Promise<void>
+  /** A bot's most recent workflow runs, newest first. */
+  readonly workflowRuns: (
+    botId: string,
+    query: WorkflowRunQuery,
+  ) => Promise<ReadonlyArray<RecordedWorkflowRun>>
+  /** Delete runs that finished before `before`. Resolves to how many were deleted. */
+  readonly pruneWorkflowRuns: (before: Date) => Promise<number>
   readonly close: () => Promise<void>
 }
 

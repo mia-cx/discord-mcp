@@ -37,6 +37,7 @@ it('stores shard sessions that only the vault key can read, alongside their toke
     resumeGatewayUrl: 'wss://resume.discord.test',
     sequence: 42,
     shardCount: 3,
+    intents: 129,
   }
 
   await vault.store('111111111111111111', 'private-bot-token')

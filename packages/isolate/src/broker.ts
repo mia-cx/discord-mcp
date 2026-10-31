@@ -36,7 +36,17 @@ export interface BrokerOptions {
    * Rejects with a message the run sees.
    */
   readonly updatePresence?: (presence: Presence) => Promise<void>
+  /** The workflow's own key-value store. Without it, KV calls are refused. */
+  readonly kv?: KvStore
   readonly onDenied: (denial: Denial) => void
+}
+
+/** A workflow's key-value store. Values are JSON text. */
+export interface KvStore {
+  readonly get: (key: string) => Promise<string | undefined>
+  /** Resolves to why the value was not stored, or undefined once it is. */
+  readonly set: (key: string, value: string) => Promise<string | undefined>
+  readonly delete: (key: string) => Promise<void>
 }
 
 /** A Gateway presence update, as discord.js's setPresence sends it. */
@@ -58,6 +68,8 @@ const decodeSegment = (segment: string) => {
 }
 /** Where the discord.js shim sends Gateway commands. */
 const GATEWAY_HOST = 'gateway.textile.internal'
+/** Where the `textile` module sends KV calls, naming the key in the `key` query parameter. */
+const KV_HOST = 'kv.textile.internal'
 const PRESENCE_UPDATE = 3
 const STATUSES = new Set(['online', 'idle', 'dnd', 'invisible'])
 /** Playing, Streaming, Listening, Watching, Custom, Competing. */
@@ -266,9 +278,49 @@ export const makeBroker = (options: BrokerOptions): Broker => {
     return new Response(null, { status: 204 })
   }
 
+  const kv = async (request: Request, url: URL, store: KvStore) => {
+    const key = url.searchParams.get('key')
+    // Postgres text holds no NUL.
+    if (key === null || key === '' || key.includes('\0')) {
+      return discordError(400, 'A KV key is a non-empty string without NUL characters.')
+    }
+    try {
+      switch (request.method) {
+        case 'GET': {
+          const value = await store.get(key)
+          return value === undefined
+            ? new Response(null, { status: 404 })
+            : new Response(value, { headers: { 'content-type': 'application/json' } })
+        }
+        case 'PUT': {
+          const body = await readBody(request)
+          if ('refusal' in body) return discordError(400, body.refusal)
+          if (body.body === undefined) return discordError(400, 'A KV value must be JSON.')
+          const refusal = await store.set(key, JSON.stringify(body.body))
+          return refusal === undefined
+            ? new Response(null, { status: 204 })
+            : discordError(413, refusal)
+        }
+        case 'DELETE':
+          await store.delete(key)
+          return new Response(null, { status: 204 })
+        default:
+          return discordError(405, `KV supports GET, PUT, and DELETE, not ${request.method}.`)
+      }
+    } catch {
+      // The store reports its own failures to the operator.
+      return discordError(503, "The workflow's KV store is unavailable. Try again later.")
+    }
+  }
+
   return async (request) => {
     const url = new URL(request.url)
     if (url.hostname === GATEWAY_HOST) return gateway(request)
+    if (url.hostname === KV_HOST) {
+      return options.kv === undefined
+        ? refuse(request, 'KV is available to workflows only.')
+        : kv(request, url, options.kv)
+    }
     if (url.hostname !== 'discord.com') return outbound(request, url)
     if (!url.pathname.startsWith(DISCORD_API)) {
       return refuse(request, `${url.pathname} is not part of Discord's v10 REST API.`)

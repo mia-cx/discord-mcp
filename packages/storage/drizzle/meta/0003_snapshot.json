@@ -1,5 +1,5 @@
 {
-  "id": "268fd546-5da1-4f0c-b131-c28a3f541740",
+  "id": "2fe44207-baac-4240-8907-41fc342e6aed",
   "prevId": "7969560f-6f63-48a5-8f03-78902cd799ce",
   "version": "7",
   "dialect": "postgresql",
@@ -192,6 +192,66 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.workflow_kv": {
+      "name": "workflow_kv",
+      "schema": "",
+      "columns": {
+        "workflow_id": {
+          "name": "workflow_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "key": {
+          "name": "key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "value": {
+          "name": "value",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "workflow_kv_workflow_id_workflows_id_fk": {
+          "name": "workflow_kv_workflow_id_workflows_id_fk",
+          "tableFrom": "workflow_kv",
+          "tableTo": "workflows",
+          "columnsFrom": [
+            "workflow_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "workflow_kv_workflow_id_key_pk": {
+          "name": "workflow_kv_workflow_id_key_pk",
+          "columns": [
+            "workflow_id",
+            "key"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.workflow_revisions": {
       "name": "workflow_revisions",
       "schema": "",
@@ -231,13 +291,6 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true
-        },
-        "schedules": {
-          "name": "schedules",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
         },
         "published_by": {
           "name": "published_by",
@@ -283,6 +336,135 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.workflow_runs": {
+      "name": "workflow_runs",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "bigint",
+          "primaryKey": true,
+          "notNull": true,
+          "identity": {
+            "type": "always",
+            "name": "workflow_runs_id_seq",
+            "schema": "public",
+            "increment": "1",
+            "startWith": "1",
+            "minValue": "1",
+            "maxValue": "9223372036854775807",
+            "cache": "1",
+            "cycle": false
+          }
+        },
+        "workflow_id": {
+          "name": "workflow_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "revision": {
+          "name": "revision",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "event": {
+          "name": "event",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "outcome": {
+          "name": "outcome",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "error": {
+          "name": "error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "logs": {
+          "name": "logs",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "received_at": {
+          "name": "received_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "finished_at": {
+          "name": "finished_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "workflow_runs_workflow_id_id_index": {
+          "name": "workflow_runs_workflow_id_id_index",
+          "columns": [
+            {
+              "expression": "workflow_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "workflow_runs_finished_at_index": {
+          "name": "workflow_runs_finished_at_index",
+          "columns": [
+            {
+              "expression": "finished_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "workflow_runs_workflow_id_workflows_id_fk": {
+          "name": "workflow_runs_workflow_id_workflows_id_fk",
+          "tableFrom": "workflow_runs",
+          "tableTo": "workflows",
+          "columnsFrom": [
+            "workflow_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.workflows": {
       "name": "workflows",
       "schema": "",
@@ -315,12 +497,6 @@
         "enabled_revision": {
           "name": "enabled_revision",
           "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "schedule_cursor": {
-          "name": "schedule_cursor",
-          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },

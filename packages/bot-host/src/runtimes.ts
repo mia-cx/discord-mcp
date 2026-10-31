@@ -2,6 +2,7 @@ import type { Clock } from './clock.ts'
 import { createIdentifyGate, type SessionStartLimit } from './identify.ts'
 import { type Presence, type Shard, type ShardSession, startShard } from './shard.ts'
 import type { TokenVault } from './vault.ts'
+import { type BotVoice, createVoice, type Voice } from './voice.ts'
 
 export const IDLE_TIMEOUT_MS = 24 * 60 * 60 * 1000
 export const DISCORD_API_URL = 'https://discord.com/api/v10'
@@ -11,6 +12,8 @@ const UNAUTHORIZED = 401
 const RESHARD_CLOSE_CODES = new Set([4010, 4011])
 /** Discord refused the intents: invalid (4013), or privileged and not allowed (4014). */
 const INTENT_CLOSE_CODES = new Set([4013, 4014])
+/** `GUILDS` and `GUILD_VOICE_STATES`: voice joins need the bot's own voice state updates. */
+const VOICE_INTENTS = (1 << 0) | (1 << 7)
 
 export interface BotRuntimesOptions {
   readonly vault: TokenVault
@@ -32,8 +35,9 @@ export interface BotRuntimes {
   readonly use: (botId: string, token: string) => Promise<void>
   /**
    * Bring back every bot a previous process left online that `owns` accepts, resuming its stored
-   * sessions so Discord replays the events it missed. Each starts a fresh 24-hour idle timer.
-   * Failures are logged.
+   * sessions so Discord replays the events it missed. A session marked stale at shutdown is
+   * replaced by a new one, without a replay. Each starts a fresh 24-hour idle timer. Failures
+   * are logged.
    */
   readonly resume: (owns?: (botId: string) => boolean) => Promise<void>
   /**
@@ -47,9 +51,14 @@ export interface BotRuntimes {
   readonly updatePresence: (botId: string, presence: Presence) => void
   /** The token an online bot runs with. */
   readonly tokenOf: (botId: string) => string | undefined
+  /** The voice of a bot this process runs, or `undefined` when it is offline. */
+  readonly voice: (botId: string) => BotVoice | undefined
   /**
-   * Disconnect every bot without ending its sessions, so the next process can resume them.
-   * Resolves once every pending storage write has settled.
+   * Disconnect every bot without ending its sessions, so the next process can resume them. Voice
+   * cannot move between processes, so bots leave their voice channels first. A shard whose leave
+   * could not reach Discord keeps its session marked stale, so the next process brings it back
+   * with a new session rather than one that still has the bot in a channel. Resolves once every
+   * pending storage write has settled.
    */
   readonly close: () => Promise<void>
 }
@@ -75,6 +84,7 @@ interface GatewayBot {
 
 interface Runtime {
   readonly token: string
+  readonly voice: Voice
   /** Sessions a previous process stored, by shard ID, for the shards to resume. */
   readonly saved: ReadonlyMap<number, ShardSession>
   shards: ReadonlyArray<Shard>
@@ -101,6 +111,8 @@ export const createBotRuntimes = ({
   const rejected = new Map<string, { readonly token: string; readonly code: number }>()
   /** The intents of each bot with enabled workflows, which stays online without agent calls. */
   const held = new Map<string, number>()
+  /** Every bot listens for its voice state, plus whatever its workflows need. */
+  const intentsFor = (botId: string) => VOICE_INTENTS | (held.get(botId) ?? 0)
   let resumed = false
   let closed = false
   /**
@@ -163,6 +175,8 @@ export const createBotRuntimes = ({
     running.delete(botId)
     runtime.cancelIdle()
     runtime.cancelRetry()
+    // Before the shards stop, so the leave payloads still go out.
+    runtime.voice.close()
     for (const shard of runtime.shards) shard.stop()
     // Stopped before its shards started, so its stored sessions must end here.
     if (runtime.shards.length === 0) {
@@ -174,6 +188,7 @@ export const createBotRuntimes = ({
     runtime.cancelIdle()
     runtime.cancelIdle = clock.schedule(() => {
       if (held.has(botId)) return
+      if (runtime.voice.streaming()) return keepAlive(botId, runtime)
       log(`Bot ${botId} went offline after 24 hours without an agent call.`)
       stop(botId, runtime)
     }, IDLE_TIMEOUT_MS)
@@ -182,6 +197,17 @@ export const createBotRuntimes = ({
   const add = (botId: string, token: string, saved: ReadonlyMap<number, ShardSession>) => {
     const runtime: Runtime = {
       token,
+      // Discord sends a server's events on shard (guild_id >> 22) % shard_count.
+      voice: createVoice({
+        botId,
+        shardOf: (guildId) =>
+          runtime.shards.length === 0
+            ? undefined
+            : Number((BigInt(guildId) >> 22n) % BigInt(runtime.shards.length)),
+        send: (shardId, payload) => runtime.shards[shardId]?.send(payload) ?? false,
+        clock,
+        log,
+      }),
       saved,
       shards: [],
       cancelIdle: () => {},
@@ -225,12 +251,16 @@ export const createBotRuntimes = ({
         clock,
         shardId,
         shardCount,
-        intents: held.get(botId) ?? 0,
+        intents: intentsFor(botId),
         identifies,
         ...(session && { session }),
         onSession: (next) => saveSession(botId, shardId, next),
         onReady: () => log(`Bot ${botId} is online on shard ${shardId} of ${shardCount}.`),
-        onDispatch: (event, data) => onDispatch?.(botId, event, data),
+        onDispatch: (event, data) => {
+          runtime.voice.dispatch(shardId, event, data)
+          onDispatch?.(botId, event, data)
+        },
+        onDrop: () => runtime.voice.dropped(shardId),
         onIdentifyBudgetSpent: (waitMs) =>
           log(
             `Bot ${botId}'s shard ${shardId} is offline: the bot spent its Gateway Identify budget. Reconnecting in ${Math.ceil(waitMs / 60_000)} minutes.`,
@@ -345,7 +375,7 @@ export const createBotRuntimes = ({
       const current = running.get(botId)
       // A runtime whose shards haven't started yet starts them with these intents.
       if (current !== undefined) {
-        for (const shard of current.shards) shard.setIntents(intents)
+        for (const shard of current.shards) shard.setIntents(intentsFor(botId))
         return
       }
       if (resumed) await startHeld(botId)
@@ -356,13 +386,19 @@ export const createBotRuntimes = ({
       for (const shard of shards) shard.updatePresence(presence)
     },
     tokenOf: (botId) => running.get(botId)?.token,
+    voice: (botId) => running.get(botId)?.voice,
     close: async () => {
       closed = true
       for (const [botId, runtime] of running) {
         running.delete(botId)
         runtime.cancelIdle()
         runtime.cancelRetry()
-        for (const shard of runtime.shards) shard.suspend()
+        // A resumed session would still hold a voice state whose leave never reached Discord, so
+        // the next process brings that shard back with a fresh session instead.
+        const owingLeaves = runtime.voice.close()
+        for (const [shardId, shard] of runtime.shards.entries()) {
+          shard.suspend(owingLeaves.has(shardId))
+        }
       }
       await Promise.all(writes.values())
       // One last try at failed writes, so the next process starts from the newest state.

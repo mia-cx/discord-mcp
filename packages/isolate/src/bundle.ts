@@ -34,12 +34,14 @@ const describeMessage = ({ text, location }: Message) => {
 
 /**
  * discord.js with the shim's Client, bundled once per process as a CommonJS module. CommonJS, so a
- * script's named imports become property reads and need no static export list.
+ * script's named imports become property reads and need no static export list. `textile` holds
+ * what a workflow has beyond discord.js, such as its KV store.
  */
 let runtime: Promise<ReadonlyArray<ScriptModule>> | undefined
 const loadRuntime = () => {
   runtime ??= Promise.all([
     readFile(runtimeFile('entry.js'), 'utf8'),
+    readFile(runtimeFile('textile.js'), 'utf8'),
     build({
       entryPoints: [runtimeFile('shim.js')],
       // Keeps esbuild's source comments relative to runtime/, whatever the relay's cwd.
@@ -58,12 +60,13 @@ const loadRuntime = () => {
       },
       logLevel: 'silent',
     }),
-  ]).then(([entry, shim]): ReadonlyArray<ScriptModule> => {
+  ]).then(([entry, textile, shim]): ReadonlyArray<ScriptModule> => {
     const [output] = shim.outputFiles
     if (output === undefined) throw new Error('esbuild produced no output.')
     return [
       { name: 'entry.js', type: 'esModule', source: entry },
       { name: 'discord.js', type: 'commonJsModule', source: output.text },
+      { name: 'textile', type: 'commonJsModule', source: textile },
     ]
   })
   return runtime
