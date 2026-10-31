@@ -103,6 +103,7 @@ const startBotHosting = (
       Effect.promise(async () => {
         const bots: BotRuntimes = createBotRuntimes({
           vault: createTokenVault(vaultKey, storage),
+          storage,
           clock: systemClock,
           log,
           onDispatch: (botId, t, d) => {

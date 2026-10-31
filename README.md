@@ -83,7 +83,7 @@ Both paths require OAuth and bot credentials on every HTTP request.
 | `discord_workflow_disable` | Stop running a workflow. |
 | `discord_workflow_delete` | Delete a workflow, its revisions, its state, and its logs. |
 | `discord_workflow_logs` | Read the bot's recent workflow runs: outcomes, errors, and console output. |
-| `discord_voice_join` | Join a voice channel to play audio there. [Bot hosting](#bot-hosting) only. |
+| `discord_voice_join` | Join a voice channel to play audio there, and optionally hear it. [Bot hosting](#bot-hosting) only. |
 | `discord_voice_leave` | Leave a server's voice channel. Bot hosting only. |
 
 The catalog covers the vendored specification's 242 operations. The relay exposes
@@ -93,8 +93,8 @@ the supported operation and its input schema.
 
 Arguments are validated locally before execution. Destructive and admin calls act
 directly under the supplied bot's Discord permissions, with no preview-token
-sessions; only [scripts](#scripts) and [workflows](#workflows) carry server-side grants. This
-relay plays audio in voice channels but does not receive it, or run agent conversations.
+sessions; only [scripts](#scripts) and [workflows](#workflows) carry server-side grants. Voice
+is relayed, never stored, and the relay runs no agent conversations.
 
 Calls currently accept JSON payloads. Multipart file upload is not implemented.
 Discord rate limits and API errors are returned to the caller; the HTTP relay
@@ -395,12 +395,13 @@ Publishing a workflow with dependencies runs `npm` from `PATH` and needs HTTPS a
 
 #### Voice
 
-With bot hosting on, an agent can play audio in a voice channel, as music bots do. Discord
-encrypts the audio end to end with DAVE. Sending needs no notice to the channel; the bot
-receives nothing.
+With bot hosting on, an agent can play audio in a voice channel, as music bots do, and hear
+each person speaking. Discord encrypts the audio end to end with DAVE. Sending needs no notice to
+the channel; receiving always posts one first.
 
-1. Call `discord_voice_join` with `guildId` and `channelId`. The bot needs View Channel,
-   Connect, and Speak. It returns the voice socket's path, `/voice?guild_id=…`.
+1. Call `discord_voice_join` with `guildId` and `channelId`, and `receive: true` to hear the
+   channel. The bot needs View Channel, Connect, and Speak. It returns the voice socket's path,
+   `/voice?guild_id=…`, and whether it is `receiving`.
 2. Open a WebSocket to that path on the relay's host (`wss:` for `https:`) with the same
    `Authorization` and `X-Discord-Bot-Token` headers as `/mcp`, adding the codec to the query:
    - `codec=opus`: each binary message is one Opus packet of 20 ms, 48 kHz stereo audio.
@@ -410,6 +411,34 @@ receives nothing.
 3. Send audio as binary messages. The bot speaks while audio arrives and stops when it pauses for
    more than 100 ms. Audio sent faster than real time waits: once a second of it is queued, the
    bot host stops reading the socket until it plays.
+
+##### Receiving
+
+With `receive: true`, the bot joins deafened and posts a notice in the voice channel's chat, which
+needs Send Messages there. Its buttons let anyone opt out: **Opt out here** of this bot in this
+server, or **Opt out of all Textile bots** of every bot Textile hosts. Each reply is visible only to the person who clicked, and offers an undo. Once
+the notice is up the bot undeafens, and the socket sends:
+
+- A binary message per packet: the speaker's user ID as 8 bytes, big-endian, then one packet in
+  the socket's codec. `pcm16` decodes each speaker separately.
+- JSON text events: `{"type":"join","user_id":"…"}` and `{"type":"leave","user_id":"…"}` as
+  people come and go, and `{"type":"speaking","user_id":"…","speaking":true}` (or `false`).
+
+When the notice can't be posted, `receiving` is false, `reason` says why, and the session only
+sends audio. The same happens when the bot's application has an Interactions Endpoint URL, since
+Discord would send the buttons' clicks there instead of to Textile. Joining the same channel again switches receiving on or off. If the bot is moved to
+another channel, it stops receiving until it joins with `receive: true` there.
+
+People who opted out never appear: their audio is dropped before it is decrypted. Opt-outs and
+undos apply at once on every bot host, which Postgres notifies of each one. While a bot host's
+notification connection is down, it relays nobody, and it checks everyone again once it reconnects.
+Opt-outs are stored as user IDs only, with the bot and server for a per-bot opt-out. The buttons
+answer while the bot is online.
+
+Discord neither documents nor supports bots receiving voice, so receiving is best-effort and may
+break without notice. A speaker is heard only once Discord names their audio stream, so their
+first packets may be dropped. Packets carry no sequence numbers, so the agent can't detect loss or
+reordering. Audio a slow agent hasn't read past about 1 MiB is dropped.
 
 Before upgrading, the relay answers 401 or 403 for bad credentials, 400 for a bad query, and
 409 when the bot is not in a voice channel in that server. The socket closes with:

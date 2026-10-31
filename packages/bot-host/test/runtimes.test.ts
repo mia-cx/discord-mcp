@@ -33,6 +33,7 @@ it('leaves a bot Discord rejected offline until its token changes', async () => 
   const gateway = await fakeGateway()
   const bots = createBotRuntimes({
     vault: createTokenVault(KEY, storage),
+    storage,
     clock: manualClock(),
     log: () => {},
     discordFetch: gateway.discordFetch(),
@@ -60,7 +61,7 @@ it('resumes an online bot after a restart, from what the previous process stored
   const storage = await inMemoryStorage()
   const gateway = await fakeGateway()
   const options = { clock: manualClock(), log: () => {}, discordFetch: gateway.discordFetch() }
-  const before = createBotRuntimes({ vault: createTokenVault(KEY, storage), ...options })
+  const before = createBotRuntimes({ vault: createTokenVault(KEY, storage), storage, ...options })
   const stored = createTokenVault(KEY, storage)
 
   await before.use(BOT_ID, 'private-token-a')
@@ -72,7 +73,7 @@ it('resumes an online bot after a restart, from what the previous process stored
   await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(4000))
 
   // The next process shares nothing with the last but the database and the vault key.
-  const after = createBotRuntimes({ vault: createTokenVault(KEY, storage), ...options })
+  const after = createBotRuntimes({ vault: createTokenVault(KEY, storage), storage, ...options })
   await after.resume()
   await vi.waitFor(() =>
     expect(gateway.connections[1]?.received[0]).toEqual({
@@ -94,7 +95,7 @@ it('brings back a bot whose session Discord invalidated just before a restart', 
   const storage = await inMemoryStorage()
   const gateway = await fakeGateway()
   const options = { clock: manualClock(), log: () => {}, discordFetch: gateway.discordFetch() }
-  const before = createBotRuntimes({ vault: createTokenVault(KEY, storage), ...options })
+  const before = createBotRuntimes({ vault: createTokenVault(KEY, storage), storage, ...options })
 
   await before.use(BOT_ID, 'private-token-a')
   await vi.waitFor(async () =>
@@ -105,7 +106,7 @@ it('brings back a bot whose session Discord invalidated just before a restart', 
   await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(4000))
   await before.close()
 
-  const after = createBotRuntimes({ vault: createTokenVault(KEY, storage), ...options })
+  const after = createBotRuntimes({ vault: createTokenVault(KEY, storage), storage, ...options })
   await after.resume()
   // It resumes the stale session; Discord's answer to that is proven in the shard suite.
   await vi.waitFor(() => expect(gateway.connections[1]?.received[0]?.op).toBe(6))
@@ -125,6 +126,7 @@ it('retries a failed session store, so an online bot still resumes after a resta
     .mockRejectedValueOnce(new Error('Connection terminated unexpectedly'))
   const bots = createBotRuntimes({
     vault: { ...vault, storeSession },
+    storage,
     clock,
     log: () => {},
     discordFetch: gateway.discordFetch(),
@@ -157,6 +159,7 @@ it('clears an idle bot’s session even when the clear fails during shutdown', a
   )
   const bots = createBotRuntimes({
     vault: { ...vault, clearSession },
+    storage,
     clock,
     log: () => {},
     discordFetch: gateway.discordFetch(),
@@ -180,7 +183,7 @@ it('resumes only the bots this host owns, when bot hosts share a database', asyn
   const storage = await inMemoryStorage()
   const gateway = await fakeGateway()
   const options = { clock: manualClock(), log: () => {}, discordFetch: gateway.discordFetch() }
-  const before = createBotRuntimes({ vault: createTokenVault(KEY, storage), ...options })
+  const before = createBotRuntimes({ vault: createTokenVault(KEY, storage), storage, ...options })
   await before.use(BOT_ID, 'private-token-a')
   await before.use(OTHER_BOT_ID, 'private-token-b')
   await vi.waitFor(() => expect(gateway.connections).toHaveLength(2))
@@ -189,7 +192,7 @@ it('resumes only the bots this host owns, when bot hosts share a database', asyn
   )
   await before.close()
 
-  const after = createBotRuntimes({ vault: createTokenVault(KEY, storage), ...options })
+  const after = createBotRuntimes({ vault: createTokenVault(KEY, storage), storage, ...options })
   await after.resume((botId) => botId === BOT_ID)
   await vi.waitFor(() =>
     expect(gateway.connections[2]?.received[0]).toMatchObject({ d: { token: 'private-token-a' } }),
@@ -209,6 +212,7 @@ it('runs every shard Discord recommends, one Identify per concurrency bucket at 
   const onDispatch = vi.fn()
   const bots = createBotRuntimes({
     vault: createTokenVault(KEY, storage),
+    storage,
     clock,
     log: () => {},
     discordFetch: gateway.discordFetch({ shards: 4, maxConcurrency: 2 }),
@@ -246,6 +250,7 @@ it('identifies no more shards than half the Identifies Discord says remain', asy
   const clock = manualClock()
   const bots = createBotRuntimes({
     vault: createTokenVault(KEY, storage),
+    storage,
     clock,
     log: () => {},
     discordFetch: gateway.discordFetch({ shards: 4, maxConcurrency: 4, remaining: 4 }),
@@ -268,6 +273,7 @@ it('reconnects a dropped shard on its own, resuming its session', async () => {
   const clock = manualClock()
   const bots = createBotRuntimes({
     vault: createTokenVault(KEY, storage),
+    storage,
     clock,
     log: () => {},
     discordFetch: gateway.discordFetch({ shards: 2, maxConcurrency: 2 }),
@@ -304,6 +310,7 @@ it('resumes a multi-shard bot after a restart with the shard count it identified
   const vault = createTokenVault(KEY, storage)
   const before = createBotRuntimes({
     vault,
+    storage,
     clock,
     log: () => {},
     discordFetch: gateway.discordFetch({ shards: 2, maxConcurrency: 2 }),
@@ -318,6 +325,7 @@ it('resumes a multi-shard bot after a restart with the shard count it identified
   // The bot grew meanwhile: Discord now recommends three shards.
   const after = createBotRuntimes({
     vault,
+    storage,
     clock,
     log: () => {},
     discordFetch: gateway.discordFetch({ shards: 3 }),
@@ -344,6 +352,7 @@ it('brings a bot that outgrew its shards back with Discord’s new count on the 
   let shards = 1
   const bots = createBotRuntimes({
     vault: createTokenVault(KEY, storage),
+    storage,
     clock,
     log: () => {},
     discordFetch: (input, init) => gateway.discordFetch({ shards, maxConcurrency: 2 })(input, init),
@@ -373,6 +382,7 @@ it('keeps asking Discord how to shard a bot until it answers', async () => {
     .mockResolvedValueOnce(new Response(null, { status: 503 }))
   const bots = createBotRuntimes({
     vault: createTokenVault(KEY, storage),
+    storage,
     clock,
     log: () => {},
     discordFetch,
@@ -401,6 +411,7 @@ it('keeps a bot with enabled workflows online from its stored token until they a
   await vault.store(BOT_ID, 'private-token-a')
   const bots = createBotRuntimes({
     vault,
+    storage,
     clock,
     log: () => {},
     discordFetch: gateway.discordFetch(),
@@ -438,6 +449,7 @@ it("tries again once its workflows change after Discord refused a bot's intents"
   await vault.store(BOT_ID, 'private-token-a')
   const bots = createBotRuntimes({
     vault,
+    storage,
     clock: manualClock(),
     log: () => {},
     discordFetch: gateway.discordFetch(),
@@ -469,6 +481,7 @@ it('sets a presence on every shard of the bot', async () => {
   const clock = manualClock()
   const bots = createBotRuntimes({
     vault: createTokenVault(KEY, storage),
+    storage,
     clock,
     log: () => {},
     discordFetch: gateway.discordFetch({ shards: 2, maxConcurrency: 2 }),
@@ -495,6 +508,7 @@ it('holds a presence for a shard still waiting to identify, which Discord would 
   const clock = manualClock()
   const bots = createBotRuntimes({
     vault: createTokenVault(KEY, storage),
+    storage,
     clock,
     log: () => {},
     // One Identify every five seconds: the second shard waits, connected, for its turn.

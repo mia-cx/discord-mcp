@@ -6,6 +6,7 @@ import { createBotRuntimes, createTokenVault } from '@discord-mcp/bot-host'
 import {
   DAVE_MAGIC_MARKER,
   FAKE_VOICE_CHANNEL_ID,
+  FAKE_VOICE_MEMBER_ID,
   fakeGateway,
   fakeVoiceServer,
   manualClock,
@@ -76,6 +77,7 @@ const start = async () => {
   const gateway = await fakeGateway(undefined, { botId: BOT_ID, endpoint: voiceServer.endpoint })
   const bots = createBotRuntimes({
     vault: createTokenVault(Buffer.alloc(32, 1), storage),
+    storage,
     clock: manualClock(),
     log: () => {},
     discordFetch: gateway.discordFetch(),
@@ -169,19 +171,33 @@ const start = async () => {
 }
 
 describe('the voice socket', () => {
-  it('plays audio streamed through central after joining, until the bot leaves', async () => {
+  it('relays audio both ways through central after joining, until the bot leaves', async () => {
     const { callTool, openSocket, voiceServer } = await start()
     const joined = await callTool('discord_voice_join', {
       guildId: GUILD_ID,
       channelId: FAKE_VOICE_CHANNEL_ID,
+      receive: true,
     })
-    expect(joined.data).toEqual({ socket: `/voice?guild_id=${GUILD_ID}` })
+    expect(joined.data).toEqual({ socket: `/voice?guild_id=${GUILD_ID}`, receiving: true })
     await vi.waitFor(() =>
       expect(voiceServer.received).toContainEqual({ op: 23, d: { transition_id: 1 } }),
     )
 
     const socket = await openSocket(`guild_id=${GUILD_ID}&codec=opus`)
     if (typeof socket === 'number') throw new Error(`refused with ${socket}`)
+    const heard: Buffer[] = []
+    socket.on('message', (data: Buffer, isBinary) => {
+      if (isBinary) heard.push(data)
+    })
+    // The member is relayed once the bot host has checked their opt-out.
+    const spoken = Buffer.from([0xfc, 1, 2, 3])
+    await vi.waitFor(async () => {
+      await voiceServer.speak(FAKE_VOICE_MEMBER_ID, [spoken])
+      expect(heard.length).toBeGreaterThan(0)
+    })
+    expect(heard[0]?.readBigUInt64BE(0).toString()).toBe(FAKE_VOICE_MEMBER_ID)
+    expect(heard[0]?.subarray(8)).toEqual(spoken)
+
     for (let index = 0; index < 5; index++) socket.send(Buffer.from([0xfc, 0xff, 0xfe, index]))
     await vi.waitFor(() =>
       expect(voiceServer.packets.filter((packet) => !packet.equals(SILENCE))).toHaveLength(5),

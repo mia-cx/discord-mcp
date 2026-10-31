@@ -145,3 +145,22 @@ export const workflowRuns = pgTable(
   },
   (table) => [index().on(table.workflowId, table.id), index().on(table.finishedAt)],
 )
+
+/**
+ * People who opted out of having one bot relay their voice in one server. Personal data: only the
+ * three IDs the opt-out needs, nothing about when or where they clicked.
+ */
+export const voiceOptOuts = pgTable(
+  'voice_opt_outs',
+  {
+    botId: text('bot_id').notNull(),
+    guildId: text('guild_id').notNull(),
+    userId: text('user_id').notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.botId, table.guildId, table.userId] })],
+)
+
+/** People who opted out of having any bot relay their voice, anywhere. Only the user ID. */
+export const voiceGlobalOptOuts = pgTable('voice_global_opt_outs', {
+  userId: text('user_id').primaryKey(),
+})
