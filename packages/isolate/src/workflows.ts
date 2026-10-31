@@ -224,6 +224,11 @@ const redactor =
   (text: string): string =>
     secrets.reduce((redacted, secret) => redacted.replaceAll(secret, REDACTED), text)
 
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g
+
+/** `text` as Postgres can store it: it refuses NUL and lone surrogates, which JavaScript allows. */
+const storable = (text: string) => text.replaceAll('\0', '�').replace(LONE_SURROGATE, '�')
+
 /** A run's console lines, cut to what a record keeps. */
 const storedLogs = (lines: ReadonlyArray<string>) => {
   const kept: string[] = []
@@ -406,10 +411,10 @@ export const makeWorkflowHost = ({
   }
 
   /** A workflow's own KV store, whichever revision runs. Its failures reach the operator. */
-  const kvFor = (workflowId: string, label: string): KvStore => {
+  const kvFor = (workflowId: string, label: string, redact: (text: string) => string): KvStore => {
     const reported = <A>(operation: Promise<A>) =>
       operation.catch((error: unknown) => {
-        log(`${label}: KV failed: ${String(error)}`)
+        log(`${label}: KV failed: ${redact(String(error))}`)
         throw error
       })
     return {
@@ -470,8 +475,8 @@ export const makeWorkflowHost = ({
           revision,
           event: dispatch.t,
           outcome,
-          error: error === null ? null : redact(error),
-          logs: storedLogs(logs.map(redact)),
+          error: error === null ? null : storable(redact(error)),
+          logs: storedLogs(logs.map((line) => storable(redact(line)))),
           receivedAt,
           finishedAt: new Date(now()),
         })
@@ -521,7 +526,7 @@ export const makeWorkflowHost = ({
               }
             : {}),
           updatePresence: async (presence) => bots.updatePresence(botId, presence),
-          kv: kvFor(workflowId, label),
+          kv: kvFor(workflowId, label, redact),
           // The URL can hold an interaction token, so only the reason is logged.
           onDenied: ({ method, reason }) => log(`${label}: refused ${method}: ${reason}`),
         }),

@@ -5,7 +5,8 @@ const KV_URL = 'https://kv.textile.internal/'
 
 const kvCall = async (method, key, body) => {
   if (typeof key !== 'string' || key === '') throw new TypeError('A KV key is a non-empty string.')
-  const response = await fetch(KV_URL + encodeURIComponent(key), {
+  // A query parameter, since URL parsing would drop a key like "." or ".." from the path.
+  const response = await fetch(`${KV_URL}?key=${encodeURIComponent(key)}`, {
     method,
     ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body }),
   })

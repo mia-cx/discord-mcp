@@ -68,7 +68,7 @@ const decodeSegment = (segment: string) => {
 }
 /** Where the discord.js shim sends Gateway commands. */
 const GATEWAY_HOST = 'gateway.textile.internal'
-/** Where the `textile` module sends KV calls, one key per path. */
+/** Where the `textile` module sends KV calls, naming the key in the `key` query parameter. */
 const KV_HOST = 'kv.textile.internal'
 const PRESENCE_UPDATE = 3
 const STATUSES = new Set(['online', 'idle', 'dnd', 'invisible'])
@@ -279,8 +279,11 @@ export const makeBroker = (options: BrokerOptions): Broker => {
   }
 
   const kv = async (request: Request, url: URL, store: KvStore) => {
-    const key = decodeSegment(url.pathname.slice(1))
-    if (key === undefined || key === '') return discordError(400, 'The KV key is malformed.')
+    const key = url.searchParams.get('key')
+    // Postgres text holds no NUL.
+    if (key === null || key === '' || key.includes('\0')) {
+      return discordError(400, 'A KV key is a non-empty string without NUL characters.')
+    }
     try {
       switch (request.method) {
         case 'GET': {

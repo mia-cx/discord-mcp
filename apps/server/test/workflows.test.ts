@@ -388,6 +388,9 @@ describe('workflow state and logs', () => {
         client.on('interactionCreate', async (interaction) => {
           const channel = await client.rest.get('/channels/' + interaction.channelId)
           console.log(interaction.token, JSON.stringify(channel))
+          await kv.set('.', 'dot')
+          const refused = await kv.get(interaction.token + '\\0').catch((error) => error.message)
+          console.log(await kv.get('.'), refused, 'nul\\0 lone\\uD800')
           throw new Error('failed with ' + interaction.token)
         })`,
       grants: { families: ['message', 'channel'] },
@@ -433,7 +436,11 @@ describe('workflow state and logs', () => {
         event: 'INTERACTION_CREATE',
         outcome: 'threw',
         error: 'Error: failed with [redacted]',
-        logs: [`[redacted] {"id":"${CHANNEL}","type":0,"echo":"[redacted]"}`],
+        logs: [
+          `[redacted] {"id":"${CHANNEL}","type":0,"echo":"[redacted]"}`,
+          // Keys URL parsing would drop, and text Postgres refuses, both still work.
+          'dot A KV key is a non-empty string without NUL characters. nul\uFFFD lone\uFFFD',
+        ],
       }),
     )
     const everything = JSON.stringify([await runs(), log.mock.calls])
