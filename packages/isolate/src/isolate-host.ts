@@ -175,14 +175,28 @@ const parseOutcome = (body: string | undefined, stderr: () => string): ScriptOut
       message: `The script's result exceeded ${RESULT_LIMIT_BYTES} bytes.`,
     }
   }
+  let parsed: unknown
   try {
-    return JSON.parse(body) as ScriptOutcome
+    parsed = JSON.parse(body)
   } catch {
     return {
       outcome: 'crashed',
       message: `The script ended without a result: ${body.slice(0, 200)}\n${stderr()}`.trim(),
     }
   }
+  // Agent code shares the isolate with the entry module, so it can bend what the entry reports,
+  // as by giving arrays a toJSON. Only a well-formed outcome is believed.
+  const { outcome, logs, error } = (parsed ?? {}) as Record<string, unknown>
+  const { name, message } = (error ?? {}) as Record<string, unknown>
+  const wellFormedLogs = Array.isArray(logs) && logs.every((line) => typeof line === 'string')
+  if (
+    wellFormedLogs &&
+    (outcome === 'completed' ||
+      (outcome === 'threw' && typeof name === 'string' && typeof message === 'string'))
+  ) {
+    return parsed as ScriptOutcome
+  }
+  return { outcome: 'crashed', message: 'The script reported a malformed result.' }
 }
 
 /**

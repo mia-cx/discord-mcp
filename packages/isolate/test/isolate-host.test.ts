@@ -51,6 +51,18 @@ describe('the isolate host', () => {
     expect(oom.outcome).toBe('crashed')
   })
 
+  it('reports a script that bends what the entry module returns as crashed', async () => {
+    const run = await makeIsolateHost().run(
+      await execution(
+        '1',
+        `export default () => { Array.prototype.toJSON = () => null; console.log('hi') }`,
+        5000,
+      ),
+    )
+
+    expect(run).toEqual({ outcome: 'crashed', message: 'The script reported a malformed result.' })
+  })
+
   it('gives a script no way to read host files', async () => {
     const run = await makeIsolateHost().run(
       await execution(
