@@ -14,8 +14,13 @@ Keep no bot credentials, authentication results, sessions, or Discord-response c
 travel in encrypted, audience-bound relay tokens. Spent authorization-code hashes expire after
 one minute; the next code exchange or process restart removes expired hashes. Use one process;
 an in-flight login fails on restart. Existing logins survive.
-Public clients sign in again when their grant expires, at most seven days. Refresh tokens would
-require durable replay protection; do not add an unrotated stateless refresh-token shortcut.
+Access lasts at most seven days. Refresh tokens are encrypted envelopes around Discord's own
+refresh token, bound to the subject and client ID. Discord rotates that token on every refresh,
+revokes the previous access token, and rejects reuse, so Discord is the replay guard and the relay
+keeps no refresh state. A refresh chain outlives its 30-day client registration; an unused refresh
+envelope expires after 30 days. Never issue a refresh token that Discord's rotation does not guard.
+One login serves one machine: its bridges share `login.json` and serialise refreshes with a lock
+file. Every other machine signs in separately, since one holder's refresh revokes every copy.
 
 The relay needs no database, local accounts, PATs, stored OAuth profiles, Gateway, workflow engine, or
 sandbox supervisor. The earlier control-plane libraries remain in the workspace as legacy code;

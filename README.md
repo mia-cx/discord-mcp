@@ -44,11 +44,19 @@ encrypted, audience-bound relay credential enclosing its Discord login grant.
 Authentication results and Discord responses are not cached. Responses use
 `Cache-Control: no-store`. Revoking Discord authorization blocks the next request.
 
-Login expires with the Discord grant, capped at seven days. Sign in again when
-it expires. Refresh tokens are not issued: safe public-client refresh rotation
-requires persistent replay protection. Only spent login-code hashes remain in
-memory for one minute; run one server process. Restarting cancels unfinished
-logins but preserves issued credentials.
+Access credentials expire with the Discord grant, capped at seven days. The
+token response also carries a `refresh_token`: an encrypted envelope around
+Discord's refresh token, bound to the human and the client ID. Refreshing at
+`/token` rotates both credentials and revokes the previous access credential.
+Discord rejects a reused refresh token, which the relay reports as `invalid_grant`:
+sign in again. Refresh rechecks the allowlist, works after the client's 30-day
+registration expires, and lapses after 30 days unused.
+
+Refresh revokes every copy of the previous login, so each machine needs its own
+sign-in. The stdio bridge refreshes a day before expiry and after a rejected
+access credential, and bridges sharing one login file take turns through a lock.
+Only spent login-code hashes remain in memory for one minute; run one server
+process. Restarting cancels unfinished logins but preserves issued credentials.
 
 The executable serves MCP revision `2026-07-28` without an initialization handshake
 or sessions. Older MCP clients can use the SDK's stateless compatibility path.
@@ -178,8 +186,8 @@ Discord authentication rate limits return 429.
 
 OAuth discovery lives at `/.well-known/oauth-protected-resource/mcp` and
 `/.well-known/oauth-authorization-server`. The issuer supports dynamic public-client
-registration at `/register`, authorization at `/authorize`, and code exchange at
-`/token`. Both OAuth legs require S256 PKCE. The issuer validates exact redirects,
+registration at `/register`, authorization at `/authorize`, and code and refresh
+exchange at `/token`. Both OAuth legs require S256 PKCE. The issuer validates exact redirects,
 resource, issuer, browser state, and one-time codes. Registrations expire after
 30 days. Client ID metadata documents are not implemented.
 
@@ -197,7 +205,8 @@ corepack pnpm check        # Formatting, TypeScript build, and ordinary tests
 corepack pnpm spec:check   # Catalog coverage, classification, permissions, and determinism
 ```
 
-Integration tests cover browser/CLI login, credential bindings, code replay,
+Integration tests cover browser/CLI login, credential bindings, code and refresh replay,
+concurrent bridge refreshes,
 OAuth revocation and expiry, concurrent bot isolation, reads, writes, and rate limits.
 
 ## Earlier implementation

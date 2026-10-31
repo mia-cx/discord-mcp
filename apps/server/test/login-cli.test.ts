@@ -88,7 +88,7 @@ it('logs in through the CLI loopback callback and writes an owner-only credentia
     const credentials = JSON.parse(await readFile(output, 'utf8'))
     expect(credentials.resource).toBe(`${issuer}/mcp`)
     expect(credentials.access_token).toEqual(expect.any(String))
-    expect(credentials.refresh_token).toBeUndefined()
+    expect(credentials.refresh_token).toEqual(expect.any(String))
     expect(JSON.stringify(credentials)).not.toContain('private-')
     expect((await stat(output)).mode & 0o777).toBe(0o600)
   } finally {

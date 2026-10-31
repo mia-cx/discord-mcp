@@ -144,6 +144,82 @@ describe('Discord login for the relay', () => {
     expect((await empty.fetch(mcp(accepted.tokens.access_token))).status).toBe(403)
   })
 
+  it('rotates refresh credentials through Discord and rejects replayed ones', async () => {
+    const oauth = discordOAuth()
+    const relay = createRelay(config, rest, oauth.fetch)
+    const metadata = await relay.fetch(
+      new Request('https://relay.test/.well-known/oauth-authorization-server'),
+    )
+    expect((await metadata.json()).grant_types_supported).toContain('refresh_token')
+    const { tokens, clientId } = await login(relay)
+    const refresh = (refresh_token: string) =>
+      redeem(relay, {
+        grant_type: 'refresh_token',
+        refresh_token,
+        client_id: clientId,
+        resource: 'https://relay.test/mcp',
+      })
+    const rotated = await refresh(tokens.refresh_token)
+    expect(rotated.status).toBe(200)
+    const next = await rotated.json()
+    expect(next.refresh_token).not.toBe(tokens.refresh_token)
+    expect(JSON.stringify(next)).not.toContain('private-')
+    expect((await relay.fetch(mcp(tokens.access_token))).status).toBe(401)
+    expect((await relay.fetch(mcp(next.access_token))).status).toBe(200)
+    const replayed = await refresh(tokens.refresh_token)
+    expect(replayed.status).toBe(400)
+    const body = await replayed.text()
+    expect(JSON.parse(body).error).toBe('invalid_grant')
+    expect(body).not.toContain('private-')
+    // A thief's failed replay does not sign the owner out.
+    expect((await refresh(next.refresh_token)).status).toBe(200)
+  })
+
+  it('binds refresh to its client, resource and allowlist, and outlives the client registration', async () => {
+    const oauth = discordOAuth()
+    const relay = createRelay(config, rest, oauth.fetch)
+    const { tokens, clientId } = await login(relay)
+    const another = await beginLogin(relay)
+    const params = {
+      grant_type: 'refresh_token',
+      refresh_token: tokens.refresh_token,
+      client_id: clientId,
+      resource: 'https://relay.test/mcp',
+    }
+    const before = oauth.calls.length
+    for (const overrides of [
+      { client_id: another.clientId },
+      { resource: 'https://another-relay.test/mcp' },
+      { refresh_token: tokens.access_token },
+    ])
+      expect((await redeem(relay, { ...params, ...overrides })).status).toBe(400)
+    expect(oauth.calls.length).toBe(before)
+
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(Date.now() + 20 * 24 * 3600_000)
+    const first = await redeem(relay, params)
+    expect(first.status).toBe(200)
+    // The registration from sign-in expires on day 30.
+    vi.setSystemTime(Date.now() + 15 * 24 * 3600_000)
+    const second = await redeem(relay, {
+      ...params,
+      refresh_token: (await first.json()).refresh_token,
+    })
+    expect(second.status).toBe(200)
+
+    const restricted = createRelay(
+      { ...config, login: { ...config.login, allowedUserIds: ['345678901234567890'] } },
+      rest,
+      oauth.fetch,
+    )
+    const denied = await redeem(restricted, {
+      ...params,
+      refresh_token: (await second.json()).refresh_token,
+    })
+    expect(denied.status).toBe(400)
+    expect(await denied.json()).toMatchObject({ error: 'invalid_grant' })
+  })
+
   it('rejects malformed allowlist configuration instead of starting with unrestricted access', () => {
     expect(() =>
       createRelay({

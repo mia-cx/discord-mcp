@@ -130,7 +130,7 @@ const store = async (credentials, replace = false) => {
         client_name: 'discord-mcp login helper',
         redirect_uris: [redirect],
         token_endpoint_auth_method: 'none',
-        grant_types: ['authorization_code'],
+        grant_types: ['authorization_code', 'refresh_token'],
         response_types: ['code'],
       }),
       'application/json',
@@ -163,7 +163,16 @@ const store = async (credentials, replace = false) => {
         resource,
       }),
     )
-    await store({ resource, client_id: client.client_id, ...tokens }, values.replace)
+    // The bridge refreshes from `expires_at` and rewrites this file in the same shape.
+    await store(
+      {
+        resource,
+        client_id: client.client_id,
+        ...tokens,
+        expires_at: Math.floor(Date.now() / 1000) + tokens.expires_in,
+      },
+      values.replace,
+    )
   } finally {
     clearTimeout(timeout)
     server.closeAllConnections()
