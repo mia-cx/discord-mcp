@@ -171,17 +171,10 @@ export const connectStorage = async (
   }
   const locks = advisoryLocks(async (onLost) => {
     // Keepalives on both ends notice a dead connection within a minute. Postgres then ends the
-    // session and releases its locks, so another bot host can fire the bots this one held.
-    // pg prefers the URL's own `options` to the config's, so the server's go in the URL, after it.
-    const lockUrl = new URL(url)
-    const serverKeepalives = `-c tcp_keepalives_idle=${KEEPALIVE_IDLE_S} -c tcp_keepalives_interval=${KEEPALIVE_IDLE_S} -c tcp_keepalives_count=${KEEPALIVE_PROBES}`
-    lockUrl.searchParams.set(
-      'options',
-      [lockUrl.searchParams.get('options'), serverKeepalives].filter(Boolean).join(' '),
-    )
+    // session and releases its locks, so another bot host can fire the bots this one held. The
+    // server's are set on the session, leaving DATABASE_URL to mean what it means to the pool.
     const client = new Client({
       ...options,
-      connectionString: lockUrl.href,
       keepAlive: true,
       keepAliveInitialDelayMillis: KEEPALIVE_IDLE_S * 1000,
     })
@@ -191,6 +184,14 @@ export const connectStorage = async (
     })
     client.on('end', onLost)
     await client.connect()
+    try {
+      await client.query(
+        `set tcp_keepalives_idle = ${KEEPALIVE_IDLE_S}; set tcp_keepalives_interval = ${KEEPALIVE_IDLE_S}; set tcp_keepalives_count = ${KEEPALIVE_PROBES}`,
+      )
+    } catch (error) {
+      await client.end()
+      throw error
+    }
     return {
       query: async (text, values) => (await client.query(text, [...values])).rows,
       close: () => client.end(),
