@@ -230,4 +230,40 @@ describe('the stateless Discord relay', () => {
     release()
     expect((await forged).status).toBe(403)
   })
+
+  it("checks a bot's accepted token through the bot's limiter, staying within Discord's limit", async () => {
+    // Discord allows three token checks a minute.
+    let checks = 0
+    let tooManyRequests = 0
+    const discord: typeof fetch = async () => {
+      checks += 1
+      if (checks > 3) tooManyRequests += 1
+      return Response.json(
+        checks > 3 ? { message: 'rate limited', retry_after: 60 } : { id: BOT_ID, bot: true },
+        {
+          status: checks > 3 ? 429 : 200,
+          headers: {
+            'retry-after': '60',
+            'x-ratelimit-limit': '3',
+            'x-ratelimit-remaining': String(Math.max(0, 3 - checks)),
+            'x-ratelimit-reset-after': '60',
+            'x-ratelimit-bucket': 'users-me',
+            'x-ratelimit-scope': 'user',
+          },
+        },
+      )
+    }
+    const oauth = discordOAuth()
+    const relay = createRelay(config, executor(undefined, { discordFetch: discord }), oauth.fetch)
+    const { tokens } = await login(relay)
+
+    const statuses: number[] = []
+    for (let call = 0; call < 6; call++) {
+      statuses.push(
+        (await relay.fetch(request(tokens.access_token, botToken(), 'tools/list'))).status,
+      )
+    }
+    expect(statuses).toEqual([200, 200, 200, 429, 429, 429])
+    expect(tooManyRequests).toBe(0)
+  })
 })

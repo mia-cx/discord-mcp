@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { BotRuntimes } from '@discord-mcp/bot-host'
 import {
   authorizeWithPrincipal,
@@ -121,8 +122,9 @@ export interface ExecutorOptions {
 
 /**
  * Runs requests the way a bot host does: Discord checks the bot token on every request, and every
- * request it accepts for one bot queues in that bot's one rate limiter. Limiters hold no token, so
- * without `bots`, bot credentials, identities, and Discord responses never outlive the request.
+ * request it accepts for one bot queues in that bot's one rate limiter. Limiters keep only a hash of
+ * the token Discord last accepted, so without `bots`, bot credentials, identities, and Discord
+ * responses never outlive the request.
  */
 export const createExecutor = ({
   rest,
@@ -130,7 +132,11 @@ export const createExecutor = ({
   bots,
   restLayer = DiscordRest.shared,
 }: ExecutorOptions): Execute => {
-  const limiters = new Map<string, { limiter: RateLimiter; active: number; idleSince: number }>()
+  /** Each bot's limiter, with the fingerprint of the token Discord last accepted for it. */
+  const limiters = new Map<
+    string,
+    { limiter: RateLimiter; accepted?: string; active: number; idleSince: number }
+  >()
   const acquire = (botId: string) => {
     const now = Date.now()
     for (const [id, entry] of limiters) {
@@ -147,13 +153,18 @@ export const createExecutor = ({
     entry.active += 1
     return entry
   }
+  const release = (entry: { active: number; idleSince: number }) => {
+    entry.active -= 1
+    entry.idleSince = Date.now()
+  }
 
-  /**
-   * Anyone can name a bot's public ID, so a token Discord has not accepted gets a limiter of its
-   * own: it never queues ahead of the bot's verified requests or counts against its guard.
-   */
-  const verify = async (token: Redacted.Redacted<string>, signal: AbortSignal) => {
-    const limiter = createRateLimiter(rest, discordFetch)
+  /** Check the token with Discord, on a limiter of its own unless `shared` is given. */
+  const verify = async (
+    token: Redacted.Redacted<string>,
+    signal: AbortSignal,
+    shared?: RateLimiter,
+  ) => {
+    const limiter = shared ?? createRateLimiter(rest, discordFetch)
     try {
       return await Effect.runPromiseExit(
         Effect.flatMap(DiscordRest, (rest) =>
@@ -162,21 +173,11 @@ export const createExecutor = ({
         { signal },
       )
     } finally {
-      limiter.close()
+      if (shared === undefined) limiter.close()
     }
   }
 
-  return async (request, credential, botId) => {
-    const token = Redacted.make(credential)
-    const verified = await verify(token, request.signal)
-    if (verified._tag === 'Failure') return discordFailure(renderCause(verified.cause))
-    // A token whose first segment names another bot was routed by a lie.
-    if (!isBot(verified.value) || verified.value.id !== botId) return invalidBot()
-    // Hosting never delays or fails the agent's call; `use` logs its own failures.
-    void bots?.use(botId, credential)
-
-    const lane = acquire(botId)
-    const runtime = relayRuntime(restLayer(token, lane.limiter))
+  const run = async (request: Request, runtime: ReturnType<typeof relayRuntime>) => {
     const mcp = createMcpHandler(() => buildRelayServer(runtime), {
       legacy: 'stateless',
       maxSubscriptions: 0,
@@ -197,8 +198,28 @@ export const createExecutor = ({
     } finally {
       await mcp.close()
       await runtime.dispose()
-      lane.active -= 1
-      lane.idleSince = Date.now()
+    }
+  }
+
+  return async (request, credential, botId) => {
+    const token = Redacted.make(credential)
+    const fingerprint = createHash('sha256').update(credential).digest('base64url')
+    // Anyone can name a bot's public ID, so only the token Discord last accepted for this bot
+    // checks in through the bot's limiter. Any other token, forged or freshly reset, gets one of
+    // its own and so never queues ahead of the bot's requests or counts against its guard.
+    let lane = limiters.get(botId)?.accepted === fingerprint ? acquire(botId) : undefined
+    try {
+      const verified = await verify(token, request.signal, lane?.limiter)
+      if (verified._tag === 'Failure') return discordFailure(renderCause(verified.cause))
+      // A token whose first segment names another bot was routed by a lie.
+      if (!isBot(verified.value) || verified.value.id !== botId) return invalidBot()
+      // Hosting never delays or fails the agent's call; `use` logs its own failures.
+      void bots?.use(botId, credential)
+      lane ??= acquire(botId)
+      lane.accepted = fingerprint
+      return await run(request, relayRuntime(restLayer(token, lane.limiter)))
+    } finally {
+      if (lane !== undefined) release(lane)
     }
   }
 }
