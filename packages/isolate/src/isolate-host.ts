@@ -274,39 +274,50 @@ export interface IsolateHost {
 }
 
 /**
- * Process slots, handed out to waiting bots in turn, so a bot with many slow runs gets one slot
- * per round while every other bot still gets its own.
+ * Process slots. A bot holds at most half of them, so no bot can hold them all, and a freed slot
+ * goes to the next waiting bot in turn, so a bot with many slow runs waits its turn like the rest.
  */
 const slots = (size: number) => {
+  const share = Math.max(1, Math.floor(size / 2))
   let free = size
+  /** Slots each bot holds. */
+  const held = new Map<string, number>()
   /** Each waiting bot's line, in the order bots get their next turn. */
   const waiting = new Map<string, Array<() => void>>()
+  const take = (botId: string) => held.set(botId, (held.get(botId) ?? 0) + 1)
+  const eligible = (botId: string) => (held.get(botId) ?? 0) < share
   return {
     acquire: (botId: string) => {
-      if (free > 0) {
+      if (free > 0 && eligible(botId)) {
         free -= 1
+        take(botId)
         return Promise.resolve()
       }
       return new Promise<void>((resolve) => {
         waiting.set(botId, [...(waiting.get(botId) ?? []), resolve])
       })
     },
-    // A finished execution hands its slot straight to the next bot's oldest waiting one. Its own
-    // bot goes to the back of the line, behind every bot still waiting for a turn.
+    // A finished execution hands its slot straight to the oldest run of the next bot below its
+    // share. Its own bot goes to the back of the line, behind every bot still waiting for a turn.
     release: (botId: string) => {
+      const count = (held.get(botId) ?? 1) - 1
+      if (count === 0) held.delete(botId)
+      else held.set(botId, count)
       const own = waiting.get(botId)
       if (own !== undefined) {
         waiting.delete(botId)
         waiting.set(botId, own)
       }
-      const [turn] = waiting
-      if (turn === undefined) {
+      const next = [...waiting.keys()].find(eligible)
+      const line = next === undefined ? undefined : waiting.get(next)
+      if (next === undefined || line === undefined) {
         free += 1
         return
       }
-      const [next, [first, ...rest]] = turn
+      const [first, ...rest] = line
       waiting.delete(next)
       if (rest.length > 0) waiting.set(next, rest)
+      take(next)
       first?.()
     },
   }

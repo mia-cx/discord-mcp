@@ -158,4 +158,28 @@ describe('the isolate host', () => {
 
     expect(finished).toEqual(['bot-1 a', 'bot-2', 'bot-1 b', 'bot-1 c'])
   })
+
+  it('never lets one bot hold every slot, so another bot answers its interaction at once', async () => {
+    const host = makeIsolateHost(2)
+    const finished: string[] = []
+    const slow = {
+      ...(await execution(
+        '1',
+        'export default () => new Promise((r) => setTimeout(r, 600))',
+        5000,
+      )),
+      urgent: true,
+    }
+    const runs = [
+      { ...slow, queue: 'bot-1:a', label: 'bot-1 a' },
+      { ...slow, queue: 'bot-1:b', label: 'bot-1 b' },
+      { ...(await execution('2', 'export default () => 0', 5000)), urgent: true, label: 'bot-2' },
+    ]
+
+    await Promise.all(
+      runs.map(({ label, ...run }) => host.run(run).then(() => finished.push(label))),
+    )
+
+    expect(finished).toEqual(['bot-2', 'bot-1 a', 'bot-1 b'])
+  })
 })
