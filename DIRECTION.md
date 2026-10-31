@@ -10,7 +10,8 @@ deployment's operator-managed list includes accepted developer-Team members and 
 approved additional accounts. Preserve those additions during Team resyncs; keep user IDs
 outside Git and no server-side bot token for lookups.
 
-Keep no bot credentials, authentication results, sessions, or Discord-response cache. Login grants
+Relay calls keep no bot credentials, authentication results, sessions, or Discord-response cache;
+only automations store bot tokens (see below). Login grants
 travel in encrypted, audience-bound relay tokens. Spent authorization-code hashes expire after
 one minute; the next code exchange or process restart removes expired hashes. Use one process;
 an in-flight login fails on restart. Existing logins survive.
@@ -25,6 +26,13 @@ file. Every other machine signs in separately, since one holder's refresh revoke
 The relay needs no database, local accounts, PATs, stored OAuth profiles, Gateway, workflow engine, or
 sandbox supervisor. The earlier control-plane libraries remain in the workspace as legacy code;
 the server executable no longer starts them. `PLAN.md` describes that historical design.
+
+## Heading: custom workflows
+
+Agents will set up their own subscriptions, automations, and bot behaviour through the relay,
+running while no agent is connected. The relay stores a bot's token only for a bot whose
+automations need it, encrypted at rest; every relay call still supplies OAuth and a bot token.
+The design is being settled in a PRD; this section records decisions as they are made.
 
 ## Current implementation
 
