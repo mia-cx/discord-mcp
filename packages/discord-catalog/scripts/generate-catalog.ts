@@ -58,7 +58,7 @@ interface RawOperation {
   security?: ReadonlyArray<Record<string, unknown>>
   requestBody?: {
     required?: boolean
-    content: Record<string, { schema?: { $ref?: string } }>
+    content: Record<string, { schema?: { $ref?: string } & Record<string, unknown> }>
   }
   responses?: Record<string, { content?: Record<string, { schema?: { $ref?: string } }> }>
 }
@@ -172,6 +172,9 @@ const schemaRefs = (op: RawOperation) => {
   const bodyRef = contentTypes
     .map((ct) => refName(bodyContent[ct]?.schema?.$ref))
     .find((n): n is string => n !== undefined)
+  // A JSON body declared inline rather than by reference still has a schema to validate against.
+  const jsonBody = bodyContent['application/json']?.schema
+  const inlineBody = bodyRef === undefined && jsonBody?.$ref === undefined ? jsonBody : undefined
 
   const okResponse =
     op.responses?.['200'] ?? op.responses?.['201'] ?? op.responses?.['204'] ?? undefined
@@ -179,6 +182,7 @@ const schemaRefs = (op: RawOperation) => {
   return {
     contentTypes,
     bodyRef,
+    inlineBody,
     responseRef: refName(Object.values(okResponse?.content ?? {})[0]?.schema?.$ref),
   }
 }
@@ -187,6 +191,7 @@ const schemaRefs = (op: RawOperation) => {
 const detailOf = (
   op: RawOperation,
   merged: ReadonlyArray<RawParameter>,
+  inlineBody: Record<string, unknown> | undefined,
 ): OperationDetail | undefined => {
   const querySchemas: Record<string, unknown> = {}
   const paramDescriptions: Record<string, string> = {}
@@ -196,6 +201,7 @@ const detailOf = (
   }
   const empty =
     op.description === undefined &&
+    inlineBody === undefined &&
     Object.keys(querySchemas).length === 0 &&
     Object.keys(paramDescriptions).length === 0
 
@@ -203,6 +209,9 @@ const detailOf = (
     ? undefined
     : {
         ...(op.description === undefined ? {} : { description: op.description }),
+        ...(inlineBody === undefined
+          ? {}
+          : { bodySchema: rewriteRefs(inlineBody) as Record<string, unknown> }),
         querySchemas,
         paramDescriptions,
       }
@@ -331,12 +340,14 @@ const buildOperation = (
     path,
     method,
   )
-  const { contentTypes, bodyRef, responseRef } = schemaRefs(op)
+  const { contentTypes, bodyRef, inlineBody, responseRef } = schemaRefs(op)
 
-  const detail = detailOf(op, merged)
+  const detail = detailOf(op, merged, inlineBody)
   if (detail !== undefined) ctx.details[op.operationId] = detail
 
-  const roots = [bodyRef, responseRef].filter((n): n is string => n !== undefined)
+  const inlineRefs = new Set<string>()
+  collectRefs(inlineBody, inlineRefs)
+  const roots = [bodyRef, responseRef, ...inlineRefs].filter((n): n is string => n !== undefined)
   if (roots.length > 0) ctx.closures[op.operationId] = closureOf(roots, ctx.spec.components.schemas)
 
   const override = ctx.overrides[op.operationId]

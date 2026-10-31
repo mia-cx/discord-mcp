@@ -38,13 +38,14 @@ describe('generated catalog', () => {
     expect(addRole?.pathParams).toEqual(['guild_id', 'role_id', 'user_id'])
   })
 
-  it('records exactly the five operations that reject a bot token', () => {
+  it('records exactly the six operations that reject a bot token', () => {
     const oauthOnly = operations.filter((o) => !o.auth.includes('bot')).map((o) => o.operationId)
     expect(oauthOnly.sort()).toEqual([
       'delete_application_user_role_connection',
       'get_application_user_role_connection',
       'get_current_user_application_entitlements',
       'get_my_guild_member',
+      'set_guild_application_command_permissions',
       'update_application_user_role_connection',
     ])
     for (const id of oauthOnly) {

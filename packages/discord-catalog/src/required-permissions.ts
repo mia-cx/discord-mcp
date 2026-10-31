@@ -584,7 +584,7 @@ export const operationPermissions: Readonly<Record<string, OperationPermissions>
       when('the body includes a poll', inChannel('SendPolls')),
       when('sticker_ids include stickers from another guild', inChannel('UseExternalStickers')),
       when(
-        'the content mentions @everyone, @here, or a role that is not mentionable, and allowed_mentions permits it',
+        'the content or components mention @everyone, @here, or a role that is not mentionable, and allowed_mentions permits it',
         inChannel('MentionEveryone'),
       ),
     ],
@@ -1096,7 +1096,7 @@ export const operationPermissions: Readonly<Record<string, OperationPermissions>
       conditional: [
         when('the body sets suppress to false', inChannelAt('body channel_id', 'MuteMembers')),
         when(
-          'the body sets request_to_speak_timestamp',
+          'the body sets request_to_speak_timestamp to a time (clearing it with null needs nothing)',
           inChannelAt('body channel_id', 'RequestToSpeak'),
         ),
       ],
@@ -1332,6 +1332,12 @@ export const requiredPermissions = (operationId: string): OperationPermissions =
     throw new Error(`${operationId} has no permission entry. Run pnpm spec:check.`)
   }
   return entry
+}
+
+/** The Discord documentation section an operation's entry cites, or the spec when Discord has none. */
+export const docsUrlFor = (op: OperationEntry): string => {
+  const { sources } = requiredPermissions(op.operationId)
+  return sources.find((url) => url.startsWith('https://docs.discord.com/')) ?? SPEC
 }
 
 const grantProblems = (op: OperationEntry, grant: PermissionGrant): ReadonlyArray<string> => {

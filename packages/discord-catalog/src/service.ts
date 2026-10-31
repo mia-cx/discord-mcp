@@ -148,16 +148,21 @@ export class OperationCatalog extends Context.Service<
       const bodySchema = (operationId: string) =>
         Effect.gen(function* () {
           const op = yield* get(operationId)
-          if (op.requestBody?.schemaName === undefined) return undefined
+          if (op.requestBody === undefined) return undefined
 
           const map = yield* schemas
+          const inline = map.details[operationId]?.bodySchema
+          const name = op.requestBody.schemaName
+          if (name === undefined && inline === undefined) return undefined
           const closure = map.closures[operationId] ?? []
           const defs: Record<string, unknown> = {}
-          for (const name of closure) defs[name] = map.definitions[name]
+          for (const ref of closure) defs[ref] = map.definitions[ref]
 
           // A `$ref` to the root plus its scoped closure, rather than an inlined tree: Discord's
           // schemas are recursive, so inlining would not terminate.
-          return { $ref: `#/$defs/${op.requestBody.schemaName}`, $defs: defs }
+          return name === undefined
+            ? { ...inline, $defs: defs }
+            : { $ref: `#/$defs/${name}`, $defs: defs }
         })
 
       return { all, get, search, schemas, bodySchema, source }

@@ -19,6 +19,10 @@
     "reason": "Role connections are user-scoped metadata; a bot token has no user to scope to.",
     "family": "user"
   },
+  "set_guild_application_command_permissions": {
+    "reason": "Discord's spec lists BotToken, but Discord rejects bot tokens here: editing command permissions needs a Bearer token with applications.commands.permissions.update.",
+    "auth": ["oauth2"]
+  },
   "get_guild": {
     "reason": "Covered by a curated tool with a bounded, model-friendly projection.",
     "curatedTool": "discord_guild_get"
