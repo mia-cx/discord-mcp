@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { createServer, request as httpRequest, type Server } from 'node:http'
 import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -9,7 +9,13 @@ import { RUNTIME_MODULES } from './bundle.ts'
 export const NPM_REGISTRY = 'https://registry.npmjs.org/'
 const DIRECT_DEPENDENCY_LIMIT = 100
 const INSTALL_TIMEOUT_MS = 120_000
+const INSTALL_LIMIT_BYTES = 256 * 1024 * 1024
+const SIZE_CHECK_MS = 250
+const INSTALL_CONCURRENCY = 2
 const ERROR_LINES = 10
+/** Where npm places a package: nested `node_modules` directories, never out of the install. */
+const INSTALL_PATH =
+  /^node_modules\/(?:(?:@[^/.][^/]*\/)?[^/.][^/]*\/node_modules\/)*(?:@[^/.][^/]*\/)?[^/.][^/]*$/
 /** npm's own package-name rule. */
 const PACKAGE_NAME = /^(?:@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/
 /** Versions, ranges, and tags. Paths, URLs, git, and `npm:` aliases all contain `/` or `:`. */
@@ -87,7 +93,9 @@ const checkLockfile = (text: string, registry: string) => {
     ])
   }
   const issues = Object.entries(packages).flatMap(([path, entry]) => {
-    if (path === '' || entry?.inBundle === true) return []
+    if (path === '') return []
+    if (!INSTALL_PATH.test(path)) return [`lockfile: ${path} is not a path under node_modules.`]
+    if (entry?.inBundle === true) return []
     const fromRegistry =
       entry?.link !== true &&
       typeof entry?.resolved === 'string' &&
@@ -98,18 +106,6 @@ const checkLockfile = (text: string, registry: string) => {
     throw new DependencyError('The lockfile installs packages from outside the registry.', issues)
   }
 }
-
-const listPackages = ({ packages = {} }: Lockfile) =>
-  [
-    ...new Set(
-      Object.entries(packages)
-        .filter(([path]) => path !== '')
-        .map(
-          ([path, entry]) =>
-            `${entry?.name ?? path.slice(path.lastIndexOf('node_modules/') + 'node_modules/'.length)}@${entry?.version}`,
-        ),
-    ),
-  ].sort()
 
 const listen = (server: Server) =>
   new Promise<number>((resolve, reject) => {
@@ -176,6 +172,15 @@ const npmErrors = (stderr: string) => {
   return errors.length > 0 ? errors.slice(0, ERROR_LINES) : lines.slice(-ERROR_LINES)
 }
 
+/** Bytes of every file under `dir`, links not followed. */
+const sizeOf = async (dir: string) => {
+  let bytes = 0
+  for (const entry of await readdir(dir, { recursive: true, withFileTypes: true })) {
+    if (entry.isFile()) bytes += (await lstat(join(entry.parentPath, entry.name))).size
+  }
+  return bytes
+}
+
 const runNpm = (root: string, args: ReadonlyArray<string>) =>
   new Promise<void>((resolve, reject) => {
     // Only what npm needs to run: no credentials, no user or global config.
@@ -187,13 +192,42 @@ const runNpm = (root: string, args: ReadonlyArray<string>) =>
       killSignal: 'SIGKILL',
     })
     let stderr = ''
+    let oversized = false
     child.stderr.on('data', (chunk: Buffer) => {
       stderr += chunk.toString()
     })
-    child.once('error', reject)
+    // A small tarball can unpack to gigabytes, so the install is measured while it runs.
+    let measuring = false
+    const watch = setInterval(() => {
+      if (measuring) return
+      measuring = true
+      sizeOf(root)
+        .then((bytes) => {
+          if (bytes <= INSTALL_LIMIT_BYTES) return
+          oversized = true
+          child.kill('SIGKILL')
+        })
+        // npm moves files while it works; the next measurement sees them.
+        .catch(() => {})
+        .finally(() => {
+          measuring = false
+        })
+    }, SIZE_CHECK_MS)
+    child.once('error', (error) => {
+      clearInterval(watch)
+      reject(error)
+    })
     child.once('exit', (code, signal) => {
+      clearInterval(watch)
       if (code === 0) resolve()
-      else if (signal !== null) {
+      else if (oversized) {
+        reject(
+          new DependencyError(
+            `The dependencies take more than ${INSTALL_LIMIT_BYTES / 1024 / 1024} MB installed.`,
+            ['dependencies: import fewer or smaller packages.'],
+          ),
+        )
+      } else if (signal !== null) {
         reject(
           new DependencyError(`Installing took longer than ${INSTALL_TIMEOUT_MS / 1000} s.`, []),
         )
@@ -201,6 +235,48 @@ const runNpm = (root: string, args: ReadonlyArray<string>) =>
         reject(new DependencyError('npm could not install the dependencies.', npmErrors(stderr)))
     })
   })
+
+/** Installs a process runs at once, so publishes can't fill the host's disk or memory together. */
+const installs = (() => {
+  let running = 0
+  const waiting: Array<() => void> = []
+  return {
+    acquire: () =>
+      running < INSTALL_CONCURRENCY
+        ? Promise.resolve(void running++)
+        : new Promise<void>((resolve) => waiting.push(resolve)),
+    // A freed turn passes straight to the next install waiting, so `running` never overshoots.
+    release: () => {
+      const next = waiting.shift()
+      if (next === undefined) running -= 1
+      else next()
+    },
+  }
+})()
+
+/**
+ * Every installed package as `name@version`, read from its own manifest: a lockfile's versions are
+ * what it claims, not what the tarballs it names contain. A listed package npm skipped, like an
+ * optional one for another platform, has no manifest and was not installed.
+ */
+const listPackages = async (root: string, { packages = {} }: Lockfile) => {
+  const installed = await Promise.all(
+    Object.keys(packages)
+      .filter((path) => path !== '')
+      .map(async (path) => {
+        const text = await readFile(join(root, path, 'package.json'), 'utf8').catch(
+          (error: NodeJS.ErrnoException) => {
+            if (error.code === 'ENOENT') return undefined
+            throw error
+          },
+        )
+        if (text === undefined) return []
+        const { name, version } = JSON.parse(text) as { name?: unknown; version?: unknown }
+        return [`${String(name)}@${String(version)}`]
+      }),
+  )
+  return [...new Set(installed.flat())].sort()
+}
 
 /**
  * Install a workflow's dependencies from the registry, exactly as `lockfile` pins them when given,
@@ -214,6 +290,20 @@ export const withDependencies = async <A>(
   checkDependencies(dependencies)
   const registryUrl = new URL(registry)
   if (lockfile !== undefined) checkLockfile(lockfile, registryUrl.href)
+  await installs.acquire()
+  try {
+    return await install(dependencies, lockfile, registryUrl, use)
+  } finally {
+    installs.release()
+  }
+}
+
+const install = async <A>(
+  dependencies: Readonly<Record<string, string>>,
+  lockfile: string | undefined,
+  registryUrl: URL,
+  use: (root: string) => Promise<A>,
+) => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'textile-workflow-')))
   const proxy = registryProxy(registryUrl)
   try {
@@ -245,7 +335,7 @@ export const withDependencies = async <A>(
     const installed = JSON.parse(
       await readFile(join(root, 'package-lock.json'), 'utf8'),
     ) as Lockfile
-    return { value: await use(root), packages: listPackages(installed) }
+    return { value: await use(root), packages: await listPackages(root, installed) }
   } finally {
     proxy.closeAllConnections()
     proxy.close()
