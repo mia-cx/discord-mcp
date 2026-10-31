@@ -156,6 +156,17 @@ it('serialises concurrent bridge refreshes into one valid login and refreshes on
     await saveLogin({ ...rotated, access_token: tokens.access_token })
     expect((await request(bridges[0])).result.protocolVersion).toEqual(expect.any(String))
     expect(refreshes()).toBe(2)
+
+    // A 2026-07-28 request names its own version, even on a bridge that negotiated an older one.
+    const meta = {
+      'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+      'io.modelcontextprotocol/clientCapabilities': {},
+    }
+    bridges[1]?.child.stdin.write(
+      `${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'discord_api_search', arguments: { query: 'message' }, _meta: meta } })}\n`,
+    )
+    const modern = JSON.parse((await bridges[1]?.lines.next())?.value ?? '')
+    expect(modern.result.isError).not.toBe(true)
   } finally {
     for (const { child } of bridges) child.kill()
     server.closeAllConnections()

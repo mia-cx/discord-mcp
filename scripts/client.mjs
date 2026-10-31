@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { randomBytes } from 'node:crypto'
-import { readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { link, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
@@ -10,10 +10,40 @@ import { setTimeout as delay } from 'node:timers/promises'
 const directory = process.env.DISCORD_MCP_CONFIG_DIR ?? join(homedir(), '.config', 'discord-mcp')
 const loginFile = join(directory, 'login.json')
 const REFRESH_EARLY_SECONDS = 24 * 3600
-// A refresh request times out after 15 seconds, so an older lock belongs to a crashed bridge.
-const LOCK_STALE_MS = 30_000
+// Longer than the relay's 15-second Discord call, so the bridge never abandons a rotation.
+const REFRESH_TIMEOUT_MS = 30_000
+// A refresh request gives up after REFRESH_TIMEOUT_MS, so an older lock belongs to a crashed bridge.
+const LOCK_STALE_MS = 60_000
+const LOOPBACK = ['127.0.0.1', 'localhost', '[::1]']
+// A 2026-07-28 request names its own protocol version here; older clients negotiate it once.
+const VERSION_META_KEY = 'io.modelcontextprotocol/protocolVersion'
+const NAME_FIELDS = {
+  'tools/call': 'name',
+  'prompts/get': 'name',
+  'resources/read': 'uri',
+  'tasks/get': 'taskId',
+  'tasks/update': 'taskId',
+  'tasks/cancel': 'taskId',
+}
 const controllers = new Map()
 let protocol = '2025-06-18'
+
+/** The standard MCP headers the relay checks against a message's body. */
+const mcpHeaders = (message) => {
+  const version = message.params?._meta?.[VERSION_META_KEY]
+  const name = message.params?.[NAME_FIELDS[message.method]]
+  return {
+    'mcp-protocol-version': typeof version === 'string' ? version : protocol,
+    ...(typeof message.method === 'string' ? { 'mcp-method': message.method } : {}),
+    ...(typeof name !== 'string'
+      ? {}
+      : {
+          'mcp-name': /^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$/.test(name)
+            ? name
+            : `=?base64?${Buffer.from(name).toString('base64')}?=`,
+        }),
+  }
+}
 
 const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`)
 const failure = (id, message) => send({ jsonrpc: '2.0', id, error: { code: -32000, message } })
@@ -32,7 +62,7 @@ const credentials = async () => {
       resource.username ||
       resource.password ||
       (resource.protocol !== 'https:' &&
-        !(resource.protocol === 'http:' && resource.hostname === '127.0.0.1'))
+        !(resource.protocol === 'http:' && LOOPBACK.includes(resource.hostname)))
     ) {
       throw new Error('Invalid credentials')
     }
@@ -45,24 +75,41 @@ const credentials = async () => {
 /** Run `task` while holding a lock file shared by every bridge using this login. */
 const locked = async (task) => {
   const lock = `${loginFile}.lock`
+  const owner = randomBytes(16).toString('hex')
+  const age = (path) =>
+    stat(path).then(
+      (lockStat) => Date.now() - lockStat.mtimeMs,
+      () => 0,
+    )
   for (;;) {
     try {
-      await writeFile(lock, String(process.pid), { flag: 'wx', mode: 0o600 })
+      await writeFile(lock, owner, { flag: 'wx', mode: 0o600 })
       break
     } catch (error) {
       if (error.code !== 'EEXIST') throw error
-      const age = await stat(lock).then(
-        (lockStat) => Date.now() - lockStat.mtimeMs,
-        () => 0,
+      if ((await age(lock)) <= LOCK_STALE_MS) {
+        await delay(50)
+        continue
+      }
+      // Move the stale lock aside before deleting it. Another bridge may have reclaimed it first;
+      // a moved lock that turns out fresh is that bridge's, so put it back.
+      const aside = `${lock}.${owner}`
+      if (
+        !(await rename(lock, aside).then(
+          () => true,
+          () => false,
+        ))
       )
-      if (age > LOCK_STALE_MS) await rm(lock, { force: true })
-      else await delay(50)
+        continue
+      if ((await age(aside)) <= LOCK_STALE_MS) await link(aside, lock).catch(() => {})
+      await rm(aside, { force: true })
     }
   }
   try {
     return await task()
   } finally {
-    await rm(lock, { force: true })
+    // Release only this bridge's lock; a crash-reclaimed one may belong to another.
+    if ((await readFile(lock, 'utf8').catch(() => '')) === owner) await rm(lock, { force: true })
   }
 }
 
@@ -84,7 +131,7 @@ const refresh = (stale) =>
         resource: current.resource,
       }),
       redirect: 'error',
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
     })
     if (!response.ok) {
       const error = await response.json().catch(() => undefined)
@@ -109,6 +156,9 @@ const refresh = (stale) =>
       refresh_token: tokens.refresh_token,
       expires_at: now() + tokens.expires_in,
     }
+    // A sign-in with --replace may have written a new login while this refresh ran; keep it.
+    const latest = await readLogin()
+    if (latest.refresh_token !== current.refresh_token) return latest
     const temporary = `${loginFile}.${randomBytes(16).toString('hex')}.tmp`
     await writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600, flag: 'wx' })
     await rename(temporary, loginFile)
@@ -133,7 +183,7 @@ const forward = async (message) => {
           'x-discord-bot-token': bot,
           accept: 'application/json, text/event-stream',
           'content-type': 'application/json',
-          'mcp-protocol-version': protocol,
+          ...mcpHeaders(message),
         },
         body: JSON.stringify(message),
         redirect: 'error',
