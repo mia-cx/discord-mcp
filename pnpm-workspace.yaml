@@ -2,6 +2,9 @@ packages:
   - 'apps/*'
   - 'packages/*'
 
+# Keep patch_hash= out of native build paths: node-gyp's Makefiles treat '=' as an assignment.
+virtualStoreDirMaxLength: 60
+
 # Native builds we deliberately allow.
 #
 # `argon2` is load-bearing: personal access tokens are hashed with argon2id, and without its native
@@ -14,3 +17,7 @@ allowBuilds:
   msgpackr-extract: true
   # workerd resolves its platform binary package without its postinstall check.
   workerd: false
+
+# Opus disables NEON in its Linux config; do not compile the unused NEON sources there.
+patchedDependencies:
+  '@discordjs/opus@0.10.0': patches/@discordjs__opus@0.10.0.patch
