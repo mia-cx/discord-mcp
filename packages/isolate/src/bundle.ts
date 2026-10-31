@@ -127,29 +127,23 @@ export const prepareScript = async (source: string): Promise<ReadonlyArray<Scrip
 }
 
 const STUB_FILES = new Set([...Object.values(STUBS), runtimeFile('collection.js')])
-const INNER = { confined: true }
 
 /**
- * Every import must resolve to an installed dependency or a stub, so neither agent code nor a
- * package can bundle a file from elsewhere on the relay, like `/etc/hosts` or another bot's files.
- * `root` is a real path: esbuild resolves symlinks, so a link out of it resolves outside too.
+ * Every file the bundle reads must be an installed dependency or a stub, so neither agent code nor
+ * a package can bundle a file from elsewhere on the relay, like `/proc/self/environ` or another
+ * bot's install. Checked as each file loads, which glob imports reach without resolving. `root` is
+ * a real path: esbuild resolves symlinks, so a link out of it loads from outside too.
  */
 const confine = (root: string | undefined): Plugin => ({
   name: 'confine',
   setup(build) {
     const modules = root === undefined ? undefined : join(root, 'node_modules') + sep
-    build.onResolve({ filter: /.*/ }, async ({ path, pluginData, ...args }) => {
-      if (pluginData === INNER) return undefined
-      const result = await build.resolve(path, { ...args, pluginData: INNER })
-      if (result.errors.length > 0) return { errors: result.errors }
-      const inside =
-        result.external ||
-        result.namespace !== 'file' ||
-        STUB_FILES.has(result.path) ||
-        (modules !== undefined && result.path.startsWith(modules))
-      if (inside) return result
-      return { errors: [{ text: `"${path}" resolves outside the workflow's dependencies.` }] }
-    })
+    build.onLoad({ filter: /.*/, namespace: 'file' }, ({ path }) =>
+      STUB_FILES.has(path) || (modules !== undefined && path.startsWith(modules))
+        ? undefined
+        : // The path is withheld: a glob import would list another directory's files in it.
+          { errors: [{ text: "An import reaches a file outside the workflow's dependencies." }] },
+    )
   },
 })
 
