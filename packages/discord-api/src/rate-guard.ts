@@ -30,33 +30,61 @@ export const rateGuardScope = (credential: string, operationFamily: string): str
 /** The scope that totals every rejection the process records. */
 const PROCESS_SCOPE = 'process'
 
+/** Statuses that count toward the ban budget. 400s are free and must not be recorded. */
+export const isCountedRejection = (status: number): boolean =>
+  status === 401 || status === 403 || status === 429
+
+/** A refused call names the scope over threshold; an admitted one is settled with its status. */
+export type Admission =
+  | { readonly refused: { readonly scope: string; readonly count: number } }
+  | { readonly settle: (status: number, now: number) => void }
+
 /**
  * Timestamps of counted rejections in a rolling window. Create one per process and hand it to every
  * `RateGuard.layer` and to the login routes: Cloudflare counts every request from the IP together.
  */
 export const rejectionLog = (config: RateGuardConfig = defaultRateGuardConfig) => {
   const rejections = new Map<string, ReadonlyArray<number>>()
+  const pending = new Map<string, number>()
   const live = (scope: string, now: number) => {
     const kept = (rejections.get(scope) ?? []).filter((t) => t > now - config.windowMs)
     if (kept.length === 0) rejections.delete(scope)
     else rejections.set(scope, kept)
     return kept.length
   }
+  const adjust = (scopes: ReadonlyArray<string>, delta: number) => {
+    for (const scope of scopes) {
+      const next = (pending.get(scope) ?? 0) + delta
+      if (next === 0) pending.delete(scope)
+      else pending.set(scope, next)
+    }
+  }
   return {
     count: live,
-    /** The over-threshold scope and its count when a call in `scope` must not be sent. */
-    refusal: (scope: string, now: number) => {
-      const count = live(scope, now)
-      if (count >= config.threshold) return { scope, count }
-      const total = live(PROCESS_SCOPE, now)
-      return total >= config.processThreshold ? { scope: PROCESS_SCOPE, count: total } : undefined
-    },
-    /** Record a 401/403/429. Other statuses must not be counted — 400s are free. */
-    record: (scope: string, now: number) => {
-      // Pruning every scope keeps the map bounded by the live rejections the thresholds allow.
-      for (const known of [...rejections.keys()]) live(known, now)
-      for (const target of [scope, PROCESS_SCOPE]) {
-        rejections.set(target, [...(rejections.get(target) ?? []), now])
+    /**
+     * Admit one Discord call counted in every scope and the process. Until it settles it counts as a
+     * rejection, so concurrent calls cannot all pass a threshold that only finished calls reach.
+     */
+    admit: (scopes: ReadonlyArray<string>, now: number): Admission => {
+      const all = [...scopes, PROCESS_SCOPE]
+      for (const scope of all) {
+        const count = live(scope, now) + (pending.get(scope) ?? 0)
+        const limit = scope === PROCESS_SCOPE ? config.processThreshold : config.threshold
+        if (count >= limit) return { refused: { scope, count } }
+      }
+      adjust(all, 1)
+      let open = true
+      return {
+        // Settling twice is a no-op, so callers can settle again on every exit path.
+        settle: (status, at) => {
+          if (!open) return
+          open = false
+          adjust(all, -1)
+          if (!isCountedRejection(status)) return
+          // Pruning every scope keeps the map bounded by the live rejections the thresholds allow.
+          for (const known of [...rejections.keys()]) live(known, at)
+          for (const scope of all) rejections.set(scope, [...(rejections.get(scope) ?? []), at])
+        },
       }
     },
   }
@@ -74,10 +102,13 @@ export type RejectionLog = ReturnType<typeof rejectionLog>
 export class RateGuard extends Context.Service<
   RateGuard,
   {
-    /** Fails with `RateGuardTrippedError` when the scope or the process is already over threshold. */
-    readonly check: (scope: string) => Effect.Effect<void, RateGuardTrippedError>
-    /** Record a 401/403/429. Other statuses must not be counted — 400s are free. */
-    readonly recordRejection: (scope: string) => Effect.Effect<void>
+    /**
+     * Admit one call in `scopes`, or fail with `RateGuardTrippedError` when a scope or the process
+     * is over threshold. Settle the admitted call with Discord's status; 0 means no response.
+     */
+    readonly admit: (
+      scopes: ReadonlyArray<string>,
+    ) => Effect.Effect<(status: number) => Effect.Effect<void>, RateGuardTrippedError>
     readonly failureCount: (scope: string) => Effect.Effect<number>
   }
 >()('discord-api/RateGuard') {
@@ -89,25 +120,24 @@ export class RateGuard extends Context.Service<
     const now = Effect.clockWith((clock) => clock.currentTimeMillis)
     return Layer.succeed(RateGuard)({
       failureCount: (scope) => Effect.map(now, (time) => log.count(scope, time)),
-      check: (scope) =>
+      admit: (scopes) =>
         Effect.flatMap(now, (time) => {
-          const refusal = log.refusal(scope, time)
-          return refusal === undefined
-            ? Effect.void
-            : Effect.fail(
-                new RateGuardTrippedError({
-                  message: `Blocked before sending: ${refusal.count} rejected Discord responses for ${refusal.scope} within the last ${Math.round(config.windowMs / 60_000)} minutes.`,
-                  scope: refusal.scope,
-                  failures: refusal.count,
-                  windowMs: config.windowMs,
-                }),
-              )
+          const admission = log.admit(scopes, time)
+          if ('settle' in admission) {
+            return Effect.succeed((status: number) =>
+              Effect.map(now, (at) => admission.settle(status, at)),
+            )
+          }
+          const { scope, count } = admission.refused
+          return Effect.fail(
+            new RateGuardTrippedError({
+              message: `Blocked before sending: ${count} rejected or pending Discord responses for ${scope} within the last ${Math.round(config.windowMs / 60_000)} minutes.`,
+              scope,
+              failures: count,
+              windowMs: config.windowMs,
+            }),
+          )
         }),
-      recordRejection: (scope) => Effect.map(now, (time) => log.record(scope, time)),
     })
   }
 }
-
-/** Statuses that count toward the ban budget. 400s are free and must not be recorded. */
-export const isCountedRejection = (status: number): boolean =>
-  status === 401 || status === 403 || status === 429

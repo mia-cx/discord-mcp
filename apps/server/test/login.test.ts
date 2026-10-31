@@ -231,10 +231,11 @@ describe('Discord login for the relay', () => {
     const { flow, cookie } = await beginLogin(relay)
     const callback = new URL('https://relay.test/auth/discord/callback')
     callback.search = new URLSearchParams({ state: flow, iss: 'https://discord.com', code: 'x' })
-    for (let attempt = 0; attempt < 40; attempt++) {
-      const replayed = await relay.fetch(new Request(callback, { headers: { cookie } }))
-      expect(replayed.status).toBe(429)
-    }
+    // In parallel: calls still awaiting Discord must count, or a burst passes the threshold.
+    const replays = await Promise.all(
+      Array.from({ length: 40 }, () => relay.fetch(new Request(callback, { headers: { cookie } }))),
+    )
+    for (const replayed of replays) expect(replayed.status).toBe(429)
     expect(oauth.calls).toHaveLength(25)
   })
 

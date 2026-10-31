@@ -3,7 +3,7 @@ import { countIfAvailable, type RateGuardTrippedError, requestSignal } from '@di
 import { REST, type RequestData, type RouteLike } from '@discordjs/rest'
 import { Config, Context, Effect, Layer, Redacted } from 'effect'
 import { type MappedDiscordError, mapDiscordError } from './errors.ts'
-import { isCountedRejection, RateGuard, rateGuardScope } from './rate-guard.ts'
+import { RateGuard, rateGuardScope } from './rate-guard.ts'
 
 /**
  * Everything a Discord request can fail with: a mapped Discord response, or the circuit breaker
@@ -31,6 +31,8 @@ export interface RestConfig {
    * blocking a tool call for minutes, because an MCP client is waiting on a response.
    */
   readonly maxRateLimitWaitMs: number
+  /** The signed-in human behind an HTTP request, counted apart so new tokens cannot evade it. */
+  readonly caller?: string
 }
 
 export const restConfig = Config.all({
@@ -119,8 +121,11 @@ export class DiscordRest extends Context.Service<
 
         const request = (req: DiscordRequest) =>
           Effect.gen(function* () {
-            const scope = rateGuardScope(credential, req.operationFamily)
-            yield* guard.check(scope)
+            const settle = yield* guard.admit(
+              [credential, ...(config.caller === undefined ? [] : [`human:${config.caller}`])].map(
+                (subject) => rateGuardScope(subject, req.operationFamily),
+              ),
+            )
 
             // The caller's cancellation signal, when there is a caller. Passing it to
             // @discordjs/rest aborts the in-flight HTTP request rather than abandoning it.
@@ -150,13 +155,14 @@ export class DiscordRest extends Context.Service<
               },
               catch: (cause) => cause,
             }).pipe(
+              Effect.tap(() => settle(200)),
               Effect.catch((cause) =>
                 Effect.gen(function* () {
                   const { status, body, retryAfterMs, global } = readError(cause)
                   yield* countIfAvailable('discord.request.failed')
                   if (retryAfterMs !== undefined) yield* countIfAvailable('discord.rate_limit_wait')
                   // 400s are free against Cloudflare's budget; only 401/403/429 are counted.
-                  if (isCountedRejection(status)) yield* guard.recordRejection(scope)
+                  yield* settle(status)
                   return yield* Effect.fail(
                     mapDiscordError(status, body, {
                       ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
@@ -165,6 +171,8 @@ export class DiscordRest extends Context.Service<
                   )
                 }),
               ),
+              // An interrupted call never answered, so it releases its slot uncounted.
+              Effect.ensuring(settle(0)),
             )
 
             yield* countIfAvailable('discord.request')

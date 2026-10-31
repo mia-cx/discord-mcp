@@ -18,15 +18,20 @@ const fakeClock: Clock.Clock = {
 const run = <A, E>(effect: Effect.Effect<A, E, RateGuard>) =>
   Effect.runPromise(Effect.provide(effect, RateGuard.layer(config)) as Effect.Effect<A, E>)
 
+/** Send one call in `scope` that Discord answers with `status`. */
+const call = (scope: string, status: number) =>
+  Effect.flatMap(RateGuard, (guard) =>
+    Effect.flatMap(guard.admit([scope]), (settle) => settle(status)),
+  )
+
 describe('RateGuard', () => {
   it('permits calls below the threshold', async () => {
     const count = await run(
       Effect.gen(function* () {
-        const guard = yield* RateGuard
-        yield* guard.recordRejection(scope)
-        yield* guard.recordRejection(scope)
-        yield* guard.check(scope)
-        return yield* guard.failureCount(scope)
+        yield* call(scope, 403)
+        yield* call(scope, 403)
+        yield* call(scope, 200)
+        return yield* Effect.flatMap(RateGuard, (guard) => guard.failureCount(scope))
       }),
     )
     expect(count).toBe(2)
@@ -36,33 +41,53 @@ describe('RateGuard', () => {
     const exit = await Effect.runPromiseExit(
       Effect.provide(
         Effect.gen(function* () {
-          const guard = yield* RateGuard
-          yield* guard.recordRejection(scope)
-          yield* guard.recordRejection(scope)
-          yield* guard.recordRejection(scope)
-          yield* guard.check(scope)
+          for (let i = 0; i < 3; i++) yield* call(scope, 403)
+          yield* call(scope, 200)
         }),
         RateGuard.layer(config),
-      ) as Effect.Effect<void, never>,
+      ),
     )
 
     expect(exit._tag).toBe('Failure')
   })
 
-  it('counts each auth-profile and family separately, so one bad call site trips alone', async () => {
-    const counts = await run(
+  it('counts calls still awaiting Discord, so a parallel burst cannot pass the threshold', async () => {
+    const exit = await run(
       Effect.gen(function* () {
         const guard = yield* RateGuard
-        yield* guard.recordRejection(rateGuardScope('bot', 'guild'))
-        yield* guard.recordRejection(rateGuardScope('bot', 'guild'))
-        yield* guard.recordRejection(rateGuardScope('bot', 'guild'))
+        for (let i = 0; i < 3; i++) yield* guard.admit([scope])
+        return yield* Effect.exit(guard.admit([scope]))
+      }),
+    )
+    expect(exit._tag).toBe('Failure')
+  })
+
+  it('counts each credential and family separately, so one bad call site trips alone', async () => {
+    const counts = await run(
+      Effect.gen(function* () {
+        for (let i = 0; i < 3; i++) yield* call(rateGuardScope('bot', 'guild'), 403)
         // A different family must still be allowed through.
-        yield* guard.check(rateGuardScope('bot', 'channel'))
-        yield* guard.check(rateGuardScope('oauth2', 'guild'))
-        return yield* guard.failureCount(rateGuardScope('bot', 'channel'))
+        yield* call(rateGuardScope('bot', 'channel'), 200)
+        yield* call(rateGuardScope('oauth2', 'guild'), 200)
+        return yield* Effect.flatMap(RateGuard, (guard) =>
+          guard.failureCount(rateGuardScope('bot', 'channel')),
+        )
       }),
     )
     expect(counts).toBe(0)
+  })
+
+  it('trips for every scope once the process total reaches its own threshold', async () => {
+    const exit = await Effect.runPromiseExit(
+      Effect.provide(
+        Effect.gen(function* () {
+          for (let i = 0; i < 5; i++) yield* call(rateGuardScope(`bot-${i}`, 'guild'), 401)
+          yield* call(rateGuardScope('fresh', 'guild'), 200)
+        }),
+        RateGuard.layer(config),
+      ),
+    )
+    expect(exit._tag).toBe('Failure')
   })
 
   it('forgets rejections once they leave the window', async () => {
@@ -71,17 +96,14 @@ describe('RateGuard', () => {
     const count = await Effect.runPromise(
       Effect.provide(
         Effect.gen(function* () {
-          const guard = yield* RateGuard
-          yield* guard.recordRejection(scope)
-          yield* guard.recordRejection(scope)
-          yield* guard.recordRejection(scope)
+          for (let i = 0; i < 3; i++) yield* call(scope, 403)
           now += 2 * 60_000
           // The breaker is rolling, not latching: a quiet period restores service.
-          yield* guard.check(scope)
-          return yield* guard.failureCount(scope)
+          yield* call(scope, 200)
+          return yield* Effect.flatMap(RateGuard, (guard) => guard.failureCount(scope))
         }),
         RateGuard.layer(config),
-      ).pipe(Effect.provideService(Clock.Clock, fakeClock)) as Effect.Effect<number, never>,
+      ).pipe(Effect.provideService(Clock.Clock, fakeClock)),
     )
     expect(count).toBe(0)
   })

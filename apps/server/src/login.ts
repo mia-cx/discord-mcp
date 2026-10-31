@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto'
-import { isCountedRejection, type RejectionLog, rejectionLog } from '@discord-mcp/discord-api/relay'
+import { type RejectionLog, rejectionLog } from '@discord-mcp/discord-api/relay'
 import {
   type AuthInfo,
   bearerAuthChallengeResponse,
@@ -202,15 +202,20 @@ export const createDiscordLogin = (
   }
   /** `scope` groups Discord's rejections, which this process stops sending after a threshold. */
   const discordJson = async (path: string, scope: string, init: RequestInit = {}) => {
-    if (rejections.refusal(scope, Date.now()) !== undefined) {
-      throw new DiscordUnavailable(429, REFUSAL_RETRY_SECONDS)
+    const admission = rejections.admit([scope], Date.now())
+    if (!('settle' in admission)) throw new DiscordUnavailable(429, REFUSAL_RETRY_SECONDS)
+    let response: Response
+    try {
+      response = await discordFetch(`https://discord.com/api/v10${path}`, {
+        ...init,
+        redirect: 'error',
+        signal: AbortSignal.timeout(DISCORD_TIMEOUT_MS),
+      })
+      admission.settle(response.status, Date.now())
+    } finally {
+      // A request that never got an answer releases its slot uncounted.
+      admission.settle(0, Date.now())
     }
-    const response = await discordFetch(`https://discord.com/api/v10${path}`, {
-      ...init,
-      redirect: 'error',
-      signal: AbortSignal.timeout(DISCORD_TIMEOUT_MS),
-    })
-    if (isCountedRejection(response.status)) rejections.record(scope, Date.now())
     if (response.status === 401 || response.status === 400) {
       throw new OAuthError(
         OAuthErrorCode.InvalidToken,
@@ -249,9 +254,10 @@ export const createDiscordLogin = (
     }
     return auth.user.id
   }
-  const exchange = async (parameters: Record<string, string>) => {
+  /** `subject` keeps a refresh out of the scope that anonymous sign-ins share. */
+  const exchange = async (parameters: Record<string, string>, subject = 'new') => {
     const tokens = Schema.decodeUnknownSync(TokenResponse)(
-      await discordJson('/oauth2/token', 'login/token', {
+      await discordJson('/oauth2/token', `login/token/${subject}`, {
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
@@ -508,10 +514,10 @@ export const createDiscordLogin = (
       const grant = await open('refresh', text(params.get('refresh_token')))
       if (grant.clientId !== clientId || !['mcp', null].includes(params.get('scope')))
         throw new Error('Wrong refresh binding')
-      const tokens = await exchange({
-        grant_type: 'refresh_token',
-        refresh_token: text(grant.discordRefresh),
-      })
+      const tokens = await exchange(
+        { grant_type: 'refresh_token', refresh_token: text(grant.discordRefresh) },
+        text(grant.sub),
+      )
       // Discord has revoked the old refresh token, so nothing may fail between here and the reply.
       // Discord issued these to the sealed subject; every MCP request rechecks it and the allowlist.
       return issue(tokens, clientId, text(grant.sub))
