@@ -15,7 +15,16 @@ const reclaim = async (lock) => {
   const stale = await readFile(lock, 'utf8')
   if (Date.now() - (await stat(lock)).mtimeMs <= LOCK_STALE_MS) return
   const claim = `${lock}.${stale}`
-  await link(lock, claim)
+  try {
+    await link(lock, claim)
+  } catch (error) {
+    // A claimer that crashed mid-reclaim leaves its claim behind. Linking updates the ctime, so a
+    // claim untouched for the stale window is abandoned and can be cleared for the next waiter.
+    if (error.code === 'EEXIST' && Date.now() - (await stat(claim)).ctimeMs > LOCK_STALE_MS) {
+      await rm(claim, { force: true })
+    }
+    throw error
+  }
   try {
     if ((await readFile(claim, 'utf8')) === stale) await rm(lock)
   } finally {

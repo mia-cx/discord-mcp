@@ -171,7 +171,7 @@ export class DiscordRest extends Context.Service<
                   )
                 }),
               ),
-              // An interrupted call never answered, so it releases its slot uncounted.
+              // An interrupted call may still reach Discord, so it counts as rejected.
               Effect.ensuring(settle(0)),
             )
 

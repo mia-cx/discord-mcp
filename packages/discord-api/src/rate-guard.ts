@@ -75,12 +75,14 @@ export const rejectionLog = (config: RateGuardConfig = defaultRateGuardConfig) =
       adjust(all, 1)
       let open = true
       return {
-        // Settling twice is a no-op, so callers can settle again on every exit path.
+        // Settling twice is a no-op, so callers can settle again on every exit path. Status 0 means
+        // no answer reached us, yet Discord may still have rejected the call, so it counts too:
+        // otherwise a client could cancel each request after it is sent and never be counted.
         settle: (status, at) => {
           if (!open) return
           open = false
           adjust(all, -1)
-          if (!isCountedRejection(status)) return
+          if (status !== 0 && !isCountedRejection(status)) return
           // Pruning every scope keeps the map bounded by the live rejections the thresholds allow.
           for (const known of [...rejections.keys()]) live(known, at)
           for (const scope of all) rejections.set(scope, [...(rejections.get(scope) ?? []), at])
@@ -104,7 +106,8 @@ export class RateGuard extends Context.Service<
   {
     /**
      * Admit one call in `scopes`, or fail with `RateGuardTrippedError` when a scope or the process
-     * is over threshold. Settle the admitted call with Discord's status; 0 means no response.
+     * is over threshold. Settle the admitted call with Discord's status; 0 means no response, which
+     * counts as a rejection.
      */
     readonly admit: (
       scopes: ReadonlyArray<string>,

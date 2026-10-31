@@ -62,6 +62,16 @@ describe('RateGuard', () => {
     expect(exit._tag).toBe('Failure')
   })
 
+  it('counts a call that never answered, since a cancelled request may still reach Discord', async () => {
+    const count = await run(
+      Effect.gen(function* () {
+        yield* call(scope, 0)
+        return yield* Effect.flatMap(RateGuard, (guard) => guard.failureCount(scope))
+      }),
+    )
+    expect(count).toBe(1)
+  })
+
   it('counts each credential and family separately, so one bad call site trips alone', async () => {
     const counts = await run(
       Effect.gen(function* () {

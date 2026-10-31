@@ -213,7 +213,7 @@ export const createDiscordLogin = (
       })
       admission.settle(response.status, Date.now())
     } finally {
-      // A request that never got an answer releases its slot uncounted.
+      // A request that never got an answer counts as rejected, since Discord may have seen it.
       admission.settle(0, Date.now())
     }
     if (response.status === 401 || response.status === 400) {
