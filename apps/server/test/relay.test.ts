@@ -1,7 +1,7 @@
 import { DiscordApiError, DiscordRateLimitError } from '@discord-mcp/core'
 import { DEFAULT_FAILURE_THRESHOLD, DiscordRest } from '@discord-mcp/discord-api'
 import { Effect, Layer, Redacted } from 'effect'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createRelay } from '../src/relay.ts'
 import { BOT_ID, botToken, config, discordOAuth, executor, login } from './login-fixture.ts'
 
@@ -271,10 +271,19 @@ describe('the stateless Discord relay', () => {
 
   it("keeps a reset token's retries from locking out the bot's new token", async () => {
     let current = botToken(BOT_ID, 'before-reset')
-    const discord: typeof fetch = async (_input, init) =>
-      new Headers(init?.headers).get('authorization') === `Bot ${current}`
-        ? Response.json({ id: BOT_ID, bot: true })
-        : Response.json({ message: '401: Unauthorized', code: 0 }, { status: 401 })
+    let rejected = 0
+    let release = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const discord: typeof fetch = async (_input, init) => {
+      if (new Headers(init?.headers).get('authorization') === `Bot ${current}`) {
+        return Response.json({ id: BOT_ID, bot: true })
+      }
+      rejected += 1
+      await held
+      return Response.json({ message: '401: Unauthorized', code: 0 }, { status: 401 })
+    }
     const oauth = discordOAuth()
     const relay = createRelay(config, executor(undefined, { discordFetch: discord }), oauth.fetch)
     const { tokens } = await login(relay)
@@ -283,9 +292,14 @@ describe('the stateless Discord relay', () => {
     const old = current
     expect((await list(old)).status).toBe(200)
     current = botToken(BOT_ID, 'after-reset')
-    for (let retry = 0; retry < DEFAULT_FAILURE_THRESHOLD + 5; retry++) {
-      expect((await list(old)).status).toBe(403)
-    }
+    // Discord holds its first rejection until every retry has picked its limiter.
+    const retries = Promise.all(
+      Array.from({ length: DEFAULT_FAILURE_THRESHOLD + 5 }, () => list(old)),
+    )
+    await vi.waitFor(() => expect(rejected).toBe(1))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    release()
+    expect(new Set((await retries).map((response) => response.status))).toEqual(new Set([403]))
     expect((await list(current)).status).toBe(200)
     expect((await list(current)).status).toBe(200)
   })

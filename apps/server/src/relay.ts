@@ -158,22 +158,26 @@ export const createExecutor = ({
     entry.idleSince = Date.now()
   }
 
-  /** Check the token with Discord, on a limiter of its own unless `shared` is given. */
+  /**
+   * Check the token with Discord, queueing in `shared`'s buckets when given and otherwise on a
+   * client of its own. A rejected token is not yet known to be the bot's, so its rejections always
+   * go to a guard of their own, never the one the bot's accepted requests share.
+   */
   const verify = async (
     token: Redacted.Redacted<string>,
     signal: AbortSignal,
     shared?: RateLimiter,
   ) => {
-    const limiter = shared ?? createRateLimiter(rest, discordFetch)
+    const own = createRateLimiter(rest, discordFetch)
     try {
       return await Effect.runPromiseExit(
         Effect.flatMap(DiscordRest, (rest) =>
           rest.request({ method: 'GET', route: '/users/@me', operationFamily: 'authentication' }),
-        ).pipe(Effect.provide(restLayer(token, limiter))),
+        ).pipe(Effect.provide(restLayer(token, { ...(shared ?? own), guard: own.guard }))),
         { signal },
       )
     } finally {
-      if (shared === undefined) limiter.close()
+      own.close()
     }
   }
 
@@ -205,15 +209,15 @@ export const createExecutor = ({
     const token = Redacted.make(credential)
     const fingerprint = createHash('sha256').update(credential).digest('base64url')
     // Anyone can name a bot's public ID, so only the token Discord last accepted for this bot
-    // checks in through the bot's limiter. Any other token, forged or freshly reset, gets one of
-    // its own and so never queues ahead of the bot's requests or counts against its guard.
+    // checks in through the bot's buckets. Any other token, forged or freshly reset, gets a client
+    // of its own and so never queues ahead of the bot's requests.
     let lane = limiters.get(botId)?.accepted === fingerprint ? acquire(botId) : undefined
     try {
       const verified = await verify(token, request.signal, lane?.limiter)
       if (verified._tag === 'Failure') {
         const error = renderCause(verified.cause)
         // Discord now rejects the token it last accepted, so it was reset: its retries must not
-        // keep reaching the guard the bot's new token will share.
+        // keep queueing in the buckets the bot's new token will share.
         if (error.httpStatus === 401 && lane?.accepted === fingerprint) delete lane.accepted
         return discordFailure(error)
       }
