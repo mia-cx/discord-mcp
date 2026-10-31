@@ -75,8 +75,9 @@ export const createBotRuntimes = ({
     return done
   }
 
-  // A crash loses at most the writes still queued, so a resume replays a few events twice
-  // rather than skipping any.
+  // A crash loses the writes still queued or waiting to retry. A lost store makes a resume
+  // replay events twice rather than skip any; a lost clear lets the next process resume a bot
+  // that went offline.
   const saveSession = (botId: string, session: ShardSession | undefined) => {
     retries.get(botId)?.cancel()
     retries.delete(botId)
