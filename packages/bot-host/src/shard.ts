@@ -57,6 +57,19 @@ export const nextIdentifyAt = (identifiedAt: ReadonlyArray<number>, now: number)
   return Math.max(now, latest + IDENTIFY_INTERVAL_MS, budgetReopens)
 }
 
+/**
+ * The resume URL from READY, if it names a Discord Gateway host or the configured Gateway's own
+ * host. RESUME sends the bot token, so a URL anywhere else falls back to the initial Gateway.
+ */
+const trustedResumeUrl = (candidate: string, gatewayUrl: string) => {
+  const url = URL.parse(candidate)
+  const gateway = new URL(gatewayUrl)
+  if (url === null) return undefined
+  const discord = url.protocol === 'wss:' && url.hostname.endsWith('.discord.gg')
+  const configured = url.protocol === gateway.protocol && url.hostname === gateway.hostname
+  return discord || configured ? candidate : undefined
+}
+
 /** What a shard needs to resume its Gateway session, possibly from another process. */
 export interface ShardSession {
   readonly sessionId: string
@@ -233,10 +246,12 @@ export const startShard = ({
 
   function connect() {
     // Discord says to fall back to the initial URL when the resume URL fails.
-    const viaResumeUrl = session !== undefined && !resumeUrlFailed
-    const ws = new WebSocket(
-      `${viaResumeUrl ? session?.resumeGatewayUrl : gatewayUrl}/?v=10&encoding=json`,
-    )
+    const resumeUrl =
+      session !== undefined && !resumeUrlFailed
+        ? trustedResumeUrl(session.resumeGatewayUrl, gatewayUrl)
+        : undefined
+    const viaResumeUrl = resumeUrl !== undefined
+    const ws = new WebSocket(`${resumeUrl ?? gatewayUrl}/?v=10&encoding=json`)
     socket = ws
     greeted = false
     acknowledged = true
