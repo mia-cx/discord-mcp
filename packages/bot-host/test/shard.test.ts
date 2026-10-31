@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { nextIdentifyAt, startShard } from '../src/shard.ts'
+import { nextIdentifyAt, PRESENCE_INTERVAL_MS, startShard } from '../src/shard.ts'
 import { DEFAULT_HEARTBEAT_INTERVAL_MS, fakeGateway, manualClock } from '../src/testing.ts'
 
 const TOKEN = 'private-bot-token'
 const INTERVAL = DEFAULT_HEARTBEAT_INTERVAL_MS
+/** Long enough for any reconnect backoff and the five-second Identify spacing. */
+const IDENTIFY_WAIT_MS = 60_000
 const cleanup: Array<() => unknown> = []
 afterEach(async () => {
   for (const step of cleanup.splice(0).reverse()) await step()
@@ -21,7 +23,9 @@ const start = async (saved?: { sessionId: string; sequence: number }) => {
     clock,
     ...(saved && { session: { ...saved, resumeGatewayUrl: `${gateway.url}/resume` } }),
     onSession,
+    intents: 0,
     onReady: () => {},
+    onDispatch: () => {},
     onFatal,
     onIdentifyBudgetSpent: () => {},
   })
@@ -52,6 +56,31 @@ describe('the shard supervisor', () => {
     clock.advance(INTERVAL)
     await vi.waitFor(() => expect(connection?.received[2]).toEqual({ op: 1, d: 1 }))
     expect(gateway.connections).toHaveLength(1)
+  })
+
+  it('sends at most one presence update per interval, the latest, and identifies with it', async () => {
+    const { gateway, clock, shard } = await start()
+    await identified(gateway, 1)
+    const connection = gateway.connections[0]
+    const presence = (status: string) => ({ since: null, activities: [], status, afk: false })
+    const updates = () => connection?.received.filter((p) => p.op === 3).map((p) => p.d)
+
+    shard.updatePresence(presence('idle'))
+    shard.updatePresence(presence('dnd'))
+    shard.updatePresence(presence('invisible'))
+    await vi.waitFor(() => expect(updates()).toEqual([presence('idle')]))
+
+    clock.advance(PRESENCE_INTERVAL_MS)
+    await vi.waitFor(() => expect(updates()).toEqual([presence('idle'), presence('invisible')]))
+
+    // New intents need a new session, not a resumed one.
+    shard.setIntents(512)
+    clock.advance(IDENTIFY_WAIT_MS)
+    await identified(gateway, 2)
+    expect(gateway.connections[1]?.received[0]).toMatchObject({
+      op: 2,
+      d: { intents: 512, presence: presence('invisible') },
+    })
   })
 
   it('resumes after a zombie connection or a dropped one, so Discord replays what it missed', async () => {
@@ -157,7 +186,9 @@ describe('the shard supervisor', () => {
       clock,
       session: { sessionId: 'saved', resumeGatewayUrl, sequence: 7 },
       onSession: () => {},
+      intents: 0,
       onReady: () => {},
+      onDispatch: () => {},
       onFatal: () => {},
       onIdentifyBudgetSpent: () => {},
     })
@@ -192,7 +223,9 @@ describe('the shard supervisor', () => {
         clock,
         ...(source === 'saved' && { session }),
         onSession,
+        intents: 0,
         onReady: () => {},
+        onDispatch: () => {},
         onFatal: () => {},
         onIdentifyBudgetSpent: () => {},
       })
@@ -253,7 +286,9 @@ describe('the shard supervisor', () => {
       clock: manualClock(),
       session: { sessionId: 'saved', resumeGatewayUrl, sequence: 7 },
       onSession: () => {},
+      intents: 0,
       onReady: () => {},
+      onDispatch: () => {},
       onFatal: () => {},
       onIdentifyBudgetSpent: () => {},
     })

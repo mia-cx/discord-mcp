@@ -154,3 +154,38 @@ it('clears an idle bot’s session even when the clear fails during shutdown', a
   await gateway.close()
   await storage.close()
 })
+
+it('keeps a bot with enabled workflows online from its stored token until they are disabled', async () => {
+  const storage = await inMemoryStorage()
+  // Heartbeats are proven in the shard suite; keep them out of this window.
+  const gateway = await fakeGateway(1000 * HOUR)
+  const clock = manualClock()
+  const vault = createTokenVault(KEY, storage)
+  // Stored by an earlier agent call, before a restart.
+  await vault.store(BOT_ID, 'private-token-a')
+  const bots = createBotRuntimes({ vault, clock, log: () => {}, gatewayUrl: gateway.url })
+
+  // Startup holds bots with enabled workflows, then resumes.
+  await bots.hold(BOT_ID, 512)
+  await bots.resume()
+  await vi.waitFor(() =>
+    expect(gateway.connections[0]?.received[0]).toMatchObject({
+      op: 2,
+      d: { token: 'private-token-a', intents: 512 },
+    }),
+  )
+  clock.advance(2 * IDLE_TIMEOUT_MS)
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  expect(gateway.connections[0]?.closeCode).toBeUndefined()
+
+  await bots.hold(BOT_ID, undefined)
+  clock.advance(IDLE_TIMEOUT_MS - HOUR)
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  expect(gateway.connections[0]?.closeCode).toBeUndefined()
+  clock.advance(HOUR)
+  await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(1000))
+
+  await bots.close()
+  await gateway.close()
+  await storage.close()
+})
