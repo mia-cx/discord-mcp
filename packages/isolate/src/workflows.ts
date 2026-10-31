@@ -441,7 +441,7 @@ export const makeWorkflowHost = ({
     if (at - prunedAt < PRUNE_INTERVAL_MS) return
     prunedAt = at
     storage
-      .pruneWorkflowRuns(new Date(at - RUN_RETENTION_MS), RUNS_KEPT)
+      .pruneWorkflowRuns(new Date(at - RUN_RETENTION_MS))
       .catch((error: unknown) => log(`Pruning workflow runs failed: ${String(error)}`))
   }
 
@@ -470,16 +470,19 @@ export const makeWorkflowHost = ({
       logs: ReadonlyArray<string>,
     ) =>
       storage
-        .recordWorkflowRun({
-          workflowId,
-          revision,
-          event: dispatch.t,
-          outcome,
-          error: error === null ? null : storable(redact(error)),
-          logs: storedLogs(logs.map((line) => storable(redact(line)))),
-          receivedAt,
-          finishedAt: new Date(now()),
-        })
+        .recordWorkflowRun(
+          {
+            workflowId,
+            revision,
+            event: dispatch.t,
+            outcome,
+            error: error === null ? null : storable(redact(error)),
+            logs: storedLogs(logs.map((line) => storable(redact(line)))),
+            receivedAt,
+            finishedAt: new Date(now()),
+          },
+          RUNS_KEPT,
+        )
         .then(prune, (error: unknown) =>
           log(`${label}: its run was not recorded: ${String(error)}`),
         )

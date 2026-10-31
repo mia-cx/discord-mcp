@@ -6,6 +6,7 @@ const BOT = '345678901234567890'
 const OTHER_BOT = '345678901234567891'
 const HUMAN = '234567890123456789'
 const DAY = 24 * 60 * 60 * 1000
+const KEEP = 1000
 const grants = { operations: [], families: [], hosts: [] }
 
 const cleanup: Array<() => unknown> = []
@@ -107,9 +108,9 @@ describe('workflow runs', () => {
     const a = await publish('a')
     const b = await publish('b')
     const foreign = await publish('a', OTHER_BOT)
-    await storage.recordWorkflowRun(run(a, 1, { logs: ['hi'] }))
-    await storage.recordWorkflowRun(run(b, 2, { outcome: 'threw', error: 'Error: no' }))
-    await storage.recordWorkflowRun(run(foreign, 3))
+    await storage.recordWorkflowRun(run(a, 1, { logs: ['hi'] }), KEEP)
+    await storage.recordWorkflowRun(run(b, 2, { outcome: 'threw', error: 'Error: no' }), KEEP)
+    await storage.recordWorkflowRun(run(foreign, 3), KEEP)
 
     expect(await names(storage, BOT)).toEqual(['b:threw', 'a:completed'])
     expect(await names(storage, BOT, { name: 'a' })).toEqual(['a:completed'])
@@ -121,22 +122,24 @@ describe('workflow runs', () => {
     ).toMatchObject({ revision: 1, event: 'MESSAGE_CREATE', logs: ['hi'], error: null })
   })
 
-  it('stay readable until they expire, then are pruned by age and by count', async () => {
+  it('keep only the newest of each workflow, and stay readable until they expire', async () => {
     const { storage, publish } = await setup()
     const busy = await publish('busy')
     const quiet = await publish('quiet')
     const now = 10 * DAY
-    await storage.recordWorkflowRun(run(quiet, now - 8 * DAY))
-    await storage.recordWorkflowRun(run(quiet, now - 6 * DAY))
-    for (let i = 4; i >= 0; i -= 1) await storage.recordWorkflowRun(run(busy, now - i))
+    await storage.recordWorkflowRun(run(quiet, now - 8 * DAY), 3)
+    await storage.recordWorkflowRun(run(quiet, now - 6 * DAY), 3)
+    // The oldest failure falls out of the newest three, so a failures-only read can't find it.
+    await storage.recordWorkflowRun(run(busy, now - 4, { outcome: 'threw' }), 3)
+    for (let i = 3; i >= 0; i -= 1) await storage.recordWorkflowRun(run(busy, now - i), 3)
+
+    const kept = await storage.workflowRuns(BOT, { name: 'busy', since: new Date(0), limit: 10 })
+    expect(kept.map((r) => r.finishedAt.getTime())).toEqual([now, now - 1, now - 2])
+    expect(await names(storage, BOT, { name: 'busy', failed: true })).toEqual([])
 
     const since = new Date(now - 7 * DAY)
     expect(await names(storage, BOT, { name: 'quiet', since })).toEqual(['quiet:completed'])
-    expect(await names(storage, BOT, { name: 'quiet' })).toHaveLength(2)
-
-    expect(await storage.pruneWorkflowRuns(since, 3)).toBe(3)
+    expect(await storage.pruneWorkflowRuns(since)).toBe(1)
     expect(await names(storage, BOT, { name: 'quiet' })).toHaveLength(1)
-    const kept = await storage.workflowRuns(BOT, { name: 'busy', since, limit: 10 })
-    expect(kept.map((r) => r.finishedAt.getTime())).toEqual([now, now - 1, now - 2])
   })
 })

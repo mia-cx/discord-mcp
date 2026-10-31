@@ -192,7 +192,7 @@ export const workflowLogs = defineTool({
   name: 'discord_workflow_logs',
   title: 'Read workflow logs',
   description: [
-    `This bot's recent workflow runs, newest first: the workflow and revision, the Gateway event, the outcome (completed, threw, timed_out, crashed, or skipped when it never started), the error, and what it logged with console. Runs stay readable for ${RUN_RETENTION_MS / (24 * 60 * 60 * 1000)} days; bot hosts trim each workflow to its newest ${RUNS_KEPT} at most hourly.`,
+    `This bot's recent workflow runs, newest first: the workflow and revision, the Gateway event, the outcome (completed, threw, timed_out, crashed, or skipped when it never started), the error, and what it logged with console. Runs stay readable for ${RUN_RETENTION_MS / (24 * 60 * 60 * 1000)} days, up to the newest ${RUNS_KEPT} per workflow.`,
     'Each run keeps up to 16,384 characters of console output. A run that timed out or crashed keeps none. Bot and interaction tokens in logs and errors read [redacted].',
   ].join('\n\n'),
   toolset: 'api',

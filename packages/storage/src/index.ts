@@ -139,17 +139,16 @@ export interface Storage {
     limitBytes: number,
   ) => Promise<{ readonly stored: boolean; readonly bytes: number }>
   readonly deleteWorkflowValue: (workflowId: string, key: string) => Promise<void>
-  readonly recordWorkflowRun: (run: WorkflowRun) => Promise<void>
+  /** Record a run, then delete all but its workflow's newest `keep`. */
+  readonly recordWorkflowRun: (run: WorkflowRun, keep: number) => Promise<void>
   /** A bot's most recent workflow runs, newest first. */
   readonly workflowRuns: (
     botId: string,
     query: WorkflowRunQuery,
   ) => Promise<ReadonlyArray<RecordedWorkflowRun>>
   /**
-   * Delete runs that finished before `before`, and all but each workflow's newest `keep`.
-   * Resolves to how many were deleted.
-   */
-  readonly pruneWorkflowRuns: (before: Date, keep: number) => Promise<number>
+  /** Delete runs that finished before `before`. Resolves to how many were deleted. */
+  readonly pruneWorkflowRuns: (before: Date) => Promise<number>
   readonly close: () => Promise<void>
 }
 

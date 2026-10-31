@@ -189,9 +189,8 @@ the last one wins.
 `discord_workflow_logs` shows the bot's recent runs, newest first: each run's event,
 outcome, error, and console output, filtered by workflow or to failures only. A run keeps up
 to 16,384 characters of output; one that timed out or crashed keeps none. Bot and interaction tokens in
-logs and errors read `[redacted]`. Runs stay readable for 7 days. Bot hosts delete expired
-runs, and trim each workflow to its newest 1,000, at startup and at most hourly while
-workflows run.
+logs and errors read `[redacted]`. Runs stay readable for 7 days, up to the newest 1,000 per
+workflow. Bot hosts delete expired runs at startup, and at most hourly while workflows run.
 
 Anyone with relay access and the bot's token manages its workflows. Every publish, enable,
 disable, and delete is recorded with the acting human's Discord user ID, and

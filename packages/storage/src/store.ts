@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url'
-import { and, desc, eq, gt, gte, inArray, isNotNull, lt, ne, or, sql } from 'drizzle-orm'
+import { and, desc, eq, gte, isNotNull, lt, lte, ne, sql } from 'drizzle-orm'
 import type { PgDatabase, PgQueryResultHKT } from 'drizzle-orm/pg-core'
 import type { Storage, WorkflowChange, WorkflowRevision } from './index.ts'
 import * as schema from './schema.ts'
@@ -274,8 +274,27 @@ export const createStorage = (db: Db, close: () => Promise<void>): Storage => ({
     )
   },
 
-  recordWorkflowRun: async (run) => {
-    await failing('Recording a run', db.insert(runs).values(run))
+  recordWorkflowRun: async (run, keep) => {
+    await failing(
+      'Recording a run',
+      db.transaction(async (tx) => {
+        await tx.insert(runs).values(run)
+        // The run ranked `keep + 1`, newest first, and every older one go, through the workflow's
+        // (workflow_id, id) index.
+        const [cutoff] = await tx
+          .select({ id: runs.id })
+          .from(runs)
+          .where(eq(runs.workflowId, run.workflowId))
+          .orderBy(desc(runs.id))
+          .offset(keep)
+          .limit(1)
+        if (cutoff !== undefined) {
+          await tx
+            .delete(runs)
+            .where(and(eq(runs.workflowId, run.workflowId), lte(runs.id, cutoff.id)))
+        }
+      }),
+    )
   },
 
   workflowRuns: (botId, { name, failed, since, limit }) =>
@@ -304,24 +323,10 @@ export const createStorage = (db: Db, close: () => Promise<void>): Storage => ({
       .orderBy(desc(runs.id))
       .limit(limit),
 
-  pruneWorkflowRuns: async (before, keep) => {
-    const ranked = db
-      .select({
-        id: runs.id,
-        rank: sql<number>`row_number() over (partition by ${runs.workflowId} order by ${runs.id} desc)`.as(
-          'rank',
-        ),
-      })
-      .from(runs)
-      .as('ranked')
+  pruneWorkflowRuns: async (before) => {
     const deleted = await db
       .delete(runs)
-      .where(
-        or(
-          lt(runs.finishedAt, before),
-          inArray(runs.id, db.select({ id: ranked.id }).from(ranked).where(gt(ranked.rank, keep))),
-        ),
-      )
+      .where(lt(runs.finishedAt, before))
       .returning({ id: runs.id })
     return deleted.length
   },
