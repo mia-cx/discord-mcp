@@ -47,7 +47,9 @@ inference; it relays Discord to agents and runs agent-written code. v1 serves al
   grant. Egress goes through a broker proxy that blocks private ranges. Anyone holding relay
   OAuth and the bot's token manages its workflows; the acting human is recorded.
 - **Voice.** A bidirectional voice WebSocket relays Discord voice, per speaker. Agents bring their
-  own speech-to-speech or local models; Textile never runs them.
+  own speech-to-speech or local models; Textile never runs them. Receiving voice always posts a
+  notice whose buttons let anyone opt out of relay, from that bot in that server or from every
+  Textile bot; without the notice, a session only sends audio.
 - **Storage.** Postgres on CloudNativePG, accessed through Drizzle.
 - **Environments.** The olympus k3s homelab is dev and staging. Production runs on a managed
   Kubernetes provider, not yet chosen, so Textile uses only portable Kubernetes features.
