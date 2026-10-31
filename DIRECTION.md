@@ -10,8 +10,8 @@ deployment's operator-managed list includes accepted developer-Team members and 
 approved additional accounts. Preserve those additions during Team resyncs; keep user IDs
 outside Git and no server-side bot token for lookups.
 
-Relay calls keep no bot credentials, authentication results, sessions, or Discord-response cache;
-only automations store bot tokens (see below). Login grants
+Today's relay keeps no bot credentials, authentication results, sessions, or Discord-response
+cache; the platform below changes that. Login grants
 travel in encrypted, audience-bound relay tokens. Spent authorization-code hashes expire after
 one minute; the next code exchange or process restart removes expired hashes. Use one process;
 an in-flight login fails on restart. Existing logins survive.
@@ -27,12 +27,28 @@ The relay needs no database, local accounts, PATs, stored OAuth profiles, Gatewa
 sandbox supervisor. The earlier control-plane libraries remain in the workspace as legacy code;
 the server executable no longer starts them. `PLAN.md` describes that historical design.
 
-## Heading: custom workflows
+## Heading: Textile, a bot platform for agents
 
-Agents will set up their own subscriptions, automations, and bot behaviour through the relay,
-running while no agent is connected. The relay stores a bot's token only for a bot whose
-automations need it, encrypted at rest; every relay call still supplies OAuth and a bot token.
-The design is being settled in a PRD; this section records decisions as they are made.
+The project is being renamed Textile. It is growing from a stateless relay into a platform where
+agents run their bots: online presence, automations, voice, and one-off scripts. Textile hosts no
+inference; it relays Discord to agents and runs agent-written code. v1 serves allowlisted friends.
+
+- **Tiers.** A stateless, load-balanceable central tier checks OAuth and the allowlist, then
+  routes by bot ID (decoded from the token). Trusted bot hosts each own a set of bots: the
+  encrypted stored token, the REST rate limiter, Gateway shards, voice, and the capability broker.
+  Untrusted runners execute workerd isolates and hold no secrets.
+- **Bots.** An agent's first call stores the bot's token and brings it online; it goes offline
+  after 24 hours without agent calls unless automations or voice keep it up. Each shard's resume
+  state is stored so any bot host can resume it after failover. Shards spread across bot hosts.
+- **Workflows.** TypeScript against discord.js, adapted where it cannot run in an isolate, with
+  pinned npm dependencies bundled at publish. Triggers are Gateway events (interactions
+  included), cron schedules, and inbound HTTP routes. Each workflow declares grants: catalog
+  operations and reachable hosts, shown at enable time; destructive operations need an explicit
+  grant. Egress goes through a broker proxy that blocks private ranges. Anyone holding relay
+  OAuth and the bot's token manages its workflows; the acting human is recorded.
+- **Voice.** A bidirectional voice WebSocket relays Discord voice, per speaker. Agents bring their
+  own speech-to-speech or local models; Textile never runs them.
+- **Storage.** Postgres on CloudNativePG, accessed through Drizzle.
 
 ## Current implementation
 
