@@ -68,6 +68,33 @@ export const fakeGateway = async (heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERV
   return {
     url,
     connections,
+    /**
+     * A `fetch` that answers `GET /gateway/bot` with this fake's URL, `shards` recommended
+     * shards, and a fresh daily Identify budget, unless overridden.
+     */
+    discordFetch:
+      ({
+        shards = 1,
+        maxConcurrency = 1,
+        remaining = 1000,
+      }: {
+        shards?: number
+        maxConcurrency?: number
+        remaining?: number
+      } = {}): typeof fetch =>
+      async (input) =>
+        new URL(String(input)).pathname.endsWith('/gateway/bot')
+          ? Response.json({
+              url,
+              shards,
+              session_start_limit: {
+                total: 1000,
+                remaining,
+                reset_after: 24 * 60 * 60 * 1000,
+                max_concurrency: maxConcurrency,
+              },
+            })
+          : new Response(null, { status: 404 }),
     close: () =>
       new Promise<void>((resolve) => {
         for (const client of server.clients) client.terminate()
