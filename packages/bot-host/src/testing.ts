@@ -103,12 +103,13 @@ export const fakeGateway = async (heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERV
   }
 }
 
-/** A clock that moves only when told to, with a fixed `random`. */
-export const manualClock = (random = 0.5) => {
+/** A clock that moves only when told to, with a fixed `random`. Its `date` starts at `epochMs`. */
+export const manualClock = (random = 0.5, epochMs = 0) => {
   let now = 0
   const pending = new Set<{ readonly at: number; readonly run: () => void }>()
   return {
     now: () => now,
+    date: () => epochMs + now,
     random: () => random,
     schedule: (run, ms) => {
       const timer = { at: now + ms, run }
