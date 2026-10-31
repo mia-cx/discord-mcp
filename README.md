@@ -373,16 +373,17 @@ Each later call restarts a 24-hour timer; when it runs out, the bot disconnects 
 offline, unless it has enabled [workflows](#workflows). Startup applies pending database
 migrations and brings every bot with enabled workflows online.
 
-A bot runs as many shards as Discord recommends, all in one process. Shards identify as fast
-as Discord's `max_concurrency` allows, and spend at most half the Identifies Discord says the
-bot has left today, leaving the rest for the bot's other clients. When Discord says the bot
-needs more shards, it goes offline until the next agent call, which brings it back with
-Discord's new count.
+A bot runs as many shards as Discord recommends. Shards identify as fast as Discord's
+`max_concurrency` allows, and spend at most half the Identifies Discord says the bot has left
+today, leaving the rest for the bot's other clients. When Discord says the bot needs more
+shards, it goes offline until the next agent call, which brings it back with Discord's new
+count.
 
 A restart keeps bots online. Each shard's Gateway session is stored encrypted alongside the
 bot's token, and the next process resumes it, so Discord replays the events sent while the
-server was down. If Discord no longer accepts a session, that shard connects afresh. A resumed
-bot keeps its shard count and gets a new 24-hour timer.
+server was down. Resuming needs only the database, not Discord's REST API. If Discord no
+longer accepts a session, that shard connects afresh. A resumed bot keeps its shard count and
+its 24-hour timer.
 
 Set `DATABASE_URL`, `TOKEN_VAULT_KEY` (generate it like `OAUTH_ENCRYPTION_KEY`), and a
 `DISCORD_OAUTH_ALLOWED_USER_IDS` list. Without that list, the server logs a warning and
@@ -446,16 +447,27 @@ as many replicas as it needs:
   enforces that allowlist and tells the bot host which human made each request, for the
   workflow change log.
 
-Give both tiers the same `BOT_HOSTS` and `BOT_HOST_SECRET`. Ownership comes from rendezvous
-hashing over `BOT_HOSTS`, so every replica agrees on it, and adding or removing a host moves
-only the bots that host gains or loses. A host answers 503 with `Retry-After: 1` for a bot
-its list says it does not own, so a central still on an old list costs a retry, not a second
-owner. Two hosts on different lists can both own a bot that moved, each with its own rate
-limiter, so change `BOT_HOSTS` by stopping every bot host and then starting them all on the new
-list. Centrals can update in any order. Each bot host resumes the stored sessions of the bots
-it owns when it starts, and brings its bots with enabled workflows online, so a bot that moved
-comes back online on its new host. Keep bot hosts off the public network: the hop from central is plain HTTP and
-carries bot tokens.
+Give both tiers the same `BOT_HOSTS` and `BOT_HOST_SECRET`. A bot's REST traffic belongs to
+one bot host, chosen by rendezvous hashing over `BOT_HOSTS`, so every replica agrees on it, and
+adding or removing a host moves only the bots that host gains or loses. A host answers 503 with
+`Retry-After: 1` for a bot its list says it does not own, so a central still on an old list
+costs a retry. A host also holds each bot it serves under a lease in Postgres, so while hosts
+disagree on the list, a bot's new owner answers 503 until its old owner restarts. Change
+`BOT_HOSTS` with a rolling restart; centrals can update in any order.
+
+A bot's shards spread across the bot hosts that are running, each shard on one host at a time.
+Each host renews its leases in Postgres every five seconds. When a host stops, the others
+resume its shards within five seconds; when one dies, within about 20, once its leases expire.
+Discord replays the events sent in between. A host that cannot reach Postgres stops its shards
+before its leases expire, so another host never runs them at the same time. Bot hosts compare
+lease times across machines, so keep their clocks in sync, as NTP does. Each host spends only
+its share of a bot's daily Identifies, and Identifies keep to Discord's `max_concurrency`
+across hosts. A bot's workflows, schedules, routes, and voice run on the host that holds its REST
+traffic: other hosts send it the events their shards receive, in order, for up to a minute each,
+and a server's shard moves to it while the bot joins or plays in that server's voice channel.
+
+Keep bot hosts off the public network: the hop from central is plain HTTP and carries bot
+tokens.
 
 Logins, refreshes, and MCP requests all work on any central replica, so no sticky routing is
 needed.
