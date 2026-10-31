@@ -47,15 +47,7 @@ const settle = async () => {
  */
 const seed = (client, data) => {
   if (data.guild_id === undefined) {
-    // A direct message's channel is the DM with its author, when the event names one.
-    const recipient = data.author ?? data.user ?? (data.user_id && { id: data.user_id })
-    if (data.channel_id !== undefined) {
-      client.channels._add({
-        id: data.channel_id,
-        type: ChannelType.DM,
-        ...(recipient ? { recipients: [recipient] } : {}),
-      })
-    }
+    if (data.channel_id !== undefined) seedDirectMessage(client, data)
     return
   }
   const guild = client.guilds._add({ id: data.guild_id, unavailable: true })
@@ -65,6 +57,23 @@ const seed = (client, data) => {
       ? undefined
       : { id: data.channel_id, type: data.channel_type ?? ChannelType.GuildText })
   if (channel !== undefined) client.channels._add({ ...channel, guild_id: data.guild_id }, guild)
+}
+
+/**
+ * A direct message's channel is the DM with the other user. The event names them when they acted;
+ * when the bot acted, or nobody is named, as in a delete, the channel is fetched by ID instead.
+ */
+const seedDirectMessage = (client, data) => {
+  const actor = data.author ?? data.user ?? (data.user_id && { id: data.user_id })
+  const peer = actor && actor.id !== client.user.id ? actor : undefined
+  const channel = client.channels._add({
+    id: data.channel_id,
+    type: ChannelType.DM,
+    ...(peer ? { recipients: [peer] } : {}),
+  })
+  // discord.js fetches a DM through its recipient, which this channel does not know.
+  if (peer === undefined)
+    channel.fetch = (force = true) => client.channels.fetch(channel.id, { force })
 }
 
 const workflowClients = () => {

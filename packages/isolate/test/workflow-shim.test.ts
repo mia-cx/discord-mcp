@@ -259,4 +259,54 @@ for (const name of ['messageCreate', 'messageUpdate', 'messageDelete', 'messageR
 
     expect(outcome).toEqual({ outcome: 'completed', result: null, logs: [name] })
   })
+
+  /** Fetches the DM channel of each event, as the partial-object guidance says to. */
+  const DM_FETCHER = `
+import { Client } from 'discord.js'
+const client = new Client({ intents: [] })
+client.on('messageDelete', (message) => message.channel.fetch())
+client.on('messageReactionAdd', (reaction) => reaction.message.channel.fetch())
+`
+  const dmReaction = (userId: string) => ({
+    t: 'MESSAGE_REACTION_ADD',
+    d: {
+      user_id: userId,
+      channel_id: CHANNEL,
+      message_id: '900000000000000001',
+      emoji: { id: null, name: '👍' },
+    },
+  })
+  it.each([
+    [
+      'a deleted DM, which names nobody',
+      { t: 'MESSAGE_DELETE', d: { id: '900000000000000001', channel_id: CHANNEL } },
+      `GET https://discord.com/api/v10/channels/${CHANNEL}`,
+    ],
+    [
+      "the bot's own DM reaction",
+      dmReaction(BOT.id),
+      `GET https://discord.com/api/v10/channels/${CHANNEL}`,
+    ],
+    [
+      "a user's DM reaction",
+      dmReaction(USER.id),
+      'POST https://discord.com/api/v10/users/@me/channels',
+    ],
+  ])('fetches the DM channel of %s by the route Discord needs', async (_, event, request) => {
+    const requests: string[] = []
+    const outcome = await makeIsolateHost().run({
+      queue: BOT.id,
+      botUser: BOT,
+      modules: await prepareScript(DM_FETCHER),
+      timeoutMs: 10_000,
+      input: { event: event as GatewayEvent },
+      broker: async (incoming) => {
+        requests.push(`${incoming.method} ${incoming.url}`)
+        return Response.json({ id: CHANNEL, type: 1, recipients: [USER] })
+      },
+    })
+
+    expect(outcome.outcome).toBe('completed')
+    expect(requests).toEqual([request])
+  })
 })
