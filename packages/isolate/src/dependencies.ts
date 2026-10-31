@@ -11,6 +11,8 @@ const DIRECT_DEPENDENCY_LIMIT = 100
 const INSTALL_TIMEOUT_MS = 120_000
 const INSTALL_LIMIT_BYTES = 256 * 1024 * 1024
 const SIZE_CHECK_MS = 250
+/** A filesystem block: the least any file or directory occupies. */
+const BLOCK_BYTES = 4096
 const INSTALL_CONCURRENCY = 2
 const ERROR_LINES = 10
 /** Where npm places a package: nested `node_modules` directories, never out of the install. */
@@ -172,11 +174,16 @@ const npmErrors = (stderr: string) => {
   return errors.length > 0 ? errors.slice(0, ERROR_LINES) : lines.slice(-ERROR_LINES)
 }
 
-/** Bytes of every file under `dir`, links not followed. */
+/**
+ * What everything under `dir` costs on disk, links not followed. Each entry costs at least a
+ * block, as it does on the filesystem, so a package of empty files can't run the host out of
+ * inodes under the byte limit.
+ */
 const sizeOf = async (dir: string) => {
   let bytes = 0
   for (const entry of await readdir(dir, { recursive: true, withFileTypes: true })) {
-    if (entry.isFile()) bytes += (await lstat(join(entry.parentPath, entry.name))).size
+    const { size } = entry.isFile() ? await lstat(join(entry.parentPath, entry.name)) : { size: 0 }
+    bytes += Math.max(size, BLOCK_BYTES)
   }
   return bytes
 }
