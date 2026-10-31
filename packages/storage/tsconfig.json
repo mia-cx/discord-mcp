@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    // Drizzle's and PGlite's declarations do not typecheck under TypeScript 7 with Node-only libs.
+    // The package's exports name neither, so every other package keeps full library checks.
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*", "../../types/globals.d.ts"]
+}

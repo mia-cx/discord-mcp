@@ -1,3 +1,4 @@
+import type { BotRuntimes } from '@discord-mcp/bot-host'
 import {
   authorizeWithPrincipal,
   type Principal,
@@ -63,8 +64,13 @@ const invalidBot = () =>
     error_description: 'Supply a valid bot token in X-Discord-Bot-Token.',
   })
 
-const isBot = (value: unknown) =>
-  typeof value === 'object' && value !== null && 'bot' in value && value.bot === true
+const isBot = (value: unknown): value is { bot: true; id: string } =>
+  typeof value === 'object' &&
+  value !== null &&
+  'bot' in value &&
+  value.bot === true &&
+  'id' in value &&
+  typeof value.id === 'string'
 
 const allowedOrigin = (request: Request, origins: ReadonlyArray<string>) => {
   const origin = request.headers.get('origin')
@@ -86,8 +92,9 @@ const discordFailure = (error: ReturnType<typeof renderCause>) => {
 }
 
 /**
- * Stateless MCP HTTP relay. Discord validates both login and bot credentials on every request.
- * Bot credentials, identities, and Discord responses never survive the request.
+ * MCP HTTP relay. Discord validates both login and bot credentials on every request.
+ * Without `bots`, bot credentials, identities, and Discord responses never survive the request.
+ * With `bots`, each verified call keeps its bot online and stores its token encrypted.
  * `restLayer` is the Discord network seam used by offline integration tests.
  */
 export const createRelay = (
@@ -95,6 +102,7 @@ export const createRelay = (
   restLayer: (token: Redacted.Redacted<string>) => Layer.Layer<DiscordRest> = (token) =>
     DiscordRest.layer({ ...config.rest, token }).pipe(Layer.provide(RateGuard.layer())),
   discordFetch: typeof fetch = fetch,
+  bots?: Pick<BotRuntimes, 'use'>,
 ) => {
   const login = createDiscordLogin(config.login, discordFetch)
   const handle = async (request: Request): Promise<Response> => {
@@ -147,6 +155,8 @@ export const createRelay = (
         return discordFailure(renderCause(verified.cause))
       }
       if (!isBot(verified.value)) return invalidBot()
+      // Hosting never delays or fails the agent's call; `use` logs its own failures.
+      void bots?.use(verified.value.id, credential)
 
       const response = await mcp.fetch(request, { authInfo: authenticated })
       // Complete the bounded response before releasing the runtime. The SDK's legacy fallback
