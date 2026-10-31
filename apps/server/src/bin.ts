@@ -111,6 +111,7 @@ const startBotHosting = (
           storage,
           isolates: makeIsolateHost(),
           bots,
+          clock: systemClock,
           operations: catalog.all,
           rest: limiters.lend,
           log,
@@ -120,7 +121,12 @@ const startBotHosting = (
         await bots.resume(owns)
         return bots
       }),
-      (bots) => Effect.promise(() => bots.close()),
+      (bots) =>
+        Effect.promise(async () => {
+          // No tick fires for a bot that is going offline.
+          await workflows?.close()
+          await bots.close()
+        }),
     )
     return { bots, workflows, limiters }
   })

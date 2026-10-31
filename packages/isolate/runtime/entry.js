@@ -1,6 +1,6 @@
 // The isolate's main module. One request runs the agent's code once and reports what happened:
-// a script's default export, a workflow's listeners for one Gateway event, or a probe of which
-// events and intents a workflow's clients declare.
+// a script's default export, a workflow's listeners for one Gateway event or schedule tick, or a
+// probe of which events, intents, and schedules a workflow's clients declare.
 // `discord.js` and `script.js` are CommonJS modules beside this one; importing them yields
 // `module.exports`.
 import { format } from 'node:util'
@@ -95,9 +95,41 @@ const deliver = async (event, user) => {
   await settle()
 }
 
+/** Hand one schedule tick to each client that declared its cron. */
+const fire = async ({ cron, scheduledAt }, user) => {
+  for (const client of workflowClients()) {
+    client.user = new ClientUser(client, user)
+    if (client.options.schedules?.includes(cron)) {
+      client.emit('schedule', { cron, scheduledAt: new Date(scheduledAt) })
+    }
+  }
+  await settle()
+}
+
+/** A client's own schedules, which only its own `schedule` listeners hear. */
+const schedulesOf = (client) => {
+  const schedules = client.options.schedules ?? []
+  if (!Array.isArray(schedules)) {
+    throw new TypeError("A Client's schedules option must be an array of cron expressions.")
+  }
+  const listening = client.listenerCount('schedule') > 0
+  if (schedules.length > 0 && !listening) {
+    throw new TypeError(
+      "A Client declares schedules, but nothing listens for them: add client.on('schedule', (tick) => { ... }) on that Client.",
+    )
+  }
+  if (schedules.length === 0 && listening) {
+    throw new TypeError(
+      "A Client listens for 'schedule', but declares no schedules: list cron expressions in its schedules option.",
+    )
+  }
+  return schedules
+}
+
 const probe = () => {
   const clients = workflowClients()
   return {
+    schedules: [...new Set(clients.flatMap(schedulesOf))],
     events: [
       ...new Set(
         clients.flatMap((client) =>
@@ -113,13 +145,14 @@ const probe = () => {
 
 export default {
   async fetch(request) {
-    const { user, event, probe: probing } = await request.json()
+    const { user, event, tick, probe: probing } = await request.json()
     const logs = captureConsole()
     try {
       // Loaded here, not at the top, so a failing import is the agent's error, not workerd's.
       const script = (await import('./script.js')).default.default
       let result
       if (event !== undefined) result = await deliver(event, user)
+      else if (tick !== undefined) result = await fire(tick, user)
       else if (probing) result = probe()
       else {
         if (typeof script !== 'function') {

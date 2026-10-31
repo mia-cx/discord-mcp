@@ -33,6 +33,13 @@ export interface GatewayEvent {
   readonly d: Record<string, unknown>
 }
 
+/** One firing of a workflow's cron schedule. */
+export interface ScheduleTick {
+  readonly cron: string
+  /** When it was due, as an ISO 8601 string. Well in the past when a missed tick catches up. */
+  readonly scheduledAt: string
+}
+
 export type ScriptOutcome =
   | {
       readonly outcome: 'completed'
@@ -61,9 +68,13 @@ export interface ScriptExecution {
   readonly modules: ReadonlyArray<ScriptModule>
   /**
    * What to run. Omitted, the script's default export; `event`, a workflow's listeners for one
-   * Gateway dispatch; `probe`, a report of the events and intents a workflow's clients declare.
+   * Gateway dispatch; `tick`, its `schedule` listeners for one firing of a cron schedule; `probe`,
+   * a report of the events, intents, and schedules a workflow's clients declare.
    */
-  readonly input?: { readonly event: GatewayEvent } | { readonly probe: true }
+  readonly input?:
+    | { readonly event: GatewayEvent }
+    | { readonly tick: ScheduleTick }
+    | { readonly probe: true }
   /**
    * Takes a slot set aside for interactions, which Discord expects answered within three seconds,
    * so it never waits behind ordinary runs.

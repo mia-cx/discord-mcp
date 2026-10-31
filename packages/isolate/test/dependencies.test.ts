@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { manualClock } from '@discord-mcp/bot-host/testing'
 import { inMemoryStorage } from '@discord-mcp/storage/testing'
 import { OperationCatalog } from '@mia-cx/discord-catalog'
 import { Effect } from 'effect'
@@ -96,7 +97,8 @@ const setup = async () => {
   const host = makeWorkflowHost({
     storage,
     isolates: makeIsolateHost(),
-    bots: { hold: async () => {}, updatePresence: () => {} },
+    bots: { hold: async () => {}, updatePresence: () => {}, tokenOf: () => undefined },
+    clock: manualClock(),
     operations: catalog.all,
     registry: registry.url,
     rest: () => ({

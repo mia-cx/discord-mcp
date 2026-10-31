@@ -138,8 +138,8 @@ macOS, and Windows.
 
 ## Workflows
 
-A workflow is discord.js code that runs as the bot on Gateway events, while no agent is
-connected. It is written like an ordinary bot:
+A workflow is discord.js code that runs as the bot on Gateway events and cron schedules,
+while no agent is connected. It is written like an ordinary bot:
 
 ```ts
 import { Client, Events, GatewayIntentBits } from 'discord.js'
@@ -156,8 +156,8 @@ client.login(process.env.DISCORD_TOKEN)
 ```
 
 `discord_workflow_publish` bundles the source with esbuild and loads it once in workerd to
-find the events its clients listen for and the intents they declare, then stores the bundle as
-the workflow's next immutable revision.
+find the events its clients listen for and the intents and schedules they declare, then stores
+the bundle as the workflow's next immutable revision.
 
 A workflow may import npm packages listed in `dependencies`, with a version, range, or tag;
 pass a `package-lock.json` as `lockfile` to pin every version. npm installs them from the
@@ -170,8 +170,8 @@ built at runtime, or made inside a dependency, gets past them. Installs are capp
 and two at a time per bot host. discord.js and `textile` always come from the platform, even
 for a package that installs its own.
 
-`discord_workflow_enable` runs a revision and returns its grants and intents; Discord's
-privileged intents must be on in the Developer Portal first. While any workflow is
+`discord_workflow_enable` runs a revision and returns its grants, intents, and schedules;
+Discord's privileged intents must be on in the Developer Portal first. While any workflow is
 enabled, the bot stays online without agent calls. After a restart, workflows also run the
 events Discord replays.
 
@@ -183,6 +183,25 @@ may receive partial objects. Each workflow receives only the events its own inte
 A guild's events run in order; interactions run at once. The bot's own messages are not delivered. Grants work as for scripts. A
 workflow may also answer the interaction it is handling (`reply`, `deferReply`, `editReply`,
 `followUp`) with the `interaction` and `webhook` families, and set the bot's presence.
+
+To run on a schedule, a client lists five-field cron expressions, in UTC, in a `schedules`
+option and listens for `schedule`:
+
+```ts
+const client = new Client({ intents: [], schedules: ['0 9 * * *'] })
+
+client.on('schedule', async ({ cron, scheduledAt }) => {
+  const channel = await client.channels.fetch('123456789012345678')
+  await channel.send(`Digest for ${scheduledAt.toISOString().slice(0, 10)}`)
+})
+```
+
+A workflow declares at most ten schedules, which together fire at most every five minutes, and
+each client hears only its own schedules. Each tick
+runs once, however many bot hosts there are, and schedules start when the workflow is enabled.
+A tick missed while the bot's host was down, or the bot was offline, runs once, late, when the
+bot is back online: each schedule runs its most recent missed tick and skips the earlier ones,
+and `scheduledAt` says when it was due.
 
 A workflow keeps state between events in its own key-value store:
 
@@ -200,8 +219,8 @@ either throws and stores nothing. Only one guild's non-interaction events run in
 interactions, direct messages from different channels, and other guilds' events run at the
 same time, so their writes to one key can interleave, and the last one wins.
 
-`discord_workflow_logs` shows the bot's recent runs, newest first: each run's event,
-outcome, error, and console output, filtered by workflow or to failures only. A run keeps up
+`discord_workflow_logs` shows the bot's recent runs, newest first: each run's event (or
+`schedule <cron>` for a tick), outcome, error, and console output, filtered by workflow or to failures only. A run keeps up
 to 16,384 characters of output; one that timed out or crashed keeps none. Bot and interaction tokens in
 logs and errors read `[redacted]`. Runs stay readable for 7 days, up to the newest 1,000 per
 workflow. Bot hosts delete expired runs at startup, and at most hourly while workflows run.
@@ -339,9 +358,12 @@ bot keeps its shard count and gets a new 24-hour timer.
 
 Set `DATABASE_URL`, `TOKEN_VAULT_KEY` (generate it like `OAUTH_ENCRYPTION_KEY`), and a
 `DISCORD_OAUTH_ALLOWED_USER_IDS` list. Without that list, the server logs a warning and
-serves the plain relay. Back up the vault key apart from the database: without it, stored
-tokens cannot be decrypted. Publishing a workflow with dependencies runs `npm` from `PATH`
-and needs HTTPS access to `registry.npmjs.org`.
+serves the plain relay. `DATABASE_URL` must reach the Postgres primary directly, with no
+pooler such as PgBouncer in between: each bot's schedules fire only on the process holding
+its session advisory lock, on a connection that sets its own TCP keepalives. Back up the
+vault key apart from the database: without it, stored tokens cannot be decrypted.
+Publishing a workflow with dependencies runs `npm` from `PATH` and needs HTTPS access to
+`registry.npmjs.org`.
 
 #### Voice
 

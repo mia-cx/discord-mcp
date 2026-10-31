@@ -1,6 +1,7 @@
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
-import { Pool } from 'pg'
+import { Client, Pool } from 'pg'
+import { advisoryLocks } from './locks.ts'
 import * as schema from './schema.ts'
 import { createStorage, migrationsFolder, rootMessage } from './store.ts'
 
@@ -28,6 +29,8 @@ export interface WorkflowRevision {
   readonly events: ReadonlyArray<string>
   /** The Gateway intents its clients declare, as a bitfield. */
   readonly intents: number
+  /** The cron expressions its clients declare, in UTC. */
+  readonly schedules: ReadonlyArray<string>
   /** The Discord user ID of the human who published it. */
   readonly publishedBy: string
   readonly publishedAt: Date
@@ -55,7 +58,7 @@ export type WorkflowRunOutcome = 'completed' | 'threw' | 'timed_out' | 'crashed'
 export interface WorkflowRun {
   readonly workflowId: string
   readonly revision: number
-  /** The Gateway dispatch it ran for, such as MESSAGE_CREATE. */
+  /** What it ran for: a Gateway dispatch, such as MESSAGE_CREATE, or `schedule <cron>`. */
   readonly event: string
   readonly outcome: WorkflowRunOutcome
   readonly error: string | null
@@ -89,7 +92,18 @@ export interface PublishWorkflow {
   readonly grants: WorkflowGrants
   readonly events: ReadonlyArray<string>
   readonly intents: number
+  readonly schedules: ReadonlyArray<string>
   readonly actorId: string
+}
+
+/** An enabled workflow revision that runs on schedules, and how far they have fired. */
+export interface ScheduledWorkflow {
+  readonly botId: string
+  readonly name: string
+  readonly revision: number
+  readonly schedules: ReadonlyArray<string>
+  /** Every tick up to this instant has fired, or fell before the revision was enabled. */
+  readonly cursor: Date
 }
 
 /**
@@ -118,12 +132,16 @@ export interface Storage {
     name: string,
     revision?: number,
   ) => Promise<WorkflowRevision | undefined>
-  /** Run `revision`, or nothing when null. False when the workflow or revision does not exist. */
+  /**
+   * Run `revision`, or nothing when null, with its schedules owing every tick after `at`, the
+   * time of the change. False when the workflow or revision does not exist.
+   */
   readonly setEnabledRevision: (
     botId: string,
     name: string,
     revision: number | null,
     actorId: string,
+    at: Date,
   ) => Promise<boolean>
   /** Delete a workflow and its revisions. False when it does not exist. */
   readonly deleteWorkflow: (botId: string, name: string, actorId: string) => Promise<boolean>
@@ -131,6 +149,24 @@ export interface Storage {
   readonly enabledRevisions: (botId?: string) => Promise<ReadonlyArray<WorkflowRevision>>
   /** A bot's most recent workflow changes, newest first, deleted workflows included. */
   readonly workflowChanges: (botId: string, limit: number) => Promise<ReadonlyArray<WorkflowChange>>
+  /** Every bot's enabled revisions with schedules. */
+  readonly scheduledWorkflows: () => Promise<ReadonlyArray<ScheduledWorkflow>>
+  /**
+   * Move a scheduled workflow's cursor from `from` to `to`. False, changing nothing, when its
+   * cursor is no longer `from` or another revision runs: someone else fired those ticks.
+   */
+  readonly advanceScheduleCursor: (
+    workflow: Pick<ScheduledWorkflow, 'botId' | 'name' | 'revision'>,
+    from: Date,
+    to: Date,
+  ) => Promise<boolean>
+  /**
+   * Take the Postgres session advisory lock that lets one process fire a bot's schedules. True
+   * while this process holds it, until `unlockSchedules`, `close`, or a lost connection releases
+   * it. Lock one bot at a time.
+   */
+  readonly lockSchedules: (botId: string) => Promise<boolean>
+  readonly unlockSchedules: (botId: string) => Promise<void>
   /** A workflow's stored value for `key`, as JSON text. */
   readonly loadWorkflowValue: (workflowId: string, key: string) => Promise<string | undefined>
   /**
@@ -166,21 +202,26 @@ export interface SealedSession {
 
 const CONNECT_TIMEOUT_MS = 10_000
 const QUERY_TIMEOUT_MS = 30_000
+/** The lock session's TCP keepalives: idle seconds before probing, and probes before giving up. */
+const KEEPALIVE_IDLE_S = 10
+const KEEPALIVE_PROBES = 3
 
 /**
  * Connect to Postgres and apply pending migrations before anything reads or writes.
  * `onError` hears connection failures outside a query, such as Postgres restarting; the pool
- * replaces the lost connection on next use.
+ * replaces the lost connection on next use. `url` must reach the primary directly, with no pooler:
+ * the scheduler's session locks need a session of their own, which sets its own keepalives.
  */
 export const connectStorage = async (
   url: string,
   onError: (error: Error) => void,
 ): Promise<Storage> => {
-  const pool = new Pool({
+  const options = {
     connectionString: url,
     connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
     query_timeout: QUERY_TIMEOUT_MS,
-  })
+  }
+  const pool = new Pool(options)
   pool.on('error', onError)
   const db = drizzle(pool, { schema })
   try {
@@ -191,5 +232,33 @@ export const connectStorage = async (
       cause,
     })
   }
-  return createStorage(db, () => pool.end())
+  const locks = advisoryLocks(async (onLost) => {
+    // Keepalives on both ends notice a dead connection within a minute. Postgres then ends the
+    // session and releases its locks, so another bot host can fire the bots this one held. The
+    // server's are set on the session, leaving DATABASE_URL to mean what it means to the pool.
+    const client = new Client({
+      ...options,
+      keepAlive: true,
+      keepAliveInitialDelayMillis: KEEPALIVE_IDLE_S * 1000,
+    })
+    client.on('error', (error) => {
+      onError(error)
+      onLost()
+    })
+    client.on('end', onLost)
+    await client.connect()
+    try {
+      await client.query(
+        `set tcp_keepalives_idle = ${KEEPALIVE_IDLE_S}; set tcp_keepalives_interval = ${KEEPALIVE_IDLE_S}; set tcp_keepalives_count = ${KEEPALIVE_PROBES}`,
+      )
+    } catch (error) {
+      await client.end()
+      throw error
+    }
+    return {
+      query: async (text, values) => (await client.query(text, [...values])).rows,
+      close: () => client.end(),
+    }
+  })
+  return createStorage(db, locks, () => pool.end())
 }

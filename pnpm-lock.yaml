@@ -278,6 +278,10 @@ importers:
       workerd:
         specifier: 1.20261030.1
         version: 1.20261030.1
+    devDependencies:
+      '@discord-mcp/bot-host':
+        specifier: workspace:*
+        version: link:../bot-host
 
   packages/persistence:
     dependencies:
@@ -321,6 +325,9 @@ importers:
       '@discord-mcp/discord-api':
         specifier: workspace:*
         version: link:../discord-api
+      '@discord-mcp/isolate':
+        specifier: workspace:*
+        version: link:../isolate
       '@discord-mcp/persistence':
         specifier: workspace:*
         version: link:../persistence

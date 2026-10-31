@@ -2,14 +2,17 @@ import { defineTool, ValidationError } from '@discord-mcp/core'
 import { DiscordRest } from '@discord-mcp/discord-api/relay'
 import type { WorkflowRevision } from '@discord-mcp/storage'
 import { Context, Effect, Schema } from 'effect'
+import { MIN_SCHEDULE_INTERVAL_MINUTES } from './cron.ts'
 import { GrantsInput, resolveGrants } from './tool.ts'
 import {
   EVENT_TIMEOUT_MS,
   intentNames,
   KV_KEY_LIMIT_BYTES,
   KV_LIMIT_BYTES,
+  MAX_SCHEDULES,
   RUN_RETENTION_MS,
   RUNS_KEPT,
+  SCHEDULE_EVENT,
   WORKFLOW_EVENTS,
   type WorkflowHost,
 } from './workflows.ts'
@@ -45,6 +48,7 @@ const describeRevision = ({
   revision,
   events,
   intents,
+  schedules,
   grants,
   packages,
 }: WorkflowRevision) => ({
@@ -52,6 +56,7 @@ const describeRevision = ({
   revision,
   events,
   intents: intentNames(intents),
+  schedules,
   grants,
   packages,
 })
@@ -76,9 +81,10 @@ export const workflowPublish = defineTool({
   name: 'discord_workflow_publish',
   title: 'Publish a workflow',
   description: [
-    "Publish discord.js code that runs as this bot on Gateway events, even while no agent is connected. Each publish stores the workflow's next immutable revision; it runs only once enabled with discord_workflow_enable.",
+    "Publish discord.js code that runs as this bot on Gateway events and cron schedules, even while no agent is connected. Each publish stores the workflow's next immutable revision; it runs only once enabled with discord_workflow_enable.",
     `\`source\` is a module that creates a discord.js Client at the top level and adds listeners, as an ordinary bot does; \`login()\` does nothing. It can listen for ${Object.keys(WORKFLOW_EVENTS).join(', ')}, and receives the events its Client's intents cover. No top-level await.`,
     "Import discord.js, textile, node:*, and the npm packages listed in `dependencies`; pass a `lockfile` to pin every version. Packages install without their install scripts and are bundled for the isolate; one that can't run there fails the publish. The result's `packages` lists every version installed.",
+    `To run on a schedule, list up to ${MAX_SCHEDULES} five-field cron expressions, in UTC and together at least ${MIN_SCHEDULE_INTERVAL_MINUTES} minutes apart, in the Client's \`schedules\` option, and listen for \`${SCHEDULE_EVENT}\` on that Client: \`new Client({ intents: [], schedules: ['0 9 * * *'] })\`, then \`client.on('${SCHEDULE_EVENT}', async ({ cron, scheduledAt }) => { ... })\`. Each tick runs once. A tick missed while the bot host was down or the bot offline runs late, once per schedule, when the bot is back online; earlier missed ticks are skipped, and \`scheduledAt\` says when it was due.`,
     `Each event runs in a fresh isolate for at most ${EVENT_TIMEOUT_MS / 1000} seconds, so nothing in memory lasts between events: publishing refuses collectors and awaitMessages, which would never fire, and URL attachments, since workflows can't upload files. Caches start empty, so listeners may receive partial objects (check \`.partial\` and fetch). Without MessageContent, guild messages arrive without content unless they mention the bot. Events of one guild run in order. The bot's own messages are not delivered.`,
     `To remember things between events, \`import { kv } from 'textile'\`: \`await kv.get(key)\` returns the stored value or undefined, \`await kv.set(key, value)\` stores any JSON value, and \`await kv.delete(key)\` removes it. State belongs to the workflow: it lasts across events, revisions, and restarts, and goes when the workflow is deleted. Keys and values together take at most ${KV_LIMIT_BYTES / 1024} KiB, and a key at most ${KV_KEY_LIMIT_BYTES} bytes; a set past either throws and stores nothing. Only one guild's non-interaction events run in order: interactions, direct messages from different channels, and other guilds' events run at the same time, so their writes to one key can interleave and the last one wins. Read console output and failures with discord_workflow_logs.`,
     'Every request the workflow makes is checked against `grants`, as for discord_script_run. Answering an interaction (reply, deferReply, editReply, followUp) needs the `interaction` and `webhook` families or those operations, and works only for the interaction being handled. setPresence needs no grant.',
@@ -112,7 +118,7 @@ export const workflowList = defineTool({
   name: 'discord_workflow_list',
   title: 'List workflows',
   description:
-    "List this bot's workflows: each one's latest revision, and the revision it runs with its events, intents, grants, and installed packages. `changes` lists the 20 most recent publishes, enables, disables, and deletes, newest first, with the Discord user ID of the human who made each.",
+    "List this bot's workflows: each one's latest revision, and the revision it runs with its events, intents, schedules, grants, and installed packages. `changes` lists the 20 most recent publishes, enables, disables, and deletes, newest first, with the Discord user ID of the human who made each.",
   toolset: 'api',
   risk: 'read',
   scopes: [],
@@ -136,7 +142,7 @@ export const workflowEnable = defineTool({
   name: 'discord_workflow_enable',
   title: 'Enable a workflow',
   description:
-    "Run a workflow revision, the latest by default, on this bot's Gateway events, replacing the revision it ran before. While any workflow is enabled the bot stays online without agent calls. Returns the grants and intents the revision runs with: show them to the human you act for. Privileged intents (MessageContent, GuildMembers, GuildPresences) must be turned on in the Discord Developer Portal first.",
+    "Run a workflow revision, the latest by default, on this bot's Gateway events and its schedules, replacing the revision it ran before. Schedules start from now. While any workflow is enabled the bot stays online without agent calls. Returns the grants, intents, and schedules the revision runs with: show them to the human you act for. Privileged intents (MessageContent, GuildMembers, GuildPresences) must be turned on in the Discord Developer Portal first.",
   toolset: 'api',
   risk: 'destructive',
   scopes: [],
@@ -216,7 +222,7 @@ export const workflowLogs = defineTool({
   name: 'discord_workflow_logs',
   title: 'Read workflow logs',
   description: [
-    `This bot's recent workflow runs, newest first: the workflow and revision, the Gateway event, the outcome (completed, threw, timed_out, crashed, or skipped when it never started), the error, and what it logged with console. Runs stay readable for ${RUN_RETENTION_MS / (24 * 60 * 60 * 1000)} days, up to the newest ${RUNS_KEPT} per workflow.`,
+    `This bot's recent workflow runs, newest first: the workflow and revision, the Gateway event or \`schedule <cron>\` for a tick, the outcome (completed, threw, timed_out, crashed, or skipped when it never started), the error, and what it logged with console. Runs stay readable for ${RUN_RETENTION_MS / (24 * 60 * 60 * 1000)} days, up to the newest ${RUNS_KEPT} per workflow.`,
     'Each run keeps up to 16,384 characters of console output. A run that timed out or crashed keeps none. Bot and interaction tokens in logs and errors read [redacted].',
   ].join('\n\n'),
   toolset: 'api',

@@ -7,9 +7,11 @@ export {
   type GatewayEvent,
   type IsolateHost,
   makeIsolateHost,
+  type ScheduleTick,
   type ScriptExecution,
   type ScriptOutcome,
 } from './isolate-host.ts'
+export type { SchedulerClock } from './schedules.ts'
 export { ScriptRunner, scriptRun } from './tool.ts'
 export { Workflows, workflowTools } from './workflow-tools.ts'
 export {

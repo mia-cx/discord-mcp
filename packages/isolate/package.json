@@ -8,10 +8,17 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./cron": {
+      "types": "./dist/cron.d.ts",
+      "default": "./dist/cron.js"
+    },
     "./testing": {
       "types": "./dist/testing.d.ts",
       "default": "./dist/testing.js"
     }
+  },
+  "devDependencies": {
+    "@discord-mcp/bot-host": "workspace:*"
   },
   "dependencies": {
     "@discord-mcp/core": "workspace:*",
