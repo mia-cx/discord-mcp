@@ -49,6 +49,8 @@ inference; it relays Discord to agents and runs agent-written code. v1 serves al
 - **Voice.** A bidirectional voice WebSocket relays Discord voice, per speaker. Agents bring their
   own speech-to-speech or local models; Textile never runs them.
 - **Storage.** Postgres on CloudNativePG, accessed through Drizzle.
+- **Environments.** The olympus k3s homelab is dev and staging. Production runs on a managed
+  Kubernetes provider, not yet chosen, so Textile uses only portable Kubernetes features.
 
 ## Current implementation
 
