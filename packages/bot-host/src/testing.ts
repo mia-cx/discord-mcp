@@ -51,6 +51,9 @@ export const fakeGateway = async (
   const { port } = server.address() as AddressInfo
   const url = `ws://127.0.0.1:${port}`
   const connections: FakeConnection[] = []
+  /** The bot's voice channel in each server, so only a move sends a new voice server. */
+  const voiceChannels = new Map<string, string | null>()
+  const rest: Array<{ readonly method: string; readonly path: string; readonly body: unknown }> = []
   server.on('connection', (socket, request) => {
     const connection: FakeConnection = {
       path: request.url ?? '/',
@@ -85,7 +88,9 @@ export const fakeGateway = async (
           s: ++sequence,
           d: { guild_id, channel_id, user_id: voice.botId, session_id: 'fake-voice-session' },
         })
-        if (channel_id !== null) {
+        const moved = voiceChannels.get(guild_id) !== channel_id
+        voiceChannels.set(guild_id, channel_id)
+        if (channel_id !== null && moved) {
           connection.send({
             op: 0,
             t: 'VOICE_SERVER_UPDATE',
@@ -103,33 +108,52 @@ export const fakeGateway = async (
   return {
     url,
     connections,
+    /** REST calls other than `GET /gateway/bot`, oldest first, with their parsed JSON bodies. */
+    rest,
     /**
      * A `fetch` that answers `GET /gateway/bot` with this fake's URL, `shards` recommended
-     * shards, and a fresh daily Identify budget, unless overridden.
+     * shards, and a fresh daily Identify budget, unless overridden. It posts channel messages,
+     * unless `sendMessages` is false, when Discord refuses them as it does without Send Messages,
+     * and accepts interaction responses.
      */
     discordFetch:
       ({
         shards = 1,
         maxConcurrency = 1,
         remaining = 1000,
+        sendMessages = true,
       }: {
         shards?: number
         maxConcurrency?: number
         remaining?: number
+        sendMessages?: boolean
       } = {}): typeof fetch =>
-      async (input) =>
-        new URL(String(input)).pathname.endsWith('/gateway/bot')
-          ? Response.json({
-              url,
-              shards,
-              session_start_limit: {
-                total: 1000,
-                remaining,
-                reset_after: 24 * 60 * 60 * 1000,
-                max_concurrency: maxConcurrency,
-              },
-            })
-          : new Response(null, { status: 404 }),
+      async (input, init) => {
+        const path = new URL(String(input)).pathname.replace(/^\/api\/v10/, '')
+        if (path === '/gateway/bot') {
+          return Response.json({
+            url,
+            shards,
+            session_start_limit: {
+              total: 1000,
+              remaining,
+              reset_after: 24 * 60 * 60 * 1000,
+              max_concurrency: maxConcurrency,
+            },
+          })
+        }
+        const method = init?.method ?? 'GET'
+        rest.push({ method, path, body: init?.body ? JSON.parse(String(init.body)) : undefined })
+        if (method === 'POST' && /^\/channels\/\d+\/messages$/.test(path)) {
+          return sendMessages
+            ? Response.json({ id: '111111111111111111' })
+            : Response.json({ message: 'Missing Permissions', code: 50013 }, { status: 403 })
+        }
+        if (method === 'POST' && /^\/interactions\/\d+\/[^/]+\/callback$/.test(path)) {
+          return new Response(null, { status: 204 })
+        }
+        return new Response(null, { status: 404 })
+      },
     close: () =>
       new Promise<void>((resolve) => {
         for (const client of server.clients) client.terminate()
