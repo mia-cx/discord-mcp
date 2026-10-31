@@ -76,8 +76,10 @@ const start = async () => {
   const gateway = await fakeGateway(undefined, { botId: BOT_ID, endpoint: voiceServer.endpoint })
   const bots = createBotRuntimes({
     vault: createTokenVault(Buffer.alloc(32, 1), storage),
+    storage,
     clock: manualClock(),
     log: () => {},
+    self: 'bot-host-0',
     discordFetch: gateway.discordFetch(),
   })
   cleanup.push(storage.close, voiceServer.close, gateway.close, bots.close)
@@ -92,6 +94,7 @@ const start = async () => {
   const members = { hosts: [host.url], secret: SECRET }
   host.use(
     createBotHost({ ...members, self: host.url }, executor(restLayer, { bots }), {
+      bots,
       upgrade: createVoiceUpgrade({ bots, checkToken: createTokenCheck({ rest, restLayer }) }),
     }),
   )

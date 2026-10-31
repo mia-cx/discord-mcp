@@ -1,7 +1,7 @@
 import type { Clock } from './clock.ts'
 
 /** Discord allows one Identify per five seconds in each concurrency bucket. */
-const IDENTIFY_INTERVAL_MS = 5_000
+export const IDENTIFY_INTERVAL_MS = 5_000
 const DAY_MS = 24 * 60 * 60 * 1000
 
 /** A bot's Identify limits, from `session_start_limit` in `GET /gateway/bot`. */
@@ -40,15 +40,34 @@ interface Bucket {
   /** Shards waiting to identify, first come first served. */
   readonly waiting: Array<() => void>
   freeAt: number
+  /** Asking other hosts for the bucket's turn. */
+  claiming: boolean
   /** Cancels the wake-up for the first waiting shard. */
   cancel: () => void
 }
 
+/** Turns at identifying, shared with every other host running the bot's shards. */
+export interface SharedTurns {
+  /** How long each turn lasts: Discord's five seconds and some to spare. */
+  readonly ms: number
+  /**
+   * Take a bucket's turn. Resolves 0 once taken, or the milliseconds until the current turn
+   * ends. Never rejects.
+   */
+  readonly claim: (bucket: number) => Promise<number>
+}
+
 /**
  * Discord resets a bot's token once it spends its daily Identifies. The gate reserves at most half
- * of what remains, leaving the rest to the bot's other clients and to the next process.
+ * of what remains, leaving the rest to the bot's other clients and to the next process. With
+ * `turns`, each turn is also taken from other hosts identifying the bot's other shards.
  */
-export const createIdentifyGate = (clock: Clock, limit: SessionStartLimit): IdentifyGate => {
+export const createIdentifyGate = (
+  clock: Clock,
+  limit: SessionStartLimit,
+  turns?: SharedTurns,
+): IdentifyGate => {
+  const spacingMs = turns?.ms ?? IDENTIFY_INTERVAL_MS
   let allowance = Math.floor(limit.remaining / 2)
   let resetsAt = clock.now() + limit.resetAfter
   /** Reservations not yet sent or given back. */
@@ -68,28 +87,38 @@ export const createIdentifyGate = (clock: Clock, limit: SessionStartLimit): Iden
   }
   // Identify the bucket's next shard if it is free, else wake when it frees. Spacing counts from
   // each Identify actually sent, so timers that fire late never send two at once.
-  const drain = (bucket: Bucket) => {
-    const [next] = bucket.waiting
-    if (next === undefined) return
+  const drain = (key: number, bucket: Bucket) => {
+    if (bucket.waiting.length === 0 || bucket.claiming) return
     const now = clock.now()
     if (now < bucket.freeAt) {
-      bucket.cancel = clock.schedule(() => drain(bucket), bucket.freeAt - now)
+      bucket.cancel = clock.schedule(() => drain(key, bucket), bucket.freeAt - now)
       return
     }
-    bucket.waiting.shift()
-    bucket.freeAt = now + IDENTIFY_INTERVAL_MS
-    next()
-    drain(bucket)
+    if (turns === undefined) return identify(key, bucket)
+    bucket.claiming = true
+    void turns.claim(key).then((waitMs) => {
+      bucket.claiming = false
+      if (waitMs === 0) return identify(key, bucket)
+      bucket.freeAt = clock.now() + waitMs
+      drain(key, bucket)
+    })
+  }
+  const identify = (key: number, bucket: Bucket) => {
+    bucket.freeAt = clock.now() + spacingMs
+    // A shard withdrawn while claiming leaves the turn to the next, if any.
+    bucket.waiting.shift()?.()
+    drain(key, bucket)
   }
   const bucketOf = (shardId: number) => {
     const key = shardId % limit.maxConcurrency
     const bucket = buckets.get(key) ?? {
       waiting: [],
       freeAt: Number.NEGATIVE_INFINITY,
+      claiming: false,
       cancel: () => {},
     }
     buckets.set(key, bucket)
-    return bucket
+    return { key, bucket }
   }
   return {
     reserve: () => {
@@ -109,19 +138,19 @@ export const createIdentifyGate = (clock: Clock, limit: SessionStartLimit): Iden
       return { spend: () => settle(false), release: () => settle(true) }
     },
     reopensIn: () => resetsAt - refill(),
-    whenFree: (shardId, identify) => {
-      const bucket = bucketOf(shardId)
+    whenFree: (shardId, send) => {
+      const { key, bucket } = bucketOf(shardId)
       // Its own function, so withdrawing removes this ask and no other.
-      const ask = () => identify()
+      const ask = () => send()
       bucket.waiting.push(ask)
-      if (bucket.waiting.length === 1) drain(bucket)
+      if (bucket.waiting.length === 1) drain(key, bucket)
       return () => {
         const index = bucket.waiting.indexOf(ask)
         if (index === -1) return
         bucket.waiting.splice(index, 1)
         if (index > 0) return
         bucket.cancel()
-        drain(bucket)
+        drain(key, bucket)
       }
     },
   }

@@ -50,6 +50,13 @@
       "when": 1793470987369,
       "tag": "0006_workflow_routes",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1793472831257,
+      "tag": "0008_shard_leases",
+      "breakpoints": true
     }
   ]
 }

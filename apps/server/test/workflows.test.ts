@@ -172,8 +172,12 @@ const platform = async (shards = 1) => {
   let workflows: WorkflowHost | undefined
   const bots: BotRuntimes = createBotRuntimes({
     vault: createTokenVault(Buffer.alloc(32, 1), storage),
+    storage,
     clock,
     log,
+    self: 'bot-host-0',
+    // Leases are proven in the bot-host suite; keep their lapses out of these two days.
+    leaseTtlMs: 1000 * HOUR,
     discordFetch: gateway.discordFetch({ shards, maxConcurrency: shards }),
     // Every shard's events, as the server wires them.
     onDispatch: (botId, t, d) => {

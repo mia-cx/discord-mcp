@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createServer, type IncomingMessage } from 'node:http'
+import { hostname } from 'node:os'
 import type { Duplex } from 'node:stream'
 import {
   type BotRuntimes,
@@ -14,7 +15,12 @@ import {
   RateGuard,
   type RestConfig,
 } from '@discord-mcp/discord-api/relay'
-import { makeIsolateHost, makeWorkflowHost, type WorkflowHost } from '@discord-mcp/isolate'
+import {
+  makeIsolateHost,
+  makeWorkflowHost,
+  type WorkflowEvent,
+  type WorkflowHost,
+} from '@discord-mcp/isolate'
 import { connectStorage } from '@discord-mcp/storage'
 import { NodeRuntime } from '@effect/platform-node'
 import { serveStdio } from '@modelcontextprotocol/server/stdio'
@@ -35,6 +41,7 @@ import {
   forwardRoutesToBotHosts,
   forwardToBotHosts,
   forwardVoiceToBotHosts,
+  routeDispatches,
 } from './tiers.ts'
 import { createVoiceUpgrade } from './voice.ts'
 
@@ -47,15 +54,32 @@ const csv = (value: string) =>
 
 const VAULT_KEY_BYTES = 32
 
+/** Where this process sits among the bot hosts sharing the database. */
+interface Placement {
+  /** This host's name among them, such as its URL. */
+  readonly self: string
+  readonly hostCount: number
+  /** Whether this host's list makes it the bot's REST owner, which restores its workflows. */
+  readonly owns: (botId: string) => boolean
+  /**
+   * Where the workflow events of this host's shards run: on the bot's REST owner, so their calls
+   * share its one rate limiter.
+   */
+  readonly route: (local: {
+    readonly bots: BotRuntimes
+    readonly workflows: WorkflowHost
+  }) => (event: WorkflowEvent) => void
+}
+
 /**
  * Bot hosting keeps bots online, stores their tokens and Gateway sessions, and runs their
- * workflows, resuming the bots the previous process left online. It starts only with a database
- * and an allowlist naming who may use it; otherwise the process stays a plain relay.
+ * workflows. It starts only with a database and an allowlist naming who may use it; otherwise the
+ * process stays a plain relay.
  */
 const startBotHosting = (
   allowedUserIds: ReadonlyArray<string> | undefined,
   rest: Omit<RestConfig, 'token'>,
-  owns?: (botId: string) => boolean,
+  placement: Placement,
 ) =>
   Effect.gen(function* () {
     const databaseUrl = yield* Config.string('DATABASE_URL').pipe(Config.withDefault(''))
@@ -99,31 +123,40 @@ const startBotHosting = (
     const limiters = createBotLimiters(rest)
     // The runtimes hand events to the workflow host, which needs the runtimes in turn.
     let workflows: WorkflowHost | undefined
+    let route: ((event: WorkflowEvent) => void) | undefined
     const bots = yield* Effect.acquireRelease(
       Effect.promise(async () => {
         const bots: BotRuntimes = createBotRuntimes({
           vault: createTokenVault(vaultKey, storage),
+          storage,
           clock: systemClock,
           log,
+          self: placement.self,
+          hostCount: placement.hostCount,
+          owns: placement.owns,
           onDispatch: (botId, t, d) => {
             const token = bots.tokenOf(botId)
-            if (workflows === undefined || token === undefined) return
+            if (route === undefined || token === undefined) return
             if (typeof d !== 'object' || d === null) return
-            workflows.dispatch({ botId, token, dispatch: { t, d: d as Record<string, unknown> } })
+            route({ botId, token, dispatch: { t, d: d as Record<string, unknown> } })
           },
         })
         workflows = makeWorkflowHost({
           storage,
           isolates: makeIsolateHost(),
-          bots,
+          // Schedules and routes act for a bot only while this host holds its REST lease.
+          bots: {
+            ...bots,
+            tokenOf: (botId) => (bots.serves(botId) ? bots.tokenOf(botId) : undefined),
+          },
           clock: systemClock,
           operations: catalog.all,
           rest: limiters.lend,
           log,
         })
-        // Bots with enabled workflows are held first, so their resumed sessions keep those intents.
-        await workflows.restore(owns)
-        await bots.resume(owns)
+        route = placement.route({ bots, workflows })
+        // Brings the bots with enabled workflows online, wherever their shards run.
+        await workflows.restore(placement.owns)
         return bots
       }),
       (bots) =>
@@ -303,14 +336,18 @@ const main = Effect.gen(function* () {
         }),
       )
     }
-    // Every bot host shares the database, so each resumes only the bots it owns.
-    const hosting = yield* startBotHosting(
-      allowlist,
-      rest,
-      (botId) => ownerOf(members.hosts, botId) === self,
-    )
+    const context = yield* Effect.context<never>()
+    const log = (message: string) => Effect.runForkWith(context)(Effect.log(message))
+    // Every bot host shares the database and runs its share of every online bot's shards.
+    const hosting = yield* startBotHosting(allowlist, rest, {
+      self,
+      hostCount: members.hosts.length,
+      owns: (botId) => ownerOf(members.hosts, botId) === self,
+      route: (local) => routeDispatches({ ...members, self }, local, log),
+    })
     return yield* listen({
       ...createBotHost({ ...members, self }, createExecutor({ rest, scripts, ...hosting }), {
+        ...hosting,
         upgrade: voiceFor(hosting),
         route: hosting?.workflows?.serve,
       }),
@@ -333,7 +370,17 @@ const main = Effect.gen(function* () {
   // Central holds no bot tokens: it only forwards them, voice sockets, and workflow routes to the
   // bot host that owns each bot.
   const members = tier === 'central' ? yield* membership : undefined
-  const hosting = members === undefined ? yield* startBotHosting(allowlist, rest) : undefined
+  // Replicas of one process, such as during a rolling update, share shards like bot hosts, and
+  // each serves every bot's REST traffic.
+  const hosting =
+    members === undefined
+      ? yield* startBotHosting(allowlist, rest, {
+          self: hostname(),
+          hostCount: 1,
+          owns: () => true,
+          route: ({ workflows }) => workflows.dispatch,
+        })
+      : undefined
   const execute =
     members === undefined
       ? createExecutor({ rest, scripts, ...hosting })

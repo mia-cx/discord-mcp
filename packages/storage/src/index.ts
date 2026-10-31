@@ -114,21 +114,59 @@ export interface ScheduledWorkflow {
 
 /**
  * The platform's Postgres tables. Callers get plain functions; Drizzle stays inside this package.
- * Every workflow change records its actor in the same transaction.
+ * Every workflow change records its actor in the same transaction. Times are milliseconds since
+ * the epoch on the caller's clock.
  */
 export interface Storage {
-  /** Insert or replace a bot's token vault envelope. */
+  /**
+   * Insert or replace a bot's token vault envelope. A replaced token ends the bot's sessions and
+   * takes it offline, since Discord ends them too.
+   */
   readonly storeSealedToken: (botId: string, sealedToken: string) => Promise<void>
-  readonly loadSealedToken: (botId: string) => Promise<string | undefined>
-  /** Insert or replace a shard's sealed Gateway session. The bot's token must be stored first. */
+  readonly loadBot: (botId: string) => Promise<StoredBot | undefined>
+  /** Bring a stored bot online until `online.until`, with no sessions to resume. */
+  readonly setBotOnline: (botId: string, online: BotOnline) => Promise<void>
+  /** Extend an online bot's time online. Resolves `false` when the bot is offline. */
+  readonly keepBotOnline: (botId: string, until: number) => Promise<boolean>
+  /** Set an online bot's presence, as JSON. Resolves `false` when the bot is offline. */
+  readonly setBotPresence: (botId: string, presence: string) => Promise<boolean>
+  /**
+   * Take a bot offline and end its sessions. With `idleAt`, only if it has no enabled workflows
+   * and its time online ended by then; with `rejectedCode`, it stays offline until its token is stored again.
+   * Resolves whether it changed.
+   */
+  readonly setBotOffline: (
+    botId: string,
+    options?: { readonly idleAt?: number; readonly rejectedCode?: number },
+  ) => Promise<boolean>
+  /** Every online bot with its sealed token and stored sessions. */
+  readonly loadOnlineBots: () => Promise<ReadonlyArray<OnlineBot>>
+  /** Insert or replace a shard's sealed Gateway session, unless `fence` no longer holds. */
   readonly storeSealedSession: (
     botId: string,
     shardId: number,
     sealedSession: string,
+    fence: Fence,
   ) => Promise<void>
-  readonly deleteSession: (botId: string, shardId: number) => Promise<void>
-  /** Every stored shard session, with its bot's sealed token. */
-  readonly loadSealedSessions: () => Promise<ReadonlyArray<SealedSession>>
+  /** Delete a shard's session, unless `fence` no longer holds. */
+  readonly deleteSession: (botId: string, shardId: number, fence: Fence) => Promise<void>
+  /**
+   * Claim a lease for `ttlMs` unless another holder's lease on it is live. A holder's own lease is
+   * extended. Resolves the lease as it stands afterwards.
+   */
+  readonly claimLease: (name: string, holder: string, now: number, ttlMs: number) => Promise<Lease>
+  /** Extend the live leases among `names` that `holder` has, resolving their names. */
+  readonly renewLeases: (
+    holder: string,
+    names: ReadonlyArray<string>,
+    now: number,
+    ttlMs: number,
+  ) => Promise<ReadonlyArray<string>>
+  readonly releaseLease: (name: string, holder: string) => Promise<void>
+  /** Release every lease `holder` has. */
+  readonly releaseLeases: (holder: string) => Promise<void>
+  /** The names of live leases that start with `prefix`. */
+  readonly liveLeases: (prefix: string, now: number) => Promise<ReadonlyArray<string>>
   /** Store the workflow's next revision, creating the workflow on its first. */
   readonly publishWorkflow: (input: PublishWorkflow) => Promise<WorkflowRevision>
   readonly listWorkflows: (botId: string) => Promise<ReadonlyArray<WorkflowSummary>>
@@ -199,11 +237,44 @@ export interface Storage {
   readonly close: () => Promise<void>
 }
 
-export interface SealedSession {
-  readonly botId: string
-  readonly shardId: number
-  readonly sealedSession: string
+export interface BotOnline {
+  readonly shardCount: number
+  readonly gatewayUrl: string
+  readonly until: number
+}
+
+/** How every host runs a bot's shards while it is online. */
+export interface BotGateway {
+  /** The Gateway intents its shards identify with: every enabled workflow's, as a bitfield. */
+  readonly intents: number
+  /** It has enabled workflows, so it stays online without agent calls. */
+  readonly held: boolean
+  /** Its presence as JSON, or null for plain online. */
+  readonly presence: string | null
+}
+
+export interface StoredBot extends BotGateway {
   readonly sealedToken: string
+  readonly online: BotOnline | undefined
+  /** The close code Discord refused the token with, or null. */
+  readonly rejectedCode: number | null
+}
+
+export interface OnlineBot extends BotOnline, BotGateway {
+  readonly botId: string
+  readonly sealedToken: string
+  readonly sessions: ReadonlyArray<{ readonly shardId: number; readonly sealedSession: string }>
+}
+
+export interface Lease {
+  readonly holder: string
+  readonly expiresAt: number
+}
+
+/** A write lands only while `holder` holds the lease named `lease`. */
+export interface Fence {
+  readonly lease: string
+  readonly holder: string
 }
 
 const CONNECT_TIMEOUT_MS = 10_000

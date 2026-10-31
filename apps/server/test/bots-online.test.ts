@@ -46,7 +46,16 @@ describe('bot hosting', () => {
     const clock = manualClock()
     const log = vi.fn()
     const vault = createTokenVault(Buffer.alloc(32, 1), storage)
-    const bots = createBotRuntimes({ vault, clock, log, discordFetch: gateway.discordFetch() })
+    const bots = createBotRuntimes({
+      vault,
+      storage,
+      clock,
+      log,
+      self: 'bot-host-0',
+      discordFetch: gateway.discordFetch(),
+      // Leases are proven in the bot-host suite; keep their lapses out of this window too.
+      leaseTtlMs: 100 * HOUR,
+    })
     const relay = createRelay(
       config,
       executor(
@@ -62,9 +71,9 @@ describe('bot hosting', () => {
     const { tokens } = await login(relay)
 
     expect((await relay.fetch(listTools(tokens.access_token))).status).toBe(200)
-    await vi.waitFor(async () => expect(await storage.loadSealedToken(BOT_ID)).toBeDefined())
-    expect(await storage.loadSealedToken(BOT_ID)).not.toContain(TOKEN)
-    expect(await vault.load(BOT_ID)).toBe(TOKEN)
+    await vi.waitFor(async () => expect(await storage.loadBot(BOT_ID)).toBeDefined())
+    expect((await storage.loadBot(BOT_ID))?.sealedToken).not.toContain(TOKEN)
+    expect((await vault.load(BOT_ID))?.token).toBe(TOKEN)
     await vi.waitFor(() =>
       expect(gateway.connections[0]?.received[0]).toMatchObject({
         op: 2,
@@ -78,15 +87,21 @@ describe('bot hosting', () => {
     ])
     clock.advance(23 * HOUR)
     await relay.fetch(listTools(tokens.access_token))
+    await vi.waitFor(async () =>
+      expect((await storage.loadBot(BOT_ID))?.online?.until).toBe(47 * HOUR),
+    )
     // 46 hours after first use, but only 23 after the last call.
     clock.advance(23 * HOUR)
+    await new Promise((resolve) => setTimeout(resolve, 100))
     expect(log).not.toHaveBeenCalledWith(expect.stringContaining('went offline'))
 
     clock.advance(HOUR)
     await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(1000))
-    // Its session ended, so a restart leaves it offline.
-    await vi.waitFor(async () => expect(await vault.loadSessions()).toEqual([]))
+    // It is offline in storage, so a restart leaves it offline.
+    expect(await vault.loadOnline()).toEqual([])
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('went offline'))
     expect(gateway.connections).toHaveLength(1)
+    await bots.close()
     await gateway.close()
     await storage.close()
   })

@@ -2,7 +2,14 @@ import { createHash, timingSafeEqual } from 'node:crypto'
 import { request as httpRequest, type IncomingMessage } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import type { Duplex } from 'node:stream'
-import { type RouteRequest, routePath } from '@discord-mcp/isolate'
+import type { BotRuntimes } from '@discord-mcp/bot-host'
+import {
+  type GatewayEvent,
+  type RouteRequest,
+  routePath,
+  type WorkflowEvent,
+  type WorkflowHost,
+} from '@discord-mcp/isolate'
 import { type Execute, json, type OwnerRoutes } from './relay.ts'
 import { botIdFromToken, ownerOf } from './router.ts'
 import { NOT_FORWARDED, routeOf, type ServeRoute } from './routes.ts'
@@ -150,28 +157,128 @@ export const forwardVoiceToBotHosts =
 
 const digest = (value: string) => createHash('sha256').update(value).digest()
 
+/** How long after a workflow event arrives a bot host keeps offering it to the bot's REST owner. */
+const DISPATCH_DEADLINE_MS = 60_000
+const DISPATCH_RETRY_MS = 1_000
+/** How long one offer to another host may take. */
+const DISPATCH_TIMEOUT_MS = 5_000
+
 /**
- * A bot host's internal endpoint. It answers only central, and only for bots it owns, so one bot's
- * REST traffic always meets one rate limiter. `upgrade` takes over voice sockets for those bots,
- * and `route` runs their workflow routes.
+ * A bot host's router for the workflow events its shards receive. Each runs on the bot's REST
+ * owner, on the bot's one rate limiter: here once this host holds the bot's lease, else sent to
+ * the owner's `/dispatch`. A bot's events go one at a time, in order; one its owner can't take
+ * yet is offered again each second until a minute after it arrived, then dropped, so an owner
+ * that is down holds up at most a minute of events.
+ */
+export const routeDispatches = (
+  { hosts, secret, self }: Membership & { readonly self: string },
+  local: {
+    readonly bots: Pick<BotRuntimes, 'own'>
+    readonly workflows: Pick<WorkflowHost, 'dispatch'>
+  },
+  log: (message: string) => void,
+  deadlineMs = DISPATCH_DEADLINE_MS,
+) => {
+  const queues = new Map<string, Promise<void>>()
+  /** Run or send the event. Resolves `undefined` once its owner took it, or why it didn't. */
+  const offer = async (
+    event: WorkflowEvent,
+  ): Promise<{ readonly failure: string; readonly retry: boolean } | undefined> => {
+    const owner = ownerOf(hosts, event.botId)
+    if (owner === self) {
+      // Its previous owner, on an older list, still serves the bot until it restarts.
+      if (!(await local.bots.own(event.botId))) return { failure: 'is another host', retry: true }
+      local.workflows.dispatch(event)
+      return undefined
+    }
+    const response = await fetch(`${owner}/dispatch`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${secret}`,
+        'x-discord-bot-token': event.token,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(event.dispatch),
+      redirect: 'error',
+      signal: AbortSignal.timeout(DISPATCH_TIMEOUT_MS),
+    })
+    await response.body?.cancel()
+    if (response.ok) return undefined
+    // Only a moving owner is worth waiting for.
+    return { failure: `answered ${response.status}`, retry: response.status === 503 }
+  }
+  /** Events dropped by bot since one last went through, so a long outage logs once. */
+  const dropped = new Map<string, number>()
+  const send = async (event: WorkflowEvent, deadline: number) => {
+    let failure = 'took too long'
+    for (let attempt = 0; Date.now() < deadline; attempt += 1) {
+      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, DISPATCH_RETRY_MS))
+      const outcome = await offer(event).catch((cause: unknown) => ({
+        failure: cause instanceof Error ? cause.message : String(cause),
+        retry: true,
+      }))
+      if (outcome === undefined) {
+        const count = dropped.get(event.botId) ?? 0
+        if (count > 0) log(`Bot ${event.botId}'s REST owner is back; ${count} events were dropped.`)
+        dropped.delete(event.botId)
+        return
+      }
+      failure = outcome.failure
+      if (!outcome.retry) break
+    }
+    const count = (dropped.get(event.botId) ?? 0) + 1
+    dropped.set(event.botId, count)
+    if (count === 1)
+      log(`Dropped bot ${event.botId}'s ${event.dispatch.t}: its REST owner ${failure}.`)
+  }
+  return (event: WorkflowEvent) => {
+    const deadline = Date.now() + deadlineMs
+    const next = (queues.get(event.botId) ?? Promise.resolve()).then(() => send(event, deadline))
+    queues.set(event.botId, next)
+  }
+}
+
+/**
+ * A bot host's internal endpoint. It answers only central and other bot hosts, and only for bots
+ * it owns, so one bot's REST traffic, its workflows' included, always meets one rate limiter.
+ * With `bots`, it also holds each bot's lease in Postgres while serving it, so two hosts on
+ * different lists never both serve one bot. With `workflows`, it runs the workflow events other
+ * hosts' shards forward to `/dispatch`. `upgrade` takes over voice sockets for those bots, and
+ * `route` runs their workflow routes.
  */
 export const createBotHost = (
   { hosts, secret, self }: Membership & { readonly self: string },
   execute: Execute,
-  { upgrade, route: serveRoute }: OwnerRoutes = {},
+  {
+    bots,
+    workflows,
+    upgrade,
+    route: serveRoute,
+  }: OwnerRoutes & {
+    readonly bots?: Pick<BotRuntimes, 'own'> | undefined
+    readonly workflows?: Pick<WorkflowHost, 'dispatch'> | undefined
+  } = {},
 ) => {
   const expected = digest(`Bearer ${secret}`)
   /** Central's credential and the bot's owner, or why this host won't serve the request. */
-  const admit = (headers: Headers) => {
+  const admit = async (headers: Headers) => {
     if (!timingSafeEqual(digest(headers.get('authorization') ?? ''), expected)) {
       return json(401, { error: 'unauthorized' })
     }
     const credential = headers.get('x-discord-bot-token') ?? ''
     const botId = botIdFromToken(credential)
     if (botId === undefined) return json(403, { error: 'invalid_bot_token' })
+    return (await serving(botId)) ?? { credential, botId }
+  }
+  /** Why this host won't serve the bot now, if it won't. */
+  const serving = async (botId: string) => {
     // A central replica with another host list routed it here; its owner will take the retry.
     if (ownerOf(hosts, botId) !== self) return moving('bot_moved')
-    return { credential, botId }
+    // Its previous owner, on an older list, still serves it until it restarts.
+    const owned = bots === undefined || (await bots.own(botId).catch(() => undefined))
+    if (owned === undefined) return moving('bot_host_unavailable')
+    if (!owned) return moving('bot_moved')
+    return undefined
   }
   return {
     fetch: async (request: Request): Promise<Response> => {
@@ -184,16 +291,27 @@ export const createBotHost = (
         if (!timingSafeEqual(digest(request.headers.get('authorization') ?? ''), expected)) {
           return json(401, { error: 'unauthorized' })
         }
-        if (ownerOf(hosts, route.botId) !== self) return moving('bot_moved')
+        // Routes run workflows on the bot's REST limiter, so they wait for its lease too.
+        const refused = await serving(route.botId)
+        if (refused !== undefined) return refused
         if (serveRoute === undefined) return json(404, { error: 'not_found' })
         const inbound = (await request.json()) as RouteRequest
         return serveRoute(route.botId, route.name, inbound, request.signal)
       }
-      if (url.pathname !== '/mcp') return json(404, { error: 'not_found' })
-      const admitted = admit(request.headers)
+      if (url.pathname !== '/mcp' && url.pathname !== '/dispatch') {
+        return json(404, { error: 'not_found' })
+      }
+      const admitted = await admit(request.headers)
       if (admitted instanceof Response) return admitted
       const { credential, botId } = admitted
-      return execute(request, credential, botId, request.headers.get(ACTOR_HEADER) ?? undefined)
+      if (url.pathname === '/mcp') {
+        return execute(request, credential, botId, request.headers.get(ACTOR_HEADER) ?? undefined)
+      }
+      if (workflows === undefined) return json(404, { error: 'not_found' })
+      const dispatch: unknown = await request.json().catch(() => undefined)
+      if (!isGatewayEvent(dispatch)) return json(400, { error: 'invalid_dispatch' })
+      workflows.dispatch({ botId, token: credential, dispatch })
+      return new Response(null, { status: 204 })
     },
     /** Serves voice sockets central forwards; attach it to the HTTP server's `upgrade` event. */
     upgrade: (request: IncomingMessage, socket: Duplex, head: Buffer) => {
@@ -208,9 +326,22 @@ export const createBotHost = (
         const value = request.headers[name]
         if (typeof value === 'string') headers.set(name, value)
       }
-      const admitted = admit(headers)
-      if (admitted instanceof Response) return void refuseUpgrade(socket, admitted)
-      upgrade(request, socket, head, admitted.credential, admitted.botId)
+      admit(headers).then(
+        (admitted) => {
+          if (admitted instanceof Response) return void refuseUpgrade(socket, admitted)
+          upgrade(request, socket, head, admitted.credential, admitted.botId)
+        },
+        () => socket.destroy(),
+      )
     },
   }
 }
+
+const isGatewayEvent = (value: unknown): value is GatewayEvent =>
+  typeof value === 'object' &&
+  value !== null &&
+  'd' in value &&
+  typeof value.d === 'object' &&
+  value.d !== null &&
+  't' in value &&
+  typeof value.t === 'string'

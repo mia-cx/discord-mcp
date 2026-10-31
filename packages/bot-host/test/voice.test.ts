@@ -37,15 +37,19 @@ const start = async ({ heartbeatIntervalMs = 41_250, answersVoice = true, shards
   const vault = createTokenVault(Buffer.alloc(32, 1), storage)
   const bots = createBotRuntimes({
     vault,
+    storage,
     clock,
     log: () => {},
+    self: 'bot-host-0',
     discordFetch: gateway.discordFetch({ shards }),
+    // Leases are proven in the runtimes suite; keep their lapses out of these clock jumps.
+    leaseTtlMs: 100 * HOUR,
   })
   cleanup.push(storage.close, voiceServer.close, gateway.close, bots.close)
   await bots.use(BOT_ID, TOKEN)
   const voice = bots.voice(BOT_ID)
   if (voice === undefined) throw new Error('the bot is not running')
-  return { bots, vault, voice, voiceServer, gateway, clock }
+  return { bots, storage, vault, voice, voiceServer, gateway, clock }
 }
 
 /** An agent's WebSocket and the server side of it, which the bot host takes over. */
@@ -244,9 +248,9 @@ describe('voice', () => {
   })
 
   it('brings a bot back with a fresh session when its leave could not reach Discord', async () => {
-    const { bots, vault, voice, gateway, clock } = await start()
+    const { bots, storage, vault, voice, gateway, clock } = await start()
     await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID)
-    await vi.waitFor(async () => expect(await vault.loadSessions()).toHaveLength(1))
+    await vi.waitFor(async () => expect((await vault.loadOnline())[0]?.sessions.size).toBe(1))
     gateway.connections[0]?.send({ op: 7 })
     await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(4000))
 
@@ -254,12 +258,16 @@ describe('voice', () => {
     await bots.close()
     const next = createBotRuntimes({
       vault,
+      storage,
       clock,
       log: () => {},
+      self: 'bot-host-0',
       discordFetch: gateway.discordFetch(),
+      leaseTtlMs: 100 * HOUR,
     })
     cleanup.push(next.close)
-    await next.resume()
+    // It waits out the turn of the Identify that started the session it replaces.
+    clock.advance(6_000)
     await vi.waitFor(() =>
       expect(gateway.connections[1]?.received[0]).toMatchObject({ op: 2, d: { token: TOKEN } }),
     )
@@ -270,10 +278,10 @@ describe('voice', () => {
     // (guild_id >> 22) % 2 is 1, so shard 1 of 2 carries this server.
     const guildId = '419430399995805696'
     const joining = voice.join(guildId, FAKE_VOICE_CHANNEL_ID)
-    // Shard 1 identifies five seconds after shard 0.
+    // Shard 1 identifies a turn, six seconds, after shard 0.
     await vi.waitFor(() => expect(gateway.connections).toHaveLength(2))
     await new Promise((resolve) => setTimeout(resolve, 50))
-    clock.advance(5_000)
+    clock.advance(6_000)
     await joining
     await daveReady(voiceServer)
 
@@ -296,6 +304,120 @@ describe('voice', () => {
     clock.advance(JOIN_TIMEOUT_MS)
     await expect(joining).rejects.toThrow('Discord did not connect the bot to the voice channel.')
     expect(voice.joined(GUILD_ID)).toBe(false)
+  })
+
+  it("moves the server's shard to the host whose voice joins there", async () => {
+    const storage = await inMemoryStorage()
+    const voiceServer = await fakeVoiceServer()
+    const gateway = await fakeGateway(100 * HOUR, { botId: BOT_ID, endpoint: voiceServer.endpoint })
+    const clock = manualClock()
+    // Of two shards, host b runs shard 0, which carries this server's events.
+    const hosts = ['host-a', 'host-b'].map((self) =>
+      createBotRuntimes({
+        vault: createTokenVault(Buffer.alloc(32, 1), storage),
+        storage,
+        clock,
+        log: () => {},
+        self,
+        discordFetch: gateway.discordFetch({ shards: 2, maxConcurrency: 2 }),
+        leaseTtlMs: 100 * HOUR,
+      }),
+    )
+    const [owner, other] = hosts
+    cleanup.push(storage.close, voiceServer.close, gateway.close, ...hosts.map((h) => h.close))
+    await vi.waitFor(async () =>
+      expect(await storage.liveLeases('host:', clock.date())).toHaveLength(2),
+    )
+    await owner?.use(BOT_ID, TOKEN)
+    await other?.use(BOT_ID, TOKEN)
+    await vi.waitFor(() =>
+      expect(gateway.connections.filter((c) => c.received[0]?.op === 2)).toHaveLength(2),
+    )
+    const before = gateway.connections.find(
+      (c) => (c.received[0]?.d as { shard?: number[] } | undefined)?.shard?.[0] === 0,
+    )
+
+    const joining = owner?.voice(BOT_ID)?.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID)
+    // Host b hands shard 0 over on its next pass, and host a resumes it.
+    clock.advance(5_000)
+    await vi.waitFor(() => expect(before?.closeCode).toBe(4000))
+    clock.advance(5_000)
+    await vi.waitFor(() => expect(gateway.connections[2]?.received[0]).toMatchObject({ op: 6 }))
+    gateway.connections[2]?.send({ op: 0, t: 'RESUMED', s: 2 })
+    await joining
+    expect(gateway.connections[2]?.received).toContainEqual({
+      op: 4,
+      d: {
+        guild_id: GUILD_ID,
+        channel_id: FAKE_VOICE_CHANNEL_ID,
+        self_deaf: true,
+        self_mute: false,
+      },
+    })
+  })
+
+  it('joins through a shard whose session started before the bot’s voice was first used', async () => {
+    const storage = await inMemoryStorage()
+    const voiceServer = await fakeVoiceServer()
+    const gateway = await fakeGateway(100 * HOUR, { botId: BOT_ID, endpoint: voiceServer.endpoint })
+    const log = vi.fn()
+    const bots = createBotRuntimes({
+      vault: createTokenVault(Buffer.alloc(32, 1), storage),
+      storage,
+      clock: manualClock(),
+      log,
+      self: 'bot-host-0',
+      discordFetch: gateway.discordFetch(),
+      leaseTtlMs: 100 * HOUR,
+    })
+    cleanup.push(storage.close, voiceServer.close, gateway.close, bots.close)
+    await bots.use(BOT_ID, TOKEN)
+    await vi.waitFor(() => expect(log).toHaveBeenCalledWith(expect.stringContaining('is online')))
+
+    await bots.voice(BOT_ID)?.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID)
+    expect(gateway.connections[0]?.received).toContainEqual(
+      expect.objectContaining({ op: 4, d: expect.objectContaining({ guild_id: GUILD_ID }) }),
+    )
+  })
+
+  it('moves a remote shard for a join asked before this host knew the bot was online', async () => {
+    const storage = await inMemoryStorage()
+    const voiceServer = await fakeVoiceServer()
+    const gateway = await fakeGateway(100 * HOUR, { botId: BOT_ID, endpoint: voiceServer.endpoint })
+    const clock = manualClock()
+    // The bot's one shard lands on host b.
+    const hosts = ['host-a', 'host-b'].map((self) =>
+      createBotRuntimes({
+        vault: createTokenVault(Buffer.alloc(32, 1), storage),
+        storage,
+        clock,
+        log: () => {},
+        self,
+        discordFetch: gateway.discordFetch(),
+        leaseTtlMs: 100 * HOUR,
+      }),
+    )
+    const [owner, other] = hosts
+    cleanup.push(storage.close, voiceServer.close, gateway.close, ...hosts.map((h) => h.close))
+    await vi.waitFor(async () =>
+      expect(await storage.liveLeases('host:', clock.date())).toHaveLength(2),
+    )
+    await other?.use(BOT_ID, TOKEN)
+    await vi.waitFor(() => expect(gateway.connections[0]?.received[0]?.op).toBe(2))
+
+    // As the relay does: the agent call records the bot without waiting, then joins.
+    const used = owner?.use(BOT_ID, TOKEN)
+    const joining = owner?.voice(BOT_ID)?.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID)
+    await used
+    clock.advance(5_000)
+    await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(4000))
+    clock.advance(5_000)
+    await vi.waitFor(() => expect(gateway.connections[1]?.received[0]).toMatchObject({ op: 6 }))
+    gateway.connections[1]?.send({ op: 0, t: 'RESUMED', s: 2 })
+    await joining
+    expect(gateway.connections[1]?.received).toContainEqual(
+      expect.objectContaining({ op: 4, d: expect.objectContaining({ guild_id: GUILD_ID }) }),
+    )
   })
 })
 
