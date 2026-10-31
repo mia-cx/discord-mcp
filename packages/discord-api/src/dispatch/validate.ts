@@ -118,11 +118,13 @@ export const validateQueryParams = (
       )
     }
   }
+  // Nulls, whether alone or in a list, mean "not supplied" and are never sent.
+  const values = (key: string) => [query[key]].flat().filter((v) => v != null)
   for (const required of op.requiredQuery) {
-    if (query[required] == null) issues.push(`query.${required}: required but not supplied.`)
+    if (values(required).length === 0) issues.push(`query.${required}: required but not supplied.`)
   }
-  for (const [key, value] of Object.entries(query)) {
-    if ([value].flat().some((v) => v !== null && typeof v === 'object')) {
+  for (const key of Object.keys(query)) {
+    if (values(key).some((v) => typeof v === 'object')) {
       issues.push(`query.${key}: must be a string, number, boolean, or a list of them.`)
     }
   }
@@ -134,11 +136,7 @@ export const validateQueryParams = (
   }
 
   const params = new URLSearchParams()
-  for (const [key, value] of Object.entries(query)) {
-    if (value === undefined || value === null) continue
-    if (Array.isArray(value)) for (const v of value) params.append(key, String(v))
-    else params.set(key, String(value))
-  }
+  for (const key of Object.keys(query)) for (const v of values(key)) params.append(key, String(v))
   return Effect.succeed(params)
 }
 

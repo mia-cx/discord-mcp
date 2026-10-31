@@ -164,10 +164,10 @@ const dispatcher = (risk: Exclude<RiskClass, 'credential'>) =>
           ...(args.body === undefined ? {} : { body: args.body }),
           ...(args.auditLogReason === undefined ? {} : { auditLogReason: args.auditLogReason }),
         })
-        // @discordjs/rest returns non-JSON responses, such as widget images, as raw bytes.
-        return result instanceof ArrayBuffer
-          ? { base64: Buffer.from(result).toString('base64') }
-          : result
+        // @discordjs/rest returns non-JSON responses as raw bytes: widget images, and the empty
+        // body of a 204.
+        if (!(result instanceof ArrayBuffer)) return result
+        return result.byteLength === 0 ? {} : { base64: Buffer.from(result).toString('base64') }
       }),
   })
 
