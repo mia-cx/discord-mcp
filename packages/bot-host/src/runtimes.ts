@@ -203,10 +203,9 @@ export const createBotRuntimes = ({
       for (const [botId, runtime] of running) {
         running.delete(botId)
         runtime.cancelIdle()
-        // A leave the shard couldn't send would leave a resumed session in the channel, so that
-        // session ends instead; the next process identifies afresh.
-        if (runtime.voice.close()) runtime.shard?.suspend()
-        else runtime.shard?.stop()
+        // A resumed session would still hold a voice state whose leave never reached Discord, so
+        // the next process brings that bot back with a fresh session instead.
+        runtime.shard?.suspend(!runtime.voice.close())
       }
       await Promise.all(writes.values())
       // One last try at failed writes, so the next process starts from the newest state.

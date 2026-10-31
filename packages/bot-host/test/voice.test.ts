@@ -16,6 +16,7 @@ import { JOIN_TIMEOUT_MS, parseAudioFormat } from '../src/voice.ts'
 
 const BOT_ID = '345678901234567890'
 const GUILD_ID = '234567890123456789'
+const TOKEN = 'private-bot-token'
 const HOUR = 60 * 60 * 1000
 const SILENCE = Buffer.from([0xf8, 0xff, 0xfe])
 
@@ -41,7 +42,7 @@ const start = async ({ heartbeatIntervalMs = 41_250, answersVoice = true } = {})
     gatewayUrl: gateway.url,
   })
   cleanup.push(storage.close, voiceServer.close, gateway.close, bots.close)
-  await bots.use(BOT_ID, 'private-bot-token')
+  await bots.use(BOT_ID, TOKEN)
   const voice = bots.voice(BOT_ID)
   if (voice === undefined) throw new Error('the bot is not running')
   return { bots, vault, voice, voiceServer, gateway, clock }
@@ -242,8 +243,8 @@ describe('voice', () => {
     })
   })
 
-  it('ends the session at shutdown when a leave could not reach Discord', async () => {
-    const { bots, vault, voice, gateway } = await start()
+  it('brings a bot back with a fresh session when its leave could not reach Discord', async () => {
+    const { bots, vault, voice, gateway, clock } = await start()
     await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID)
     await vi.waitFor(async () => expect(await vault.loadSessions()).toHaveLength(1))
     gateway.connections[0]?.send({ op: 7 })
@@ -251,7 +252,12 @@ describe('voice', () => {
 
     // Shutting down mid-reconnect: a resumed session would still have the bot in the channel.
     await bots.close()
-    expect(await vault.loadSessions()).toEqual([])
+    const next = createBotRuntimes({ vault, clock, log: () => {}, gatewayUrl: gateway.url })
+    cleanup.push(next.close)
+    await next.resume()
+    await vi.waitFor(() =>
+      expect(gateway.connections[1]?.received[0]).toMatchObject({ op: 2, d: { token: TOKEN } }),
+    )
   })
 
   it('fails the join when Discord does not connect the bot', async () => {

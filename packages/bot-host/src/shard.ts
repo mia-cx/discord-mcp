@@ -67,6 +67,8 @@ export interface ShardSession {
   readonly sequence: number
   /** The intents it was identified with. A resumed session delivers only those events. */
   readonly intents: number
+  /** The next process must identify afresh rather than resume, but still brings the bot online. */
+  readonly stale?: true
 }
 
 export interface ShardOptions {
@@ -97,8 +99,11 @@ export interface Shard {
   readonly send: (payload: { readonly op: number; readonly d: unknown }) => boolean
   /** End the session, so Discord shows the bot offline, and stop reconnecting. */
   readonly stop: () => void
-  /** Disconnect and stop reconnecting, but leave the session resumable for the next process. */
-  readonly suspend: () => void
+  /**
+   * Disconnect and stop reconnecting, but keep the session for the next process. It resumes the
+   * session, or with `identifyAfresh` it brings the bot back with a new one.
+   */
+  readonly suspend: (identifyAfresh?: boolean) => void
 }
 
 /**
@@ -121,7 +126,7 @@ export const startShard = ({
   let socket: WebSocket | undefined
   // A session identified with other intents, or saved before sessions recorded them, would
   // resume without the events these intents need, so it identifies afresh.
-  let session = saved?.intents === INTENTS ? saved : undefined
+  let session = saved?.intents === INTENTS && saved.stale === undefined ? saved : undefined
   /** A connection to this session's resume URL closed before Hello. */
   let resumeUrlFailed = false
   /** The current connection got Hello. */
@@ -309,6 +314,9 @@ export const startShard = ({
       drop(NORMAL_CLOSURE)
       end()
     },
-    suspend: () => drop(RECONNECT_CLOSURE),
+    suspend: (identifyAfresh = false) => {
+      drop(RECONNECT_CLOSURE)
+      if (identifyAfresh && session !== undefined) onSession({ ...session, stale: true })
+    },
   }
 }
