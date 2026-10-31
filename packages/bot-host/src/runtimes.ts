@@ -26,6 +26,8 @@ export interface BotRuntimes {
 
 interface Runtime {
   readonly token: string
+  /** Settles once this runtime's token write has finished or failed. */
+  stored: Promise<void>
   shard?: Shard
   cancelIdle: () => void
 }
@@ -38,6 +40,8 @@ export const createBotRuntimes = ({
   gatewayUrl = DISCORD_GATEWAY_URL,
 }: BotRuntimesOptions): BotRuntimes => {
   const running = new Map<string, Runtime>()
+  /** Tokens Discord rejected for good, by bot. Retrying them only spends Identifies. */
+  const rejected = new Map<string, string>()
 
   const stop = (botId: string, runtime: Runtime) => {
     if (running.get(botId) !== runtime) return
@@ -54,11 +58,13 @@ export const createBotRuntimes = ({
     }, IDLE_TIMEOUT_MS)
   }
 
-  const start = async (botId: string, runtime: Runtime) => {
+  const start = async (botId: string, runtime: Runtime, previous: Promise<void>) => {
+    // Writes for one bot run in order, so a replaced token never overwrites its successor.
+    await previous
     try {
       await vault.store(botId, runtime.token)
     } catch (cause) {
-      log(`Bot ${botId} stays offline: storing its token failed: ${String(cause)}`)
+      log(`Bot ${botId} stays offline: ${cause instanceof Error ? cause.message : String(cause)}`)
       return stop(botId, runtime)
     }
     // Idle, closed, or replaced by a new token while storing.
@@ -73,7 +79,10 @@ export const createBotRuntimes = ({
           `Bot ${botId} is offline: it spent its daily Gateway Identify budget. Reconnecting in ${Math.ceil(waitMs / 60_000)} minutes.`,
         ),
       onFatal: (code) => {
-        log(`Bot ${botId} is offline: Discord closed its Gateway session with code ${code}.`)
+        log(
+          `Bot ${botId} is offline: Discord closed its Gateway session with code ${code}. It stays offline until its token changes or the server restarts.`,
+        )
+        rejected.set(botId, runtime.token)
         stop(botId, runtime)
       },
     })
@@ -81,6 +90,7 @@ export const createBotRuntimes = ({
 
   return {
     use: (botId, token) => {
+      if (rejected.get(botId) === token) return Promise.resolve()
       const current = running.get(botId)
       if (current?.token === token) {
         keepAlive(botId, current)
@@ -88,10 +98,11 @@ export const createBotRuntimes = ({
       }
       // A reset token invalidates the old session, so start over with the new one.
       if (current !== undefined) stop(botId, current)
-      const runtime: Runtime = { token, cancelIdle: () => {} }
+      const runtime: Runtime = { token, stored: Promise.resolve(), cancelIdle: () => {} }
       running.set(botId, runtime)
       keepAlive(botId, runtime)
-      return start(botId, runtime)
+      runtime.stored = start(botId, runtime, current?.stored ?? Promise.resolve())
+      return runtime.stored
     },
     close: () => {
       for (const [botId, runtime] of running) stop(botId, runtime)
