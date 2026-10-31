@@ -397,7 +397,7 @@ describe('workflow state and logs', () => {
       grants: { families: ['message', 'channel'] },
     })
     await asA('discord_workflow_enable', { name: 'counter' })
-    const connection = await identifiedWith(PING_INTENTS)
+    const connection = await identifiedWith(PING_INTENTS | VOICE_INTENTS)
 
     connection.send(message(2, 'one'))
     connection.send(message(3, 'hoard'))
