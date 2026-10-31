@@ -16,7 +16,16 @@ import {
   type RestConfig,
   relayTools,
 } from '@discord-mcp/discord-api/relay'
-import { type IsolateHost, makeIsolateHost, ScriptRunner, scriptRun } from '@discord-mcp/isolate'
+import {
+  type BorrowedRest,
+  type IsolateHost,
+  makeIsolateHost,
+  ScriptRunner,
+  scriptRun,
+  type WorkflowHost,
+  Workflows,
+  workflowTools,
+} from '@discord-mcp/isolate'
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server'
 import { Effect, Layer, ManagedRuntime, Redacted } from 'effect'
 import { createDiscordLogin, type LoginConfig } from './login.ts'
@@ -31,17 +40,35 @@ export interface RelayConfig {
 /**
  * The token lives only in this runtime, which the HTTP handler disposes after one response.
  * The isolate host is process-wide, so one bot's scripts queue behind each other across requests.
+ * `workflows` serves the workflow tools, for the human whose relay login made the request.
  */
-export const relayRuntime = (rest: Layer.Layer<DiscordRest>, isolates: IsolateHost) =>
+export const relayRuntime = (
+  rest: Layer.Layer<DiscordRest>,
+  isolates: IsolateHost,
+  workflows?: Workflows['Service'],
+) =>
   ManagedRuntime.make(
-    Layer.mergeAll(rest, OperationCatalog.layer, Layer.succeed(ScriptRunner)(isolates)),
+    Layer.mergeAll(
+      rest,
+      OperationCatalog.layer,
+      Layer.succeed(ScriptRunner)(isolates),
+      workflows === undefined ? Layer.empty : Layer.succeed(Workflows)(workflows),
+    ),
   )
 
-/**
- * Register the same fixed bot-only tools for HTTP requests and local stdio. `scripts` adds
- * `discord_script_run`, which runs agent code on this host.
- */
-export const buildRelayServer = (runtime: ReturnType<typeof relayRuntime>, scripts: boolean) => {
+/** Which agent-code tools a relay offers beside the fixed bot-only ones. */
+export interface RelayFeatures {
+  /** `discord_script_run`, which runs agent code on this host. */
+  readonly scripts: boolean
+  /** The workflow lifecycle tools, which need bot hosting. */
+  readonly workflows: boolean
+}
+
+/** Register the same fixed bot-only tools for HTTP requests and local stdio, plus `features`. */
+export const buildRelayServer = (
+  runtime: ReturnType<typeof relayRuntime>,
+  features: RelayFeatures,
+) => {
   const principal: Principal = {
     id: 'request-bot',
     kind: 'discord-bot',
@@ -56,7 +83,11 @@ export const buildRelayServer = (runtime: ReturnType<typeof relayRuntime>, scrip
   )
   registerTools({
     server,
-    tools: scripts ? [...relayTools, scriptRun] : relayTools,
+    tools: [
+      ...relayTools,
+      ...(features.scripts ? [scriptRun] : []),
+      ...(features.workflows ? workflowTools : []),
+    ],
     selection: { toolsets: new Set(['operator', 'api']), enabledGates: new Set(['always']) },
     runtime,
     authorize: authorizeWithPrincipal(() => Effect.succeed(principal)),
@@ -111,11 +142,98 @@ const discordFailure = (error: ReturnType<typeof renderCause>) => {
 /**
  * Runs one authenticated MCP request as the bot whose token it carries. `botId` is the ID that
  * token names, which routing used; whoever runs the request still checks the token with Discord.
+ * `actorId` is the Discord user ID of the human whose relay login made the request.
  */
-export type Execute = (request: Request, credential: string, botId: string) => Promise<Response>
+export type Execute = (
+  request: Request,
+  credential: string,
+  botId: string,
+  actorId: string | undefined,
+) => Promise<Response>
 
 /** An idle bot's limiter lasts as long as its guard remembers rejections, so neither resets early. */
 const LIMITER_IDLE_MS = DEFAULT_WINDOW_MS
+
+/** One bot's limiter, with the token Discord last accepted for it, while requests use it. */
+interface Lane {
+  readonly limiter: RateLimiter
+  /** Its fingerprint, and the guard its own checks share, so a reset token's rejections stay its. */
+  accepted?: { readonly fingerprint: string; readonly guard: RateLimiter['guard'] }
+  /**
+   * Each token's rejection guard, by fingerprint. Calls share the bot's buckets but count
+   * rejections per token, so a reset token's late failures never block its successor.
+   */
+  readonly guards: Map<string, RateLimiter['guard']>
+  active: number
+  idleSince: number
+}
+
+const fingerprintOf = (credential: string) =>
+  createHash('sha256').update(credential).digest('base64url')
+
+/** The bot's limiter, counting rejections in the guard of the token with this fingerprint. */
+const limiterFor = (lane: Lane, fingerprint: string): RateLimiter => {
+  let guard = lane.guards.get(fingerprint)
+  if (guard === undefined) {
+    guard = Effect.runSync(RateGuard.make())
+    lane.guards.set(fingerprint, guard)
+  }
+  return { ...lane.limiter, guard }
+}
+
+/**
+ * Every bot's one rate limiter, shared by its agent requests and its workflows. A limiter idle for
+ * its guard's window is closed.
+ */
+export const createBotLimiters = (
+  rest: Omit<RestConfig, 'token'>,
+  discordFetch: typeof fetch = fetch,
+) => {
+  const lanes = new Map<string, Lane>()
+  const acquire = (botId: string) => {
+    const now = Date.now()
+    for (const [id, lane] of lanes) {
+      if (lane.active > 0 || now - lane.idleSince < LIMITER_IDLE_MS) continue
+      lanes.delete(id)
+      lane.limiter.close()
+    }
+    const lane: Lane = lanes.get(botId) ?? {
+      limiter: createRateLimiter(rest, discordFetch),
+      guards: new Map(),
+      active: 0,
+      idleSince: now,
+    }
+    lanes.set(botId, lane)
+    lane.active += 1
+    return lane
+  }
+  const release = (lane: Lane) => {
+    lane.active -= 1
+    lane.idleSince = Date.now()
+  }
+  return {
+    acquire,
+    release,
+    /** The bot's lane, without using it. */
+    peek: (botId: string) => lanes.get(botId),
+    /** Lend a bot's REST client, on its own limiter, to its workflows. */
+    lend: (botId: string, token: Redacted.Redacted<string>): BorrowedRest => {
+      const lane = acquire(botId)
+      const limiter = limiterFor(lane, fingerprintOf(Redacted.value(token)))
+      return {
+        client: Effect.runSync(
+          Effect.provide(
+            Effect.flatMap(DiscordRest, Effect.succeed),
+            DiscordRest.shared(token, limiter),
+          ),
+        ),
+        release: () => release(lane),
+      }
+    },
+  }
+}
+
+export type BotLimiters = ReturnType<typeof createBotLimiters>
 
 export interface ExecutorOptions {
   readonly rest: Omit<RestConfig, 'token'>
@@ -128,6 +246,10 @@ export interface ExecutorOptions {
    * platform feature, which an unrestricted relay never offers.
    */
   readonly scripts?: boolean
+  /** The bot host's workflows, whose tools need `scripts` too. */
+  readonly workflows?: WorkflowHost | undefined
+  /** Every bot's rate limiter; shared with the bot host's workflows when they run here. */
+  readonly limiters?: BotLimiters
   /** The Discord REST seam used by offline integration tests. */
   readonly restLayer?: (
     token: Redacted.Redacted<string>,
@@ -146,42 +268,12 @@ export const createExecutor = ({
   discordFetch = fetch,
   bots,
   scripts = false,
+  workflows,
+  limiters = createBotLimiters(rest, discordFetch),
   restLayer = DiscordRest.shared,
 }: ExecutorOptions): Execute => {
   const isolates = makeIsolateHost()
-  /**
-   * Each bot's limiter, with the token Discord last accepted for it: its fingerprint, and the guard
-   * its own checks share, so a reset token's rejections stay with that token.
-   */
-  const limiters = new Map<
-    string,
-    {
-      limiter: RateLimiter
-      accepted?: { readonly fingerprint: string; readonly guard: RateLimiter['guard'] }
-      active: number
-      idleSince: number
-    }
-  >()
-  const acquire = (botId: string) => {
-    const now = Date.now()
-    for (const [id, entry] of limiters) {
-      if (entry.active > 0 || now - entry.idleSince < LIMITER_IDLE_MS) continue
-      limiters.delete(id)
-      entry.limiter.close()
-    }
-    const entry = limiters.get(botId) ?? {
-      limiter: createRateLimiter(rest, discordFetch),
-      active: 0,
-      idleSince: now,
-    }
-    limiters.set(botId, entry)
-    entry.active += 1
-    return entry
-  }
-  const release = (entry: { active: number; idleSince: number }) => {
-    entry.active -= 1
-    entry.idleSince = Date.now()
-  }
+  const { acquire, release } = limiters
 
   /** Check the token with Discord, on a limiter of its own unless `shared` is given. */
   const verify = async (
@@ -202,8 +294,12 @@ export const createExecutor = ({
     }
   }
 
-  const run = async (request: Request, runtime: ReturnType<typeof relayRuntime>) => {
-    const mcp = createMcpHandler(() => buildRelayServer(runtime, scripts), {
+  const run = async (
+    request: Request,
+    runtime: ReturnType<typeof relayRuntime>,
+    features: RelayFeatures,
+  ) => {
+    const mcp = createMcpHandler(() => buildRelayServer(runtime, features), {
       legacy: 'stateless',
       maxSubscriptions: 0,
     })
@@ -226,14 +322,14 @@ export const createExecutor = ({
     }
   }
 
-  return async (request, credential, botId) => {
+  return async (request, credential, botId, actorId) => {
     const token = Redacted.make(credential)
-    const fingerprint = createHash('sha256').update(credential).digest('base64url')
+    const fingerprint = fingerprintOf(credential)
     // Anyone can name a bot's public ID, so only the token Discord last accepted for this bot
     // checks in through the bot's buckets, recording rejections in that token's own guard. Any
     // other token, forged or freshly reset, gets a limiter of its own and so never queues ahead of
     // the bot's requests or counts against a guard they share.
-    const known = limiters.get(botId)?.accepted
+    const known = limiters.peek(botId)?.accepted
     const accepted = known?.fingerprint === fingerprint ? known : undefined
     let lane = accepted === undefined ? undefined : acquire(botId)
     try {
@@ -256,10 +352,19 @@ export const createExecutor = ({
       // Hosting never delays or fails the agent's call; `use` logs its own failures.
       void bots?.use(botId, credential)
       lane ??= acquire(botId)
+      const limiter = limiterFor(lane, fingerprint)
       if (lane.accepted?.fingerprint !== fingerprint) {
-        lane.accepted = { fingerprint, guard: Effect.runSync(RateGuard.make()) }
+        lane.accepted = { fingerprint, guard: limiter.guard }
       }
-      return await run(request, relayRuntime(restLayer(token, lane.limiter), isolates))
+      // Workflow changes are recorded against the human whose login made the request.
+      const access =
+        scripts && workflows !== undefined && actorId !== undefined
+          ? { host: workflows, actorId }
+          : undefined
+      return await run(request, relayRuntime(restLayer(token, limiter), isolates, access), {
+        scripts,
+        workflows: access !== undefined,
+      })
     } finally {
       if (lane !== undefined) release(lane)
     }
@@ -311,7 +416,8 @@ export const createRelay = (
     if (credential === null || !/^\S+$/.test(credential)) return invalidBot()
     const botId = botIdFromToken(credential)
     if (botId === undefined) return invalidBot()
-    return execute(request, credential, botId)
+    const actorId = authenticated.extra?.discordUserId
+    return execute(request, credential, botId, typeof actorId === 'string' ? actorId : undefined)
   }
   return {
     fetch: async (request: Request): Promise<Response> => {

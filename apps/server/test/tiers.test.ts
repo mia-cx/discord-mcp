@@ -3,10 +3,10 @@ import { once } from 'node:events'
 import { createServer, request as httpRequest } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { fileURLToPath } from 'node:url'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createRelay } from '../src/relay.ts'
 import { ownerOf } from '../src/router.ts'
-import { forwardToBotHosts } from '../src/tiers.ts'
+import { createBotHost, forwardToBotHosts } from '../src/tiers.ts'
 import { botToken, config, discordOAuth, executor, login } from './login-fixture.ts'
 
 const BIN = fileURLToPath(new URL('../src/bin.ts', import.meta.url))
@@ -292,8 +292,47 @@ describe('forwarding to a bot host', () => {
       new Request('https://relay.test/mcp', { method: 'POST', body: '{}' }),
       '',
       '345678901234567890',
+      undefined,
     )
     host.close()
     expect(response.status).toBe(502)
+  })
+
+  it('names the human central authenticated to the bot host, never one the client names', async () => {
+    const botId = '345678901234567890'
+    const human = '234567890123456789'
+    const named: unknown[] = []
+    const host = createServer((request, response) => {
+      named.push(request.headers['x-discord-mcp-actor'])
+      response.writeHead(200).end('{}')
+    }).listen(0, '127.0.0.1')
+    await once(host, 'listening')
+    const url = `http://127.0.0.1:${(host.address() as AddressInfo).port}`
+
+    await forwardToBotHosts({ hosts: [url], secret: SECRET })(
+      new Request('https://relay.test/mcp', {
+        method: 'POST',
+        headers: { 'x-discord-mcp-actor': '999999999999999999' },
+        body: '{}',
+      }),
+      '',
+      botId,
+      human,
+    )
+    host.close()
+    expect(named).toEqual([human])
+
+    const execute = vi.fn(async () => new Response(null))
+    await createBotHost({ hosts: [url], secret: SECRET, self: url }, execute).fetch(
+      new Request(`${url}/mcp`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${SECRET}`,
+          'x-discord-bot-token': botToken(botId),
+          'x-discord-mcp-actor': human,
+        },
+      }),
+    )
+    expect(execute).toHaveBeenCalledWith(expect.any(Request), botToken(botId), botId, human)
   })
 })

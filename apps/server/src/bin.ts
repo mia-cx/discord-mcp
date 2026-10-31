@@ -1,16 +1,32 @@
 #!/usr/bin/env node
 import { createServer } from 'node:http'
-import { createBotRuntimes, createTokenVault, systemClock } from '@discord-mcp/bot-host'
+import {
+  type BotRuntimes,
+  createBotRuntimes,
+  createTokenVault,
+  systemClock,
+} from '@discord-mcp/bot-host'
 import { ConfigurationError } from '@discord-mcp/core'
-import { DiscordRest, RateGuard } from '@discord-mcp/discord-api/relay'
-import { makeIsolateHost } from '@discord-mcp/isolate'
+import {
+  DiscordRest,
+  OperationCatalog,
+  RateGuard,
+  type RestConfig,
+} from '@discord-mcp/discord-api/relay'
+import { makeIsolateHost, makeWorkflowHost, type WorkflowHost } from '@discord-mcp/isolate'
 import { connectStorage } from '@discord-mcp/storage'
 import { NodeRuntime } from '@effect/platform-node'
 import { toNodeHandler } from '@modelcontextprotocol/node'
 import { serveStdio } from '@modelcontextprotocol/server/stdio'
 import { Cause, Config, Effect, Layer, Logger, Redacted } from 'effect'
 import { checkPublicExposure } from './public-exposure.ts'
-import { buildRelayServer, createExecutor, createRelay, relayRuntime } from './relay.ts'
+import {
+  buildRelayServer,
+  createBotLimiters,
+  createExecutor,
+  createRelay,
+  relayRuntime,
+} from './relay.ts'
 import { ownerOf } from './router.ts'
 import { createBotHost, forwardToBotHosts } from './tiers.ts'
 
@@ -24,12 +40,13 @@ const csv = (value: string) =>
 const VAULT_KEY_BYTES = 32
 
 /**
- * Bot hosting keeps bots online and stores their tokens and Gateway sessions, resuming the bots
- * the previous process left online. It starts only with a database and an allowlist naming who
- * may use it; otherwise the process stays a plain relay.
+ * Bot hosting keeps bots online, stores their tokens and Gateway sessions, and runs their
+ * workflows, resuming the bots the previous process left online. It starts only with a database
+ * and an allowlist naming who may use it; otherwise the process stays a plain relay.
  */
 const startBotHosting = (
   allowedUserIds: ReadonlyArray<string> | undefined,
+  rest: Omit<RestConfig, 'token'>,
   owns?: (botId: string) => boolean,
 ) =>
   Effect.gen(function* () {
@@ -69,18 +86,40 @@ const startBotHosting = (
       }),
       (storage) => Effect.promise(() => storage.close()),
     )
-    return yield* Effect.acquireRelease(
+    const catalog = yield* Effect.provide(OperationCatalog, OperationCatalog.layer)
+    // A bot's agent requests and workflows share its one rate limiter.
+    const limiters = createBotLimiters(rest)
+    // The runtimes hand events to the workflow host, which needs the runtimes in turn.
+    let workflows: WorkflowHost | undefined
+    const bots = yield* Effect.acquireRelease(
       Effect.promise(async () => {
-        const bots = createBotRuntimes({
+        const bots: BotRuntimes = createBotRuntimes({
           vault: createTokenVault(vaultKey, storage),
           clock: systemClock,
           log,
+          onDispatch: (botId, t, d) => {
+            const token = bots.tokenOf(botId)
+            if (workflows === undefined || token === undefined) return
+            if (typeof d !== 'object' || d === null) return
+            workflows.dispatch({ botId, token, dispatch: { t, d: d as Record<string, unknown> } })
+          },
         })
+        workflows = makeWorkflowHost({
+          storage,
+          isolates: makeIsolateHost(),
+          bots,
+          operations: catalog.all,
+          rest: limiters.lend,
+          log,
+        })
+        // Bots with enabled workflows are held first, so their resumed sessions keep those intents.
+        await workflows.restore(owns)
         await bots.resume(owns)
         return bots
       }),
       (bots) => Effect.promise(() => bots.close()),
     )
+    return { bots, workflows, limiters }
   })
 
 /** Undefined allows any human. */
@@ -191,7 +230,9 @@ const main = Effect.gen(function* () {
       (runtime) => Effect.promise(() => runtime.dispose()),
     )
     yield* Effect.acquireRelease(
-      Effect.sync(() => serveStdio(() => buildRelayServer(runtime, true))),
+      Effect.sync(() =>
+        serveStdio(() => buildRelayServer(runtime, { scripts: true, workflows: false })),
+      ),
       (handle) => Effect.promise(() => handle.close()),
     )
     yield* Effect.log('discord-mcp ready on stdio')
@@ -234,12 +275,13 @@ const main = Effect.gen(function* () {
       )
     }
     // Every bot host shares the database, so each resumes only the bots it owns.
-    const bots = yield* startBotHosting(
+    const hosting = yield* startBotHosting(
       allowlist,
+      rest,
       (botId) => ownerOf(members.hosts, botId) === self,
     )
     return yield* listen(
-      createBotHost({ ...members, self }, createExecutor({ rest, bots, scripts })),
+      createBotHost({ ...members, self }, createExecutor({ rest, scripts, ...hosting })),
     )
   }
 
@@ -259,7 +301,7 @@ const main = Effect.gen(function* () {
   const execute =
     tier === 'central'
       ? forwardToBotHosts(yield* membership)
-      : createExecutor({ rest, bots: yield* startBotHosting(allowlist), scripts })
+      : createExecutor({ rest, scripts, ...(yield* startBotHosting(allowlist, rest)) })
   const relay = createRelay(
     {
       allowedHosts: csv(config.allowedHosts),

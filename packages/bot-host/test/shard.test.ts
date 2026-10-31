@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createIdentifyGate } from '../src/identify.ts'
-import { startShard } from '../src/shard.ts'
+import { PRESENCE_INTERVAL_MS, startShard } from '../src/shard.ts'
 import { DEFAULT_HEARTBEAT_INTERVAL_MS, fakeGateway, manualClock } from '../src/testing.ts'
 
 const TOKEN = 'private-bot-token'
 const INTERVAL = DEFAULT_HEARTBEAT_INTERVAL_MS
+/** Long enough for any reconnect backoff and the five-second Identify spacing. */
+const IDENTIFY_WAIT_MS = 60_000
+const presence = (status: string) => ({ since: null, activities: [], status, afk: false })
 const DAY = 24 * 60 * 60 * 1000
 const LIMIT = { total: 1000, remaining: 1000, resetAfter: DAY, maxConcurrency: 1 }
 const cleanup: Array<() => unknown> = []
@@ -24,6 +27,7 @@ const start = async (saved?: { sessionId: string; sequence: number }) => {
     clock,
     shardId: 0,
     shardCount: 1,
+    intents: 0,
     identifies: createIdentifyGate(clock, LIMIT),
     ...(saved && {
       session: { ...saved, resumeGatewayUrl: `${gateway.url}/resume`, shardCount: 1 },
@@ -65,6 +69,51 @@ describe('the shard supervisor', () => {
     clock.advance(INTERVAL)
     await vi.waitFor(() => expect(connection?.received[2]).toEqual({ op: 1, d: 1 }))
     expect(gateway.connections).toHaveLength(1)
+  })
+
+  it('sends at most one presence update per interval, the latest, and identifies with it', async () => {
+    const { gateway, clock, shard, onSession } = await start()
+    await identified(gateway, 1)
+    const connection = gateway.connections[0]
+    const updates = () => connection?.received.filter((p) => p.op === 3).map((p) => p.d)
+
+    shard.updatePresence(presence('idle'))
+    shard.updatePresence(presence('dnd'))
+    shard.updatePresence(presence('invisible'))
+    await vi.waitFor(() => expect(updates()).toEqual([presence('idle')]))
+
+    clock.advance(PRESENCE_INTERVAL_MS)
+    await vi.waitFor(() => expect(updates()).toEqual([presence('idle'), presence('invisible')]))
+
+    // New intents need a new session, so a restart must not resume the old one.
+    shard.setIntents(512)
+    expect(onSession).toHaveBeenLastCalledWith(undefined)
+    clock.advance(IDENTIFY_WAIT_MS)
+    await identified(gateway, 2)
+    expect(gateway.connections[1]?.received[0]).toMatchObject({
+      op: 2,
+      d: { intents: 512, presence: presence('invisible') },
+    })
+  })
+
+  it('holds a presence update that misses a reconnect until the session resumes', async () => {
+    const { gateway, clock, shard } = await start()
+    await identified(gateway, 1)
+    clock.advance(1_000)
+    shard.updatePresence(presence('idle'))
+    // Due at 6 s.
+    shard.updatePresence(presence('dnd'))
+
+    gateway.connections[0]?.close(4000)
+    await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(4000))
+    // Reconnects at 1.5 s; the update fires at 6 s, before the new socket can have opened.
+    expect(() => clock.advance(5_000)).not.toThrow()
+    await vi.waitFor(() => expect(gateway.connections[1]?.received[0]?.op).toBe(6))
+    gateway.connections[1]?.send({ op: 0, t: 'RESUMED', s: 2, d: {} })
+
+    await vi.waitFor(() =>
+      expect(gateway.connections[1]?.received).toContainEqual({ op: 3, d: presence('dnd') }),
+    )
   })
 
   it('resumes after a zombie connection or a dropped one, so Discord replays what it missed', async () => {
@@ -172,6 +221,7 @@ describe('the shard supervisor', () => {
       clock,
       shardId: 0,
       shardCount: 1,
+      intents: 0,
       identifies: createIdentifyGate(clock, LIMIT),
       session: { sessionId: 'saved', resumeGatewayUrl, sequence: 7, shardCount: 1 },
       onSession: () => {},
@@ -215,6 +265,7 @@ describe('the shard supervisor', () => {
         clock,
         shardId: 0,
         shardCount: 1,
+        intents: 0,
         identifies: createIdentifyGate(clock, LIMIT),
         ...(source === 'saved' && { session }),
         onSession,
@@ -286,6 +337,7 @@ describe('the shard supervisor', () => {
       clock,
       shardId: 0,
       shardCount: 1,
+      intents: 0,
       identifies: createIdentifyGate(clock, LIMIT),
       session: { sessionId: 'saved', resumeGatewayUrl, sequence: 7, shardCount: 1 },
       onSession: () => {},
@@ -319,6 +371,7 @@ describe('the shard supervisor', () => {
       clock,
       shardId: 0,
       shardCount: 1,
+      intents: 0,
       // Room for exactly one Identify.
       identifies: createIdentifyGate(clock, { ...LIMIT, remaining: 2 }),
       onSession: () => {},

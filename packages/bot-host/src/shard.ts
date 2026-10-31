@@ -5,6 +5,7 @@ const Op = {
   Dispatch: 0,
   Heartbeat: 1,
   Identify: 2,
+  PresenceUpdate: 3,
   Resume: 6,
   Reconnect: 7,
   InvalidSession: 9,
@@ -28,6 +29,8 @@ const MAX_BACKOFF_MS = 60_000
 /** Discord asks for a random 1–5 second wait before identifying after an invalid session. */
 const INVALID_SESSION_MIN_MS = 1_000
 const INVALID_SESSION_SPREAD_MS = 4_000
+/** Discord allows 120 Gateway sends a minute; presence updates stay well below it. */
+export const PRESENCE_INTERVAL_MS = 5_000
 
 interface Payload {
   readonly op: number
@@ -35,6 +38,16 @@ interface Payload {
   readonly s?: number | null
   readonly t?: string | null
 }
+
+/** The bot's status and activities, as a Gateway presence update carries them. */
+export interface Presence {
+  readonly since: number | null
+  readonly activities: ReadonlyArray<Record<string, unknown>>
+  readonly status: string
+  readonly afk: boolean
+}
+
+const ONLINE: Presence = { since: null, activities: [], status: 'online', afk: false }
 
 /** What a shard needs to resume its Gateway session, possibly from another process. */
 export interface ShardSession {
@@ -56,6 +69,8 @@ export interface ShardOptions {
   /** This shard's ID, from 0 to `shardCount - 1`. Discord assigns it the matching guilds. */
   readonly shardId: number
   readonly shardCount: number
+  /** The Gateway intents to identify with, as a bitfield. */
+  readonly intents: number
   /** Paces Identifies across the bot's shards. */
   readonly identifies: IdentifyGate
   /** A session to resume instead of identifying, such as one a previous process saved. */
@@ -76,6 +91,13 @@ export interface ShardOptions {
 }
 
 export interface Shard {
+  /** Identify a new session with different intents. */
+  readonly setIntents: (intents: number) => void
+  /**
+   * Set the bot's presence on this shard, now or once `PRESENCE_INTERVAL_MS` has passed since the
+   * last update. Later identifies carry it too.
+   */
+  readonly updatePresence: (presence: Presence) => void
   /** End the session, so Discord shows the bot offline, and stop reconnecting. */
   readonly stop: () => void
   /** Disconnect and stop reconnecting, but leave the session resumable for the next process. */
@@ -85,7 +107,7 @@ export interface Shard {
 /**
  * One Gateway shard that identifies with an online presence and heartbeats. After a drop it
  * resumes its session, so Discord replays the dispatches it missed, and identifies afresh only
- * once Discord says the session is gone. No intents.
+ * once Discord says the session is gone.
  */
 export const startShard = ({
   token,
@@ -93,6 +115,7 @@ export const startShard = ({
   clock,
   shardId,
   shardCount,
+  intents: initialIntents,
   identifies,
   session: saved,
   onSession,
@@ -101,6 +124,17 @@ export const startShard = ({
   onIdentifyBudgetSpent,
   onDispatch,
 }: ShardOptions): Shard => {
+  let intents = initialIntents
+  let presence = ONLINE
+  let presenceSentAt = Number.NEGATIVE_INFINITY
+  let cancelPresence: (() => void) | undefined
+  /**
+   * The latest presence has not reached Discord. Discord closes a connection that sends one
+   * before its session starts, so it waits for READY or RESUMED.
+   */
+  let presenceUnsent = false
+  /** The current connection's session has started: READY or RESUMED arrived. */
+  let authenticated = false
   let socket: WebSocket | undefined
   let session = saved
   /** A connection to this session's resume URL closed before Hello. */
@@ -116,7 +150,12 @@ export const startShard = ({
   /** The Identify the current connection reserved and has not sent. */
   let reservation: Reservation | undefined
 
-  const send = (payload: Payload) => socket?.send(JSON.stringify(payload))
+  // A replacement socket may still be connecting when a deferred presence update fires.
+  const send = (payload: Payload) => {
+    if (socket?.readyState !== WebSocket.OPEN) return false
+    socket.send(JSON.stringify(payload))
+    return true
+  }
 
   const drop = (code: number) => {
     cancelTimer()
@@ -185,6 +224,8 @@ export const startShard = ({
     }
     if (session !== undefined) onSession(session)
     if (event === 'READY' || event === 'RESUMED') {
+      authenticated = true
+      if (presenceUnsent && cancelPresence === undefined) sendPresence()
       attempts = 0
       onReady()
     }
@@ -213,10 +254,10 @@ export const startShard = ({
             op: Op.Identify,
             d: {
               token,
-              intents: 0,
+              intents,
               shard: [shardId, shardCount],
               properties: { os: process.platform, browser: 'discord-mcp', device: 'discord-mcp' },
-              presence: { since: null, activities: [], status: 'online', afk: false },
+              presence,
             },
           })
         })
@@ -277,6 +318,7 @@ export const startShard = ({
     const ws = new WebSocket(url)
     socket = ws
     greeted = false
+    authenticated = false
     acknowledged = true
     // Events from a socket we already dropped are stale.
     ws.addEventListener('message', (event) => {
@@ -295,13 +337,38 @@ export const startShard = ({
     })
   }
 
+  function sendPresence() {
+    cancelPresence = undefined
+    presenceUnsent = !authenticated || !send({ op: Op.PresenceUpdate, d: presence })
+    if (!presenceUnsent) presenceSentAt = clock.now()
+  }
+
   if (session === undefined) connectToIdentify()
   else connect()
   return {
+    setIntents: (next) => {
+      if (next === intents) return
+      intents = next
+      // A resumed session keeps the intents it was identified with, so no process may resume it.
+      end()
+      reconnect()
+    },
+    updatePresence: (next) => {
+      presence = next
+      // A pending update sends the latest presence when it runs.
+      if (cancelPresence !== undefined) return
+      const wait = presenceSentAt + PRESENCE_INTERVAL_MS - clock.now()
+      if (wait <= 0) sendPresence()
+      else cancelPresence = clock.schedule(sendPresence, wait)
+    },
     stop: () => {
+      cancelPresence?.()
       drop(NORMAL_CLOSURE)
       end()
     },
-    suspend: () => drop(RECONNECT_CLOSURE),
+    suspend: () => {
+      cancelPresence?.()
+      drop(RECONNECT_CLOSURE)
+    },
   }
 }

@@ -388,3 +388,128 @@ it('keeps asking Discord how to shard a bot until it answers', async () => {
   await gateway.close()
   await storage.close()
 })
+
+it('keeps a bot with enabled workflows online from its stored token until they are disabled', async () => {
+  const storage = await inMemoryStorage()
+  // Heartbeats are proven in the shard suite; keep them out of this window.
+  const gateway = await fakeGateway(1000 * HOUR)
+  const clock = manualClock()
+  const vault = createTokenVault(KEY, storage)
+  // Stored by an earlier agent call, before a restart.
+  await vault.store(BOT_ID, 'private-token-a')
+  const bots = createBotRuntimes({
+    vault,
+    clock,
+    log: () => {},
+    discordFetch: gateway.discordFetch(),
+  })
+
+  // Startup holds bots with enabled workflows, then resumes.
+  await bots.hold(BOT_ID, 512)
+  await bots.resume()
+  await vi.waitFor(() =>
+    expect(gateway.connections[0]?.received[0]).toMatchObject({
+      op: 2,
+      d: { token: 'private-token-a', intents: 512 },
+    }),
+  )
+  clock.advance(2 * IDLE_TIMEOUT_MS)
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  expect(gateway.connections[0]?.closeCode).toBeUndefined()
+
+  await bots.hold(BOT_ID, undefined)
+  clock.advance(IDLE_TIMEOUT_MS - HOUR)
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  expect(gateway.connections[0]?.closeCode).toBeUndefined()
+  clock.advance(HOUR)
+  await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(1000))
+
+  await bots.close()
+  await gateway.close()
+  await storage.close()
+})
+
+it("tries again once its workflows change after Discord refused a bot's intents", async () => {
+  const storage = await inMemoryStorage()
+  const gateway = await fakeGateway(1000 * HOUR)
+  const vault = createTokenVault(KEY, storage)
+  await vault.store(BOT_ID, 'private-token-a')
+  const bots = createBotRuntimes({
+    vault,
+    clock: manualClock(),
+    log: () => {},
+    discordFetch: gateway.discordFetch(),
+  })
+  await bots.hold(BOT_ID, 1 << 15)
+  await bots.resume()
+  await vi.waitFor(() => expect(gateway.connections[0]?.received[0]?.op).toBe(2))
+
+  // Message Content is off in the Developer Portal.
+  gateway.connections[0]?.close(4014)
+  await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(4014))
+  // The workflow that needed it was disabled.
+  await bots.hold(BOT_ID, 1)
+
+  await vi.waitFor(() =>
+    expect(gateway.connections[1]?.received[0]).toMatchObject({ op: 2, d: { intents: 1 } }),
+  )
+  await bots.close()
+  await gateway.close()
+  await storage.close()
+})
+
+it('sets a presence on every shard of the bot', async () => {
+  const storage = await inMemoryStorage()
+  const gateway = await fakeGateway(1000 * HOUR)
+  const clock = manualClock()
+  const bots = createBotRuntimes({
+    vault: createTokenVault(KEY, storage),
+    clock,
+    log: () => {},
+    discordFetch: gateway.discordFetch({ shards: 2, maxConcurrency: 2 }),
+  })
+  await bots.use(BOT_ID, 'private-token-a')
+  await vi.waitFor(() => expect(identified(gateway)).toEqual(['0/2', '1/2']))
+
+  const idle = { since: null, activities: [], status: 'idle', afk: false }
+  bots.updatePresence(BOT_ID, idle)
+
+  for (const shardId of [0, 1]) {
+    await vi.waitFor(() =>
+      expect(shardConnection(gateway, shardId)?.received).toContainEqual({ op: 3, d: idle }),
+    )
+  }
+  await bots.close()
+  await gateway.close()
+  await storage.close()
+})
+
+it('holds a presence for a shard still waiting to identify, which Discord would close over it', async () => {
+  const storage = await inMemoryStorage()
+  const gateway = await fakeGateway(1000 * HOUR)
+  const clock = manualClock()
+  const bots = createBotRuntimes({
+    vault: createTokenVault(KEY, storage),
+    clock,
+    log: () => {},
+    // One Identify every five seconds: the second shard waits, connected, for its turn.
+    discordFetch: gateway.discordFetch({ shards: 2, maxConcurrency: 1 }),
+  })
+  await bots.use(BOT_ID, 'private-token-a')
+  await vi.waitFor(() => expect(gateway.connections).toHaveLength(2))
+  await vi.waitFor(() => expect(identified(gateway)).toHaveLength(1))
+  const waiting = gateway.connections.find((c) => !c.received.some((p) => p.op === 2))
+
+  const idle = { since: null, activities: [], status: 'idle', afk: false }
+  bots.updatePresence(BOT_ID, idle)
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  expect(waiting?.received.map((p) => p.op)).not.toContain(3)
+
+  clock.advance(5_000)
+  await vi.waitFor(() =>
+    expect(waiting?.received.find((p) => p.op === 2)).toMatchObject({ d: { presence: idle } }),
+  )
+  await bots.close()
+  await gateway.close()
+  await storage.close()
+})

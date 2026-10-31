@@ -239,6 +239,9 @@ importers:
       '@discord-mcp/discord-api':
         specifier: workspace:*
         version: link:../discord-api
+      '@discord-mcp/storage':
+        specifier: workspace:*
+        version: link:../storage
       '@mia-cx/discord-catalog':
         specifier: workspace:*
         version: link:../discord-catalog

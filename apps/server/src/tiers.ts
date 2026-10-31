@@ -23,6 +23,12 @@ const NOT_FORWARDED = [
   'upgrade',
 ]
 
+/**
+ * The Discord user ID of the human whose login central checked. Central always replaces it, so a
+ * client can't name someone else, and a bot host reads it only from requests carrying the secret.
+ */
+const ACTOR_HEADER = 'x-discord-mcp-actor'
+
 /** Retry soon: the bot's owner is unreachable or the hosts are changing. */
 const moving = (error: string) => json(503, { error }, { 'retry-after': '1' })
 
@@ -32,11 +38,13 @@ const moving = (error: string) => json(503, { error }, { 'retry-after': '1' })
  */
 export const forwardToBotHosts =
   ({ hosts, secret }: Membership): Execute =>
-  async (request, _credential, botId) => {
+  async (request, _credential, botId, actorId) => {
     const owner = ownerOf(hosts, botId)
     if (owner === undefined) return moving('bot_host_unavailable')
     const headers = new Headers(request.headers)
     for (const name of NOT_FORWARDED) headers.delete(name)
+    headers.delete(ACTOR_HEADER)
+    if (actorId !== undefined) headers.set(ACTOR_HEADER, actorId)
     headers.set('authorization', `Bearer ${secret}`)
     try {
       const response = await fetch(`${owner}/mcp`, {
@@ -87,7 +95,7 @@ export const createBotHost = (
       if (botId === undefined) return json(403, { error: 'invalid_bot_token' })
       // A central replica with another host list routed it here; its owner will take the retry.
       if (ownerOf(hosts, botId) !== self) return moving('bot_moved')
-      return execute(request, credential, botId)
+      return execute(request, credential, botId, request.headers.get(ACTOR_HEADER) ?? undefined)
     },
   }
 }

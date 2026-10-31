@@ -1,6 +1,6 @@
 import type { Clock } from './clock.ts'
 import { createIdentifyGate, type SessionStartLimit } from './identify.ts'
-import { type Shard, type ShardSession, startShard } from './shard.ts'
+import { type Presence, type Shard, type ShardSession, startShard } from './shard.ts'
 import type { TokenVault } from './vault.ts'
 
 export const IDLE_TIMEOUT_MS = 24 * 60 * 60 * 1000
@@ -9,6 +9,8 @@ const RETRY_MS = 60_000
 const UNAUTHORIZED = 401
 /** An invalid shard, or a bot that outgrew its shard count. A fresh count fixes both. */
 const RESHARD_CLOSE_CODES = new Set([4010, 4011])
+/** Discord refused the intents: invalid (4013), or privileged and not allowed (4014). */
+const INTENT_CLOSE_CODES = new Set([4013, 4014])
 
 export interface BotRuntimesOptions {
   readonly vault: TokenVault
@@ -34,6 +36,17 @@ export interface BotRuntimes {
    * Failures are logged.
    */
   readonly resume: (owns?: (botId: string) => boolean) => Promise<void>
+  /**
+   * Keep a bot online with these Gateway intents while it has enabled workflows. `undefined`
+   * releases it, and its 24-hour idle timer starts over. A held bot that is offline comes online
+   * with its stored token, once `resume` has run, so stored sessions are resumed rather than
+   * replaced. Failures are logged rather than thrown.
+   */
+  readonly hold: (botId: string, intents: number | undefined) => Promise<void>
+  /** Set an online bot's presence on every shard. Throws when the bot is offline. */
+  readonly updatePresence: (botId: string, presence: Presence) => void
+  /** The token an online bot runs with. */
+  readonly tokenOf: (botId: string) => string | undefined
   /**
    * Disconnect every bot without ending its sessions, so the next process can resume them.
    * Resolves once every pending storage write has settled.
@@ -81,8 +94,15 @@ export const createBotRuntimes = ({
   onDispatch,
 }: BotRuntimesOptions): BotRuntimes => {
   const running = new Map<string, Runtime>()
-  /** Tokens Discord rejected for good, by bot. Retrying them only spends Identifies. */
-  const rejected = new Map<string, string>()
+  /**
+   * Tokens Discord rejected, by bot, with the close code. Retrying them only spends Identifies,
+   * until a workflow change may have fixed rejected intents.
+   */
+  const rejected = new Map<string, { readonly token: string; readonly code: number }>()
+  /** The intents of each bot with enabled workflows, which stays online without agent calls. */
+  const held = new Map<string, number>()
+  let resumed = false
+  let closed = false
   /**
    * Each bot's storage writes, chained so they land in order: a replaced token never overwrites
    * its successor, and an ended session never outlives the next one.
@@ -153,6 +173,7 @@ export const createBotRuntimes = ({
   const keepAlive = (botId: string, runtime: Runtime) => {
     runtime.cancelIdle()
     runtime.cancelIdle = clock.schedule(() => {
+      if (held.has(botId)) return
       log(`Bot ${botId} went offline after 24 hours without an agent call.`)
       stop(botId, runtime)
     }, IDLE_TIMEOUT_MS)
@@ -204,6 +225,7 @@ export const createBotRuntimes = ({
         clock,
         shardId,
         shardCount,
+        intents: held.get(botId) ?? 0,
         identifies,
         ...(session && { session }),
         onSession: (next) => saveSession(botId, shardId, next),
@@ -222,7 +244,7 @@ export const createBotRuntimes = ({
             log(
               `Bot ${botId} is offline: Discord closed its Gateway session with code ${code}. It stays offline until its token changes or the server restarts.`,
             )
-            rejected.set(botId, runtime.token)
+            rejected.set(botId, { token: runtime.token, code })
           }
           stop(botId, runtime)
         },
@@ -239,7 +261,7 @@ export const createBotRuntimes = ({
         log(
           `Bot ${botId} is offline: Discord rejected its token. It stays offline until it changes.`,
         )
-        rejected.set(botId, runtime.token)
+        rejected.set(botId, { token: runtime.token, code: UNAUTHORIZED })
         stop(botId, runtime)
       },
       (cause) => {
@@ -251,9 +273,25 @@ export const createBotRuntimes = ({
       },
     )
 
+  /** Bring a held bot online with its stored token. */
+  const startHeld = async (botId: string) => {
+    let token: string | undefined
+    try {
+      token = await vault.load(botId)
+    } catch (cause) {
+      return log(`Bot ${botId} stays offline: ${reason(cause)}`)
+    }
+    if (token === undefined) return log(`Bot ${botId} stays offline: no token is stored for it.`)
+    // Shut down, brought online by an agent call, or released, while loading.
+    if (closed || running.has(botId) || !held.has(botId) || rejected.get(botId)?.token === token) {
+      return
+    }
+    void connect(botId, add(botId, token, new Map()))
+  }
+
   return {
     use: (botId, token) => {
-      if (rejected.get(botId) === token) return Promise.resolve()
+      if (rejected.get(botId)?.token === token) return Promise.resolve()
       const current = running.get(botId)
       if (current?.token === token) {
         keepAlive(botId, current)
@@ -289,8 +327,37 @@ export const createBotRuntimes = ({
         if (!owns(botId) || running.has(botId)) continue
         void connect(botId, add(botId, token, saved))
       }
+      resumed = true
+      // Held bots without sessions to resume start afresh.
+      await Promise.all([...held.keys()].filter((id) => !running.has(id)).map(startHeld))
     },
+    hold: async (botId, intents) => {
+      if (closed) return
+      // Discord refused the intents the bot had; its workflows just changed, so try again.
+      if (INTENT_CLOSE_CODES.has(rejected.get(botId)?.code ?? 0)) rejected.delete(botId)
+      if (intents === undefined) {
+        held.delete(botId)
+        const current = running.get(botId)
+        if (current !== undefined) keepAlive(botId, current)
+        return
+      }
+      held.set(botId, intents)
+      const current = running.get(botId)
+      // A runtime whose shards haven't started yet starts them with these intents.
+      if (current !== undefined) {
+        for (const shard of current.shards) shard.setIntents(intents)
+        return
+      }
+      if (resumed) await startHeld(botId)
+    },
+    updatePresence: (botId, presence) => {
+      const shards = running.get(botId)?.shards ?? []
+      if (shards.length === 0) throw new Error(`Bot ${botId} is offline.`)
+      for (const shard of shards) shard.updatePresence(presence)
+    },
+    tokenOf: (botId) => running.get(botId)?.token,
     close: async () => {
+      closed = true
       for (const [botId, runtime] of running) {
         running.delete(botId)
         runtime.cancelIdle()
