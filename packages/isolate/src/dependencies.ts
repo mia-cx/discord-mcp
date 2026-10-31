@@ -127,13 +127,18 @@ const registryProxy = (registry: URL) => {
   const server = createServer((incoming, outgoing) => {
     // Plain-HTTP requests name their full URL.
     const target = URL.canParse(incoming.url ?? '') ? new URL(incoming.url ?? '') : undefined
-    if (target?.origin !== registry.origin) {
+    if (target?.origin !== registry.origin || target.protocol !== 'http:') {
       outgoing.writeHead(403).end()
       return
     }
     const upstream = httpRequest(
-      target,
-      { method: incoming.method, headers: incoming.headers },
+      {
+        hostname: registry.hostname,
+        port,
+        path: `${target.pathname}${target.search}`,
+        method: incoming.method,
+        headers: { ...incoming.headers, host: registry.host },
+      },
       (reply) => {
         outgoing.writeHead(reply.statusCode ?? 502, reply.headers)
         reply.pipe(outgoing)
