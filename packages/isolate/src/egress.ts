@@ -3,6 +3,7 @@ import { request as httpRequest, type IncomingMessage } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { BlockList, isIP, type LookupFunction } from 'node:net'
 import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 
 /** Everything that is not the public internet: private, loopback, link-local, and special ranges. */
 const nonPublic = new BlockList()
@@ -116,7 +117,8 @@ export const fetchPublic = async (
     )
     outgoing.on('error', reject)
     if (request.body === null) outgoing.end()
-    else Readable.fromWeb(request.body).pipe(outgoing)
+    // A failed upload destroys `outgoing`, whose error rejects above.
+    else pipeline(Readable.fromWeb(request.body), outgoing).catch(() => undefined)
   })
 
   const responseHeaders = new Headers()

@@ -4,17 +4,17 @@ import { format } from 'node:util'
 import script from 'textile:script'
 import { Client, ClientUser } from 'discord.js'
 
-const LOG_LIMIT_BYTES = 64 * 1024
+const LOG_LIMIT_CHARS = 64 * 1024
 const LEVELS = ['debug', 'info', 'log', 'warn', 'error']
 
 const captureConsole = () => {
   const lines = []
-  let bytes = 0
+  let chars = 0
   for (const level of LEVELS) {
     console[level] = (...args) => {
       const line = level === 'log' ? format(...args) : `${level}: ${format(...args)}`
-      bytes += line.length
-      if (bytes <= LOG_LIMIT_BYTES) lines.push(line)
+      chars += line.length
+      if (chars <= LOG_LIMIT_CHARS) lines.push(line)
       else if (lines.at(-1) !== '[logs truncated]') lines.push('[logs truncated]')
     }
   }

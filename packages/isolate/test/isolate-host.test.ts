@@ -34,4 +34,27 @@ describe('the isolate host', () => {
     const recovered = await host.run(await execution('1', 'export default () => "back"', 2000))
     expect(recovered).toEqual({ outcome: 'completed', result: 'back', logs: [] })
   })
+
+  it('reports a script that never settles, or exhausts its heap, as crashed', async () => {
+    const host = makeIsolateHost()
+    const waiting = await execution('1', 'export default () => new Promise(() => {})', 5000)
+    const hog = await execution(
+      '2',
+      'export default () => { const a = []; for (;;) a.push(new Array(1e6).fill(1)) }',
+      20_000,
+    )
+
+    const [never, oom] = await Promise.all([host.run(waiting), host.run(hog)])
+
+    expect(never.outcome).toBe('crashed')
+    expect(oom.outcome).toBe('crashed')
+  })
+
+  it('returns a large result with multi-byte characters intact', async () => {
+    const run = await makeIsolateHost().run(
+      await execution('1', `export default () => '€'.repeat(200000)`, 5000),
+    )
+
+    expect(run).toEqual({ outcome: 'completed', result: '€'.repeat(200000), logs: [] })
+  })
 })

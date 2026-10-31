@@ -5,12 +5,18 @@ import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { Broker } from './broker.ts'
 
-const workerd: { readonly default: string; readonly compatibilityDate: string } = createRequire(
-  import.meta.url,
-)('workerd')
+interface Workerd {
+  /** The platform binary's path. */
+  readonly default: string
+  readonly compatibilityDate: string
+}
+
+/** Loaded on first use: it throws on a platform with no workerd build, which must not stop the relay. */
+const loadWorkerd = (): Workerd => createRequire(import.meta.url)('workerd')
 
 /** V8 aborts the process past this heap, so a memory hog takes down only its own bot's process. */
 const HEAP_LIMIT_MB = 256
@@ -45,6 +51,7 @@ export interface ScriptExecution {
 
 /** The isolate's workerd config: the script, plus the broker as its only way out. */
 const configFor = (
+  workerd: Workerd,
   brokerSocket: string,
   runSocket: string,
 ) => `using Workerd = import "/workerd/workerd.capnp";
@@ -72,7 +79,10 @@ const serveBroker = (broker: Broker, signal: AbortSignal) =>
       for (const [name, value] of Object.entries(incoming.headers)) {
         for (const item of Array.isArray(value) ? value : [value ?? '']) headers.append(name, item)
       }
-      const hasBody = incoming.method !== 'GET' && incoming.method !== 'HEAD'
+      // HTTP's own rule for whether a request has a body; bodyless writes like reactions send none.
+      const hasBody =
+        incoming.headers['transfer-encoding'] !== undefined ||
+        Number(incoming.headers['content-length'] ?? 0) > 0
       const response = await broker(
         new Request(incoming.url ?? '', {
           method: incoming.method ?? 'GET',
@@ -83,9 +93,11 @@ const serveBroker = (broker: Broker, signal: AbortSignal) =>
       )
       outgoing.writeHead(response.status, [...response.headers].flat())
       if (response.body === null) outgoing.end()
-      else Readable.fromWeb(response.body).pipe(outgoing)
+      // A body that fails midway resets the isolate's connection, which its fetch reports.
+      else await pipeline(Readable.fromWeb(response.body), outgoing).catch(() => undefined)
     } catch {
-      outgoing.writeHead(502).end()
+      if (outgoing.headersSent) outgoing.destroy()
+      else outgoing.writeHead(502).end()
     }
   })
 
@@ -96,10 +108,11 @@ const listen = (server: Server, path: string) =>
   })
 
 const readLimited = async (response: IncomingMessage) => {
+  response.setEncoding('utf8')
   let body = ''
-  for await (const chunk of response) {
+  for await (const chunk of response as AsyncIterable<string>) {
     body += chunk
-    if (body.length > RESULT_LIMIT_BYTES) {
+    if (Buffer.byteLength(body) > RESULT_LIMIT_BYTES) {
       response.destroy()
       return undefined
     }
@@ -127,10 +140,23 @@ const invoke = async (socketPath: string, botUser: unknown, signal: AbortSignal)
   }
 }
 
-const parseOutcome = (body: string | undefined): ScriptOutcome =>
-  body === undefined
-    ? { outcome: 'crashed', message: `The script's result exceeded ${RESULT_LIMIT_BYTES} bytes.` }
-    : (JSON.parse(body) as ScriptOutcome)
+/** The entry module answers with an outcome; anything else is workerd's own error page. */
+const parseOutcome = (body: string | undefined, stderr: () => string): ScriptOutcome => {
+  if (body === undefined) {
+    return {
+      outcome: 'crashed',
+      message: `The script's result exceeded ${RESULT_LIMIT_BYTES} bytes.`,
+    }
+  }
+  try {
+    return JSON.parse(body) as ScriptOutcome
+  } catch {
+    return {
+      outcome: 'crashed',
+      message: `The script ended without a result: ${body.slice(0, 200)}\n${stderr()}`.trim(),
+    }
+  }
+}
 
 /**
  * Run one script in a fresh workerd process, killed at the deadline.
@@ -149,9 +175,15 @@ const execute = async (execution: ScriptExecution): Promise<ScriptOutcome> => {
   const server = serveBroker(execution.broker, signal)
   let stderr = ''
   try {
+    let workerd: Workerd
+    try {
+      workerd = loadWorkerd()
+    } catch (error) {
+      return { outcome: 'crashed', message: `workerd is unavailable here: ${String(error)}` }
+    }
     await listen(server, brokerSocket)
     await writeFile(join(dir, 'script.js'), execution.bundle)
-    await writeFile(join(dir, 'config.capnp'), configFor(brokerSocket, runSocket))
+    await writeFile(join(dir, 'config.capnp'), configFor(workerd, brokerSocket, runSocket))
     const child = spawn(workerd.default, ['serve', 'config.capnp'], {
       cwd: dir,
       env: {},
@@ -162,7 +194,6 @@ const execute = async (execution: ScriptExecution): Promise<ScriptOutcome> => {
     child.stderr.on('data', (chunk: Buffer) => {
       stderr = (stderr + chunk.toString()).slice(-STDERR_TAIL_BYTES)
     })
-    child.on('error', () => {})
 
     return await new Promise<ScriptOutcome>((resolve, reject) => {
       const timer = setTimeout(
@@ -170,16 +201,27 @@ const execute = async (execution: ScriptExecution): Promise<ScriptOutcome> => {
         execution.timeoutMs,
       )
       signal.addEventListener('abort', () => clearTimeout(timer), { once: true })
+      let dropped = ''
+      child.once('error', (error) => {
+        if (!signal.aborted) {
+          resolve({ outcome: 'crashed', message: `workerd did not start: ${error.message}` })
+        }
+      })
       child.once('exit', (code, exitSignal) =>
         resolve({
           outcome: 'crashed',
           message:
-            `workerd exited (${code ?? exitSignal}) before the script finished.\n${stderr}`.trim(),
+            `workerd exited (${code ?? exitSignal}) before the script finished.${dropped}\n${stderr}`.trim(),
         }),
       )
       invoke(runSocket, execution.botUser, signal).then(
-        (body) => resolve(parseOutcome(body)),
-        (error: unknown) => (signal.aborted ? undefined : reject(error)),
+        (body) => resolve(parseOutcome(body, () => stderr)),
+        // The connection dropped: workerd died or is dying. Its exit reports why, with stderr.
+        (error: unknown) => {
+          if (signal.aborted) return
+          dropped = ` The connection to it failed: ${String(error)}.`
+          child.kill('SIGKILL')
+        },
       )
       execution.signal?.addEventListener('abort', () => reject(execution.signal?.reason), {
         once: true,
