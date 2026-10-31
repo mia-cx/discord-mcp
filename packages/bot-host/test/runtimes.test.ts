@@ -70,7 +70,35 @@ it('resumes an online bot after a restart, from what the previous process stored
   await storage.close()
 })
 
-it('keeps clearing an idle bot’s session while storage fails, so a restart leaves it offline', async () => {
+it('retries a failed session store, so an online bot still resumes after a restart', async () => {
+  const storage = await inMemoryStorage()
+  const gateway = await fakeGateway(100 * HOUR)
+  const clock = manualClock()
+  const vault = createTokenVault(KEY, storage)
+  const storeSession = vi
+    .fn(vault.storeSession)
+    .mockRejectedValueOnce(new Error('Connection terminated unexpectedly'))
+  const bots = createBotRuntimes({
+    vault: { ...vault, storeSession },
+    clock,
+    log: () => {},
+    gatewayUrl: gateway.url,
+  })
+
+  // READY is the only dispatch, and storing it fails.
+  await bots.use(BOT_ID, 'private-token-a')
+  await vi.waitFor(() => expect(storeSession).toHaveBeenCalledTimes(1))
+  expect(await vault.loadSessions()).toEqual([])
+
+  clock.advance(60_000)
+  await vi.waitFor(async () => expect(await vault.loadSessions()).toHaveLength(1))
+
+  await bots.close()
+  await gateway.close()
+  await storage.close()
+})
+
+it('clears an idle bot’s session despite a failed write, even if it restarts first', async () => {
   const storage = await inMemoryStorage()
   const gateway = await fakeGateway(100 * HOUR)
   const clock = manualClock()
@@ -91,10 +119,9 @@ it('keeps clearing an idle bot’s session while storage fails, so a restart lea
   await vi.waitFor(() => expect(clearSession).toHaveBeenCalledTimes(1))
   expect(await vault.loadSessions()).toHaveLength(1)
 
-  clock.advance(60_000)
-  await vi.waitFor(async () => expect(await vault.loadSessions()).toEqual([]))
-
+  // Shutting down inside the retry window still clears it.
   await bots.close()
+  expect(await vault.loadSessions()).toEqual([])
   await gateway.close()
   await storage.close()
 })

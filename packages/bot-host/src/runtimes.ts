@@ -6,7 +6,7 @@ export const IDLE_TIMEOUT_MS = 24 * 60 * 60 * 1000
 export const DISCORD_GATEWAY_URL = 'wss://gateway.discord.gg'
 /** Each bot runs one shard. */
 const SHARD_ID = 0
-const SESSION_CLEAR_RETRY_MS = 60_000
+const SESSION_RETRY_MS = 60_000
 
 export interface BotRuntimesOptions {
   readonly vault: TokenVault
@@ -60,8 +60,11 @@ export const createBotRuntimes = ({
   const writes = new Map<string, Promise<void>>()
   /** Sessions waiting in their bot's write chain. Only the newest is written. */
   const unsaved = new Map<string, ShardSession | undefined>()
-  /** Scheduled retries of failed session clears, by bot; each cancels its retry. */
-  const retries = new Map<string, () => void>()
+  /** Failed session writes waiting to retry, by bot. Any newer write for the bot replaces one. */
+  const retries = new Map<
+    string,
+    { readonly session: ShardSession | undefined; readonly cancel: () => void }
+  >()
 
   const write = (botId: string, task: () => Promise<void>) => {
     const done = (writes.get(botId) ?? Promise.resolve()).then(task)
@@ -75,7 +78,7 @@ export const createBotRuntimes = ({
   // A crash loses at most the writes still queued, so a resume replays a few events twice
   // rather than skipping any.
   const saveSession = (botId: string, session: ShardSession | undefined) => {
-    retries.get(botId)?.()
+    retries.get(botId)?.cancel()
     retries.delete(botId)
     const queued = unsaved.has(botId)
     unsaved.set(botId, session)
@@ -89,14 +92,12 @@ export const createBotRuntimes = ({
         : vault.storeSession(botId, SHARD_ID, latest)
     }).catch((cause) => {
       log(`Saving bot ${botId}'s Gateway session failed: ${reason(cause)}`)
-      // A stale row would let the next process resume a bot that went offline on purpose, so
-      // keep clearing until storage recovers. A bot back online overwrites the row itself.
-      if (latest !== undefined) return
-      const retry = () => {
-        retries.delete(botId)
-        if (!running.has(botId)) saveSession(botId, undefined)
-      }
-      retries.set(botId, clock.schedule(retry, SESSION_CLEAR_RETRY_MS))
+      // A newer session is already queued behind this one.
+      if (unsaved.has(botId)) return
+      // Retry until storage recovers. A lost store can leave an online bot unresumable, since
+      // READY may be its last dispatch; a lost clear lets the next process revive an idle bot.
+      const cancel = clock.schedule(() => saveSession(botId, latest), SESSION_RETRY_MS)
+      retries.set(botId, { session: latest, cancel })
     })
   }
 
@@ -183,8 +184,10 @@ export const createBotRuntimes = ({
         runtime.cancelIdle()
         runtime.shard?.suspend()
       }
+      // One last try at failed writes, so the next process starts from the newest state.
+      for (const [botId, { session }] of retries) saveSession(botId, session)
       await Promise.all(writes.values())
-      for (const cancel of retries.values()) cancel()
+      for (const { cancel } of retries.values()) cancel()
       retries.clear()
     },
   }
