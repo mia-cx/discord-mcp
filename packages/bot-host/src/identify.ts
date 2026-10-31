@@ -42,7 +42,9 @@ interface Bucket {
 
 /**
  * Discord resets a bot's token once it spends its daily Identifies. The gate reserves at most half
- * of what remains, leaving the rest to the bot's other clients and to the next process.
+ * of what remains, leaving the rest to the bot's other clients and to the next process. Shards
+ * still waiting to send when Discord's window resets count against the old window, so the new
+ * one can see up to that many more, but never past Discord's total.
  */
 export const createIdentifyGate = (clock: Clock, limit: SessionStartLimit): IdentifyGate => {
   let allowance = Math.floor(limit.remaining / 2)
