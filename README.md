@@ -76,6 +76,11 @@ Both paths require OAuth and bot credentials on every HTTP request.
 | `discord_guild_get` | Read a guild with a compact, typed result. |
 | `discord_permissions_explain` | Diagnose effective guild/channel permissions. |
 | `discord_script_run` | Run one-off discord.js code as the bot, checked against its grants. |
+| `discord_workflow_publish` | Store a new revision of a workflow: discord.js code that runs on Gateway events. |
+| `discord_workflow_list` | List the bot's workflows, what each runs with, and who changed them. |
+| `discord_workflow_enable` | Run a workflow revision on the bot's events and show its grants. |
+| `discord_workflow_disable` | Stop running a workflow. |
+| `discord_workflow_delete` | Delete a workflow and its revisions. |
 
 The catalog covers the vendored specification's 242 operations. The relay exposes
 bot-authenticated, non-credential operations. OAuth-only endpoints and operations
@@ -84,7 +89,7 @@ the supported operation and its input schema.
 
 Arguments are validated locally before execution. Destructive and admin calls act
 directly under the supplied bot's Discord permissions, with no preview-token
-sessions; only [scripts](#scripts) carry server-side grants. This relay does not
+sessions; only [scripts](#scripts) and [workflows](#workflows) carry server-side grants. This relay does not
 receive voice audio or run agent conversations.
 
 Calls currently accept JSON payloads. Multipart file upload is not implemented.
@@ -126,6 +131,44 @@ A script is killed after `timeoutSeconds` (30 by default, 120 at most).
 The HTTP relay offers the tool only when `DISCORD_OAUTH_ALLOWED_USER_IDS` is set.
 Local stdio always offers it. workerd ships as an npm dependency for glibc Linux,
 macOS, and Windows.
+
+## Workflows
+
+A workflow is discord.js code that runs as the bot on Gateway events, while no agent is
+connected. It is written like an ordinary bot:
+
+```ts
+import { Client, Events, GatewayIntentBits } from 'discord.js'
+
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+})
+
+client.on(Events.MessageCreate, async (message) => {
+  if (message.content === 'ping') await message.reply('pong')
+})
+
+client.login(process.env.DISCORD_TOKEN)
+```
+
+`discord_workflow_publish` loads the source once in workerd to find the events its clients
+listen for and the intents they declare, then stores it as the workflow's next immutable
+revision. `discord_workflow_enable` runs a revision and returns its grants and intents;
+Discord's privileged intents must be on in the Developer Portal first. While any workflow is
+enabled, the bot stays online without agent calls. After a restart, workflows also run the
+events Discord replays.
+
+Workflows listen for `messageCreate`, `messageUpdate`, `messageDelete`,
+`messageReactionAdd`, `messageReactionRemove`, `guildMemberAdd`, `guildMemberRemove`, and
+`interactionCreate`. Each event runs each listening workflow in its own fresh workerd
+process for at most 30 seconds, so nothing in memory lasts between events. A guild's events
+run in order. The bot's own messages are not delivered. Grants work as for scripts. A
+workflow may also answer the interaction it is handling (`reply`, `deferReply`, `editReply`,
+`followUp`) with the `interaction` and `webhook` families, and set the bot's presence.
+
+Anyone with relay access and the bot's token manages its workflows. Every publish, enable,
+disable, and delete is recorded with the acting human's Discord user ID, and
+`discord_workflow_list` shows the latest changes. Workflow tools need [bot hosting](#bot-hosting).
 
 ## Permission metadata
 
@@ -236,7 +279,8 @@ resource, issuer, browser state, and one-time codes. Registrations expire after
 Bot hosting keeps agents' bots online. An agent's first call for a bot stores its token,
 encrypted, in Postgres and connects the bot to Discord's Gateway with an online presence.
 Each later call restarts a 24-hour timer; when it runs out, the bot disconnects and shows
-offline. Startup applies pending database migrations.
+offline, unless it has enabled [workflows](#workflows). Startup applies pending database
+migrations and brings every bot with enabled workflows online.
 
 A restart keeps bots online. The bot's Gateway session is stored encrypted alongside its
 token, and the next process resumes it, so Discord replays the events sent while the server was
@@ -277,9 +321,9 @@ Stateless HTTP was already possible before that revision.
 
 [PLAN.md](./PLAN.md) describes the earlier stateful control-plane design.
 Its libraries and tests remain in the workspace, but the server executable no
-longer starts that application. Workflows, persistent templates/blueprints,
-and PAT/OIDC administration are outside the relay. Its Docker sandbox supervisor
-has been removed; workflows have no execution backend.
+longer starts that application. Persistent templates/blueprints and PAT/OIDC
+administration are outside the relay. Its Docker sandbox supervisor has been
+removed; [workflows](#workflows) now run in workerd.
 
 ## License
 
