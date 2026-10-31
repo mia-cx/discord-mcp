@@ -43,7 +43,7 @@ describe('the shard supervisor', () => {
     const connection = gateway.connections[0]
     expect(connection?.received[0]).toMatchObject({
       op: 2,
-      d: { token: TOKEN, intents: 0, presence: { status: 'online', afk: false } },
+      d: { token: TOKEN, intents: 129, presence: { status: 'online', afk: false } },
     })
 
     // The first beat is jittered: random() is 0.5, so half an interval.

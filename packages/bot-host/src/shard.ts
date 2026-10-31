@@ -11,6 +11,8 @@ const Op = {
   HeartbeatAck: 11,
 } as const
 
+/** `GUILDS` and `GUILD_VOICE_STATES`: voice joins need the bot's own voice state updates. */
+const INTENTS = (1 << 0) | (1 << 7)
 /** Discord refuses a new session after these too, so reconnecting cannot help. */
 const FATAL_CLOSE_CODES = new Set([4004, 4010, 4011, 4012, 4013, 4014])
 /**
@@ -82,9 +84,13 @@ export interface ShardOptions {
   readonly onFatal: (code: number) => void
   /** The daily Identify budget is spent; the shard reconnects after `waitMs`. */
   readonly onIdentifyBudgetSpent: (waitMs: number) => void
+  /** Hears every dispatch, `READY` and `RESUMED` included. */
+  readonly onDispatch?: (event: string, data: unknown) => void
 }
 
 export interface Shard {
+  /** Send a payload on the open connection. False when there is none. */
+  readonly send: (payload: { readonly op: number; readonly d: unknown }) => boolean
   /** End the session, so Discord shows the bot offline, and stop reconnecting. */
   readonly stop: () => void
   /** Disconnect and stop reconnecting, but leave the session resumable for the next process. */
@@ -94,7 +100,7 @@ export interface Shard {
 /**
  * One Gateway shard that identifies with an online presence and heartbeats. After a drop it
  * resumes its session, so Discord replays the dispatches it missed, and identifies afresh only
- * once Discord says the session is gone. Shard 0 of 1, no intents.
+ * once Discord says the session is gone. Shard 0 of 1, guild and voice state intents.
  */
 export const startShard = ({
   token,
@@ -105,6 +111,7 @@ export const startShard = ({
   onReady,
   onFatal,
   onIdentifyBudgetSpent,
+  onDispatch,
 }: ShardOptions): Shard => {
   let socket: WebSocket | undefined
   let session = saved
@@ -185,6 +192,7 @@ export const startShard = ({
       attempts = 0
       onReady()
     }
+    if (typeof t === 'string') onDispatch?.(t, d)
   }
 
   const receive = (payload: Payload) => {
@@ -206,7 +214,7 @@ export const startShard = ({
           op: Op.Identify,
           d: {
             token,
-            intents: 0,
+            intents: INTENTS,
             properties: { os: process.platform, browser: 'discord-mcp', device: 'discord-mcp' },
             presence: { since: null, activities: [], status: 'online', afk: false },
           },
@@ -281,6 +289,11 @@ export const startShard = ({
 
   connect()
   return {
+    send: (payload) => {
+      if (socket?.readyState !== WebSocket.OPEN) return false
+      send(payload)
+      return true
+    },
     stop: () => {
       drop(NORMAL_CLOSURE)
       end()
