@@ -117,7 +117,10 @@ Each script runs once in a fresh [workerd](https://github.com/cloudflare/workerd
 process with no Gateway connection and no bot token. Every request it makes, whatever
 its URL, reaches a broker in the relay. The broker matches Discord calls to catalog
 operations, checks the grants, and replays them with the request's bot token.
-Outbound HTTP reaches public addresses only. One bot's scripts run one at a time.
+Outbound HTTP reaches granted hosts on public addresses only: the broker checks every
+address a hostname resolves to and every redirect target, refuses private, loopback,
+link-local, cloud metadata, and IPv4-mapped addresses, and connects to the address it
+checked. One bot's scripts run one at a time.
 A script is killed after `timeoutSeconds` (30 by default, 120 at most).
 
 The HTTP relay offers the tool only when `DISCORD_OAUTH_ALLOWED_USER_IDS` is set.
