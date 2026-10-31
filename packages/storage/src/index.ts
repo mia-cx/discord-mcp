@@ -95,6 +95,15 @@ export interface VoiceOptOutChange {
   readonly optedOut: boolean
 }
 
+/** Hears voice opt-out changes as they commit. */
+export interface OptOutWatcher {
+  readonly changed: (change: VoiceOptOutChange) => void
+  /** The connection dropped and came back: changes made meanwhile were missed. */
+  readonly missed: () => void
+  /** Why the connection dropped; it reconnects on its own. */
+  readonly lost: (error: Error) => void
+}
+
 export interface PublishWorkflow {
   readonly botId: string
   readonly name: string
@@ -212,13 +221,9 @@ export interface Storage {
   readonly voiceOptedOut: (botId: string, guildId: string, userId: string) => Promise<boolean>
   /**
    * Hear every voice opt-out change any process sharing this database makes, this one included,
-   * once it commits. Resolves to a function that stops listening. A lost connection reconnects;
-   * changes made while it is down are missed, and `onError` hears why.
+   * once it commits. Resolves to a function that stops listening.
    */
-  readonly watchVoiceOptOuts: (
-    listener: (change: VoiceOptOutChange) => void,
-    onError: (error: Error) => void,
-  ) => Promise<() => Promise<void>>
+  readonly watchVoiceOptOuts: (watcher: OptOutWatcher) => Promise<() => Promise<void>>
   readonly close: () => Promise<void>
 }
 
@@ -235,12 +240,6 @@ const QUERY_TIMEOUT_MS = 30_000
 const KEEPALIVE_IDLE_S = 10
 const KEEPALIVE_PROBES = 3
 
-/**
- * Connect to Postgres and apply pending migrations before anything reads or writes.
- * `onError` hears connection failures outside a query, such as Postgres restarting; the pool
- * replaces the lost connection on next use. `url` must reach the primary directly, with no pooler:
- * the scheduler's session locks need a session of their own, which sets its own keepalives.
- */
 /** How long a lost listening connection waits before reconnecting. */
 const RELISTEN_MS = 1_000
 
@@ -250,7 +249,7 @@ const RELISTEN_MS = 1_000
  */
 const listenOn =
   (url: string): Listen =>
-  (channel, onPayload, onError) =>
+  (channel, { payload, resumed, lost: onLost }) =>
     new Promise((resolve, reject) => {
       let stopped = false
       let current: Client | undefined
@@ -270,7 +269,7 @@ const listenOn =
         const reopen = (error: Error) => {
           if (lost || stopped) return
           lost = true
-          onError(error)
+          onLost(error)
           void client.end().catch(() => {})
           retry = setTimeout(() => open(false), RELISTEN_MS)
         }
@@ -278,16 +277,14 @@ const listenOn =
         client.on('end', () => reopen(new Error('The listening connection to Postgres ended.')))
         client.on('notification', (message) => {
           if (message.channel === channel && message.payload !== undefined) {
-            onPayload(message.payload)
+            payload(message.payload)
           }
         })
         client
           .connect()
           .then(() => client.query(`listen "${channel}"`))
           .then(
-            () => {
-              if (first) resolve(stop)
-            },
+            () => (first ? resolve(stop) : resumed()),
             (error: Error) => {
               if (!first) return reopen(error)
               stopped = true
@@ -299,6 +296,12 @@ const listenOn =
       open(true)
     })
 
+/**
+ * Connect to Postgres and apply pending migrations before anything reads or writes.
+ * `onError` hears connection failures outside a query, such as Postgres restarting; the pool
+ * replaces the lost connection on next use. `url` must reach the primary directly, with no pooler:
+ * the scheduler's session locks need a session of their own, which sets its own keepalives.
+ */
 export const connectStorage = async (
   url: string,
   onError: (error: Error) => void,

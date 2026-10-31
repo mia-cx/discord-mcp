@@ -67,8 +67,12 @@ const VOICE_OPT_OUTS_CHANNEL = 'voice_opt_outs'
  */
 export type Listen = (
   channel: string,
-  onPayload: (payload: string) => void,
-  onError: (error: Error) => void,
+  handlers: {
+    readonly payload: (payload: string) => void
+    /** Listening again after a lost connection, which missed what was sent meanwhile. */
+    readonly resumed: () => void
+    readonly lost: (error: Error) => void
+  },
 ) => Promise<() => Promise<void>>
 
 export const createStorage = (
@@ -457,12 +461,12 @@ export const createStorage = (
     return found.length > 0
   },
 
-  watchVoiceOptOuts: (listener, onError) =>
-    listen(
-      VOICE_OPT_OUTS_CHANNEL,
-      (payload) => listener(JSON.parse(payload) as VoiceOptOutChange),
-      onError,
-    ),
+  watchVoiceOptOuts: ({ changed, missed, lost }) =>
+    listen(VOICE_OPT_OUTS_CHANNEL, {
+      payload: (payload) => changed(JSON.parse(payload) as VoiceOptOutChange),
+      resumed: missed,
+      lost,
+    }),
 
   close: async () => {
     await locks.close()

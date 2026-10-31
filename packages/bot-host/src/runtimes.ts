@@ -125,8 +125,8 @@ export const createBotRuntimes = ({
     }
   }
   // A click applies to this process's bots as soon as it is stored. Every bot host, this one
-  // included, hears it again from Postgres; should that connection drop, a bot checks storage
-  // whenever a person starts speaking.
+  // included, hears it again from Postgres, and checks everyone again once a dropped connection
+  // to it comes back.
   const consent = createConsent({
     storage,
     discordFetch,
@@ -135,9 +135,14 @@ export const createBotRuntimes = ({
     changed: optOutChanged,
   })
   const watching = storage
-    .watchVoiceOptOuts(optOutChanged, (error) =>
-      log(`Lost the voice opt-out feed from Postgres; reconnecting: ${error.message}`),
-    )
+    .watchVoiceOptOuts({
+      changed: optOutChanged,
+      missed: () => {
+        for (const runtime of running.values()) runtime.voice.recheck()
+      },
+      lost: (error) =>
+        log(`Lost the voice opt-out feed from Postgres; reconnecting: ${error.message}`),
+    })
     .catch((cause) => {
       log(`Could not follow voice opt-outs from other bot hosts: ${reason(cause)}`)
       return async () => {}

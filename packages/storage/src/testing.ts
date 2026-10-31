@@ -25,8 +25,8 @@ export const inMemoryStorage = async (): Promise<Storage> => {
     db,
     locks,
     () => client.close(),
-    async (channel, onPayload) => {
-      const unlisten = await client.listen(channel, onPayload)
+    async (channel, { payload }) => {
+      const unlisten = await client.listen(channel, payload)
       return () => unlisten()
     },
   )

@@ -562,6 +562,37 @@ describe('receiving voice', () => {
     ).toEqual([expect.objectContaining({ d: expect.objectContaining({ self_deaf: true }) })])
   })
 
+  it('names the people afresh when the bot connects to a new voice server', async () => {
+    const { voice, voiceServer, gateway } = await start()
+    await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID, true)
+    await daveReady(voiceServer)
+    const { agent, socket } = await agentSocket()
+    const heard = listen(agent)
+    voice.attach(GUILD_ID, socket, { codec: 'opus' })
+    voiceServer.connect([BOB])
+    await vi.waitFor(() =>
+      expect(heard.events).toEqual([
+        { type: 'join', user_id: ALICE },
+        { type: 'join', user_id: BOB },
+      ]),
+    )
+
+    // Discord moves the call to another voice server; Bob left while it did.
+    gateway.connections[0]?.send({
+      op: 0,
+      t: 'VOICE_SERVER_UPDATE',
+      s: 998,
+      d: { guild_id: GUILD_ID, token: 'fake-voice-token-2', endpoint: voiceServer.endpoint },
+    })
+    await vi.waitFor(() =>
+      expect(heard.events.slice(2)).toEqual([
+        { type: 'leave', user_id: ALICE },
+        { type: 'leave', user_id: BOB },
+        { type: 'join', user_id: ALICE },
+      ]),
+    )
+  })
+
   it("applies another bot host's opt-out and undo at once", async () => {
     const { voice, voiceServer, storage } = await start()
     await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID, true)

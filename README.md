@@ -401,8 +401,8 @@ sends audio. Joining the same channel again switches receiving on or off. If the
 another channel, it stops receiving until it joins with `receive: true` there.
 
 People who opted out never appear: their audio is dropped before it is decrypted. Opt-outs and
-undos apply at once on every bot host, which Postgres notifies of each one. While a bot host's
-notification connection is down, its bots check storage whenever a person starts speaking.
+undos apply at once on every bot host, which Postgres notifies of each one. A bot host that
+loses that notification connection checks everyone again once it reconnects.
 Opt-outs are stored as user IDs only, with the bot and server for a per-bot opt-out. The buttons
 answer while the bot is online.
 

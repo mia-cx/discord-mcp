@@ -230,6 +230,8 @@ export interface Voice extends BotVoice {
    * An opt-out drops them at once; an undo checks storage again, since another opt-out may hold.
    */
   readonly optOutChanged: (guildId: string | undefined, userId: string, optedOut: boolean) => void
+  /** Opt-out changes may have been missed: check everyone in every channel again. */
+  readonly recheck: () => void
   /**
    * Leave every voice channel and close every socket, as the bot goes offline. Returns the shards
    * whose leaves could not reach Discord, whose sessions would keep the bot in those channels.
@@ -364,7 +366,11 @@ export const createVoice = ({ botId, shardOf, send, consent, clock, log }: Voice
   /** Listen to a person, so their audio is decrypted and reaches the agent. */
   const subscribe = (session: Session, userId: string, person: Person) => {
     const stream = session.connection.receiver.subscribe(userId)
-    stream.on('data', (packet: Buffer) => session.relay?.audio(userId, packet))
+    stream.on('data', (packet: Buffer) => {
+      // While the voice connection resumes, the receiver skips DAVE and pushes ciphertext.
+      if (session.connection.state.status !== VoiceConnectionStatus.Ready) return
+      session.relay?.audio(userId, packet)
+    })
     stream.on('error', (error) => log(`Bot ${botId} lost a speaker's audio: ${error.message}`))
     // Ended by us, or by a packet that failed transport decryption: listen again if still wanted.
     stream.once('close', () => {
@@ -559,8 +565,6 @@ export const createVoice = ({ botId, shardOf, send, consent, clock, log }: Voice
       arrive(session, userId)
       const person = session.people.get(userId)
       if (person?.shown) session.relay?.event({ type: 'speaking', user_id: userId, speaking: true })
-      // Each time someone starts speaking, an opt-out made through another bot host applies.
-      check(session, userId)
     })
     receiver.speaking.on('end', (userId: string) => {
       if (session.people.get(userId)?.shown) {
@@ -568,7 +572,13 @@ export const createVoice = ({ botId, shardOf, send, consent, clock, log }: Voice
       }
     })
 
-    connection.on('stateChange', (_, state) => {
+    connection.on('stateChange', (previous, state) => {
+      // A new voice server session, not a resumed one, names its people afresh with opcode 11.
+      const networking = Reflect.get(state, 'networking')
+      const before = Reflect.get(previous, 'networking')
+      if (before !== undefined && networking !== undefined && networking !== before) {
+        for (const userId of [...session.people.keys()]) depart(session, userId)
+      }
       session.cancelGrace()
       if (state.status === VoiceConnectionStatus.Disconnected) {
         session.cancelGrace = clock.schedule(() => destroy(session, LEFT), RECONNECT_GRACE_MS)
@@ -706,6 +716,11 @@ export const createVoice = ({ botId, shardOf, send, consent, clock, log }: Voice
         if (guildId !== undefined && session.guildId !== guildId) continue
         if (optedOut) revoke(session, userId)
         else check(session, userId)
+      }
+    },
+    recheck: () => {
+      for (const session of sessions.values()) {
+        for (const userId of session.people.keys()) check(session, userId)
       }
     },
     close: () => {
