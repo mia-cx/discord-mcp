@@ -167,7 +167,7 @@ a well-formed entry.
 
 ## Run from source
 
-Requires Node.js 24+ and the pnpm version pinned in `package.json`.
+Requires Node.js 24.9+ and the pnpm version pinned in `package.json`.
 
 ```sh
 corepack pnpm install --frozen-lockfile
