@@ -39,7 +39,8 @@ Login does not prove bot ownership or restrict a bot to that human's guild permi
 Possession of a valid bot token grants that bot's existing authority.
 
 No local accounts, PATs, stored OAuth profiles, database, Gateway connection,
-background jobs, or stored bot credentials are required. The client holds an
+background jobs, or stored bot credentials are required. [Bot hosting](#bot-hosting)
+adds a database and stored, encrypted bot tokens. The client holds an
 encrypted, audience-bound relay credential enclosing its Discord login grant.
 Authentication results and Discord responses are not cached. Responses use
 `Cache-Control: no-store`. Revoking Discord authorization blocks the next request.
@@ -176,6 +177,8 @@ Keep the environment file private. Rotating the encryption key invalidates all l
 | `ALLOWED_HOSTS` | Comma-separated hostnames; required for non-loopback binds. |
 | `ALLOWED_ORIGINS` | Optional additional browser origins. The request origin and configured public origin are accepted. |
 | `DISCORD_MCP_REST_TIMEOUT_MS` | `15000`, applied to Discord requests. |
+| `DATABASE_URL` | Optional Postgres URL. Turns on [bot hosting](#bot-hosting) when the allowlist names users. |
+| `TOKEN_VAULT_KEY` | Required for bot hosting. Stable random 32-byte base64 key that encrypts stored bot tokens. |
 | `DISCORD_TOKEN` | Stdio only. Ignored by the HTTP relay. |
 
 `/health/live` and `/health/ready` return HTTP 200 when the process is serving.
@@ -191,6 +194,18 @@ exchange at `/token`. Both OAuth legs require S256 PKCE. The issuer validates ex
 resource, issuer, browser state, and one-time codes. Registrations expire after
 30 days. Client ID metadata documents are not implemented.
 
+### Bot hosting
+
+Bot hosting keeps agents' bots online. An agent's first call for a bot stores its token,
+encrypted, in Postgres and connects the bot to Discord's Gateway with an online presence.
+Each later call restarts a 24-hour timer; when it runs out, the bot disconnects and shows
+offline. Startup applies pending database migrations.
+
+Set `DATABASE_URL`, `TOKEN_VAULT_KEY` (generate it like `OAUTH_ENCRYPTION_KEY`), and a
+`DISCORD_OAUTH_ALLOWED_USER_IDS` list. Without that list, the server logs a warning and
+serves the plain relay. Back up the vault key apart from the database: without it, stored
+tokens cannot be decrypted.
+
 For agent-operated clients, use the [curl example](./docs/operating.md#curl).
 For a developer-Team-derived access list, follow
 [the explicit membership sync procedure](./docs/operating.md#developer-team-allowlist).
@@ -204,6 +219,9 @@ Public routing lives in `mia-cx/yggdrasil-spec`. Consult
 corepack pnpm check        # Formatting, TypeScript build, and ordinary tests
 corepack pnpm spec:check   # Catalog coverage, classification, permissions, and determinism
 ```
+
+After changing `packages/storage/src/schema.ts`, generate a migration with
+`corepack pnpm --filter @discord-mcp/storage generate` and commit it.
 
 Integration tests cover browser/CLI login, credential bindings, code and refresh replay,
 concurrent bridge refreshes,
