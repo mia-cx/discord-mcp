@@ -1078,3 +1078,61 @@ it('takes a bot offline once for all the shards Discord closed, even if that pas
   await gateway.close()
   await storage.close()
 })
+
+it('takes a bot offline once when Discord closes its shards one at a time', async () => {
+  const storage = await inMemoryStorage()
+  const gateway = await fakeGateway(100 * HOUR)
+  const clock = manualClock()
+  let shards = 2
+  let releasing: { readonly fail: () => void } | undefined
+  let armed = false
+  let offlineCalls = 0
+  const flaky: Storage = {
+    ...storage,
+    setBotOffline: (...args) => {
+      offlineCalls += 1
+      return storage.setBotOffline(...args)
+    },
+    releaseLease: (...args) => {
+      if (!armed) return storage.releaseLease(...args)
+      armed = false
+      // Postgres hangs on the release, then drops the connection.
+      return new Promise((_, reject) => {
+        releasing = { fail: () => reject(new Error('Connection terminated unexpectedly')) }
+      })
+    },
+  }
+  const bots = startHost(flaky, clock, (input, init) =>
+    gateway.discordFetch({ shards, maxConcurrency: 2 })(input, init),
+  )
+  await bots.use(BOT_ID, 'private-token-a')
+  await vi.waitFor(() => expect(identified(gateway)).toEqual(['0/2', '1/2']))
+
+  // Sharding required: shard 0 first, and shard 1 while the pass that took the bot offline is
+  // still giving shard 0's lease back.
+  shards = 4
+  armed = true
+  shardConnection(gateway, 0)?.close(4011)
+  await vi.waitFor(() => expect(releasing).toBeDefined())
+  shardConnection(gateway, 1)?.close(4011)
+  await new Promise((resolve) => setTimeout(resolve, 100))
+
+  // An agent call brings the bot back with Discord's new count, then the stuck pass fails.
+  const using = bots.use(BOT_ID, 'private-token-a')
+  await vi.waitFor(async () =>
+    expect((await storage.loadBot(BOT_ID))?.online).toMatchObject({ shardCount: 4 }),
+  )
+  releasing?.fail()
+  await using
+
+  await vi.waitFor(() => {
+    clock.advance(1_000)
+    expect(identified(gateway)).toContain('0/4')
+  })
+  expect((await storage.loadBot(BOT_ID))?.online).toMatchObject({ shardCount: 4 })
+  expect(offlineCalls).toBe(1)
+
+  await bots.close()
+  await gateway.close()
+  await storage.close()
+})

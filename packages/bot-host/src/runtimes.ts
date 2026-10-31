@@ -566,11 +566,10 @@ export const createBotRuntimes = ({
     for (const run of running.values()) {
       if (run.fatal === undefined) continue
       await vault.setOffline(run.botId, run.token, run.fatal)
-      // Once for every shard Discord closed on this token: should this pass fail, the bot may
-      // come back online with the same token.
+      // Every shard on this token ends with it, at once: should this pass fail, the bot may come
+      // back online with the same token before a shard closed later could take it offline again.
       const ended = [...running].filter(
-        ([, other]) =>
-          other.fatal !== undefined && other.botId === run.botId && other.token === run.token,
+        ([, other]) => other.botId === run.botId && other.token === run.token,
       )
       await Promise.all(ended.map(([name, other]) => leave(name, other, true)))
     }
