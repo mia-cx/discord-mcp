@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
 
 const BASE64 = /^[A-Za-z0-9+/_-]+={0,2}$/
-const SNOWFLAKE = /^\d{17,20}$/
+/** A Discord ID, such as a bot's. */
+export const SNOWFLAKE = /^\d{17,20}$/
 
 /**
  * The bot ID a Discord bot token names in its first segment, base64 of the decimal ID. Only routes

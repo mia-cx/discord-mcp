@@ -2,8 +2,10 @@ import { createHash, timingSafeEqual } from 'node:crypto'
 import { request as httpRequest, type IncomingMessage } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import type { Duplex } from 'node:stream'
-import { type Execute, json } from './relay.ts'
+import { type RouteRequest, routePath } from '@discord-mcp/isolate'
+import { type Execute, json, type OwnerRoutes } from './relay.ts'
 import { botIdFromToken, ownerOf } from './router.ts'
+import { NOT_FORWARDED, routeOf, type ServeRoute } from './routes.ts'
 import { refuseUpgrade, VOICE_PATH, type VoiceUpgrade } from './voice.ts'
 
 /** Where bot hosts are, and the secret that proves a request came through central. */
@@ -12,20 +14,6 @@ export interface Membership {
   readonly hosts: ReadonlyArray<string>
   readonly secret: string
 }
-
-/** Hop-by-hop and framing headers, which `fetch` sets or rejects, and the caller's cookies. */
-const NOT_FORWARDED = [
-  'connection',
-  'content-length',
-  'cookie',
-  'host',
-  'keep-alive',
-  'proxy-connection',
-  'te',
-  'trailer',
-  'transfer-encoding',
-  'upgrade',
-]
 
 /**
  * The Discord user ID of the human whose login central checked. Central always replaces it, so a
@@ -69,6 +57,30 @@ export const forwardToBotHosts =
       for (const name of NOT_FORWARDED) returned.delete(name)
       return new Response(response.body, { status: response.status, headers: returned })
     } catch {
+      return moving('bot_host_unavailable')
+    }
+  }
+
+/**
+ * Central's side of workflow routes: send each request, already read and bounded, to the bot host
+ * that owns its bot. The caller's request travels as JSON, so its own `Authorization` header and
+ * the public URL reach the workflow unchanged beside this tier's secret.
+ */
+export const forwardRoutesToBotHosts =
+  ({ hosts, secret }: Membership): ServeRoute =>
+  async (botId, name, route, signal) => {
+    const owner = ownerOf(hosts, botId)
+    if (owner === undefined) return moving('bot_host_unavailable')
+    try {
+      return await fetch(`${owner}${routePath(botId, name)}`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${secret}`, 'content-type': 'application/json' },
+        body: JSON.stringify(route),
+        redirect: 'error',
+        signal,
+      })
+    } catch (error) {
+      if (signal.aborted) throw error
       return moving('bot_host_unavailable')
     }
   }
@@ -140,12 +152,13 @@ const digest = (value: string) => createHash('sha256').update(value).digest()
 
 /**
  * A bot host's internal endpoint. It answers only central, and only for bots it owns, so one bot's
- * REST traffic always meets one rate limiter. `upgrade` takes over voice sockets for those bots.
+ * REST traffic always meets one rate limiter. `upgrade` takes over voice sockets for those bots,
+ * and `route` runs their workflow routes.
  */
 export const createBotHost = (
   { hosts, secret, self }: Membership & { readonly self: string },
   execute: Execute,
-  upgrade?: VoiceUpgrade,
+  { upgrade, route: serveRoute }: OwnerRoutes = {},
 ) => {
   const expected = digest(`Bearer ${secret}`)
   /** Central's credential and the bot's owner, or why this host won't serve the request. */
@@ -165,6 +178,16 @@ export const createBotHost = (
       const url = new URL(request.url)
       if (url.pathname === '/health/live' || url.pathname === '/health/ready') {
         return json(200, { ok: true })
+      }
+      const route = routeOf(url.pathname)
+      if (route !== undefined) {
+        if (!timingSafeEqual(digest(request.headers.get('authorization') ?? ''), expected)) {
+          return json(401, { error: 'unauthorized' })
+        }
+        if (ownerOf(hosts, route.botId) !== self) return moving('bot_moved')
+        if (serveRoute === undefined) return json(404, { error: 'not_found' })
+        const inbound = (await request.json()) as RouteRequest
+        return serveRoute(route.botId, route.name, inbound, request.signal)
       }
       if (url.pathname !== '/mcp') return json(404, { error: 'not_found' })
       const admitted = admit(request.headers)

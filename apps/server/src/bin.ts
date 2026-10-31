@@ -17,7 +17,6 @@ import {
 import { makeIsolateHost, makeWorkflowHost, type WorkflowHost } from '@discord-mcp/isolate'
 import { connectStorage } from '@discord-mcp/storage'
 import { NodeRuntime } from '@effect/platform-node'
-import { toNodeHandler } from '@modelcontextprotocol/node'
 import { serveStdio } from '@modelcontextprotocol/server/stdio'
 import { Cause, Config, Effect, Layer, Logger, Redacted } from 'effect'
 import { checkPublicExposure } from './public-exposure.ts'
@@ -30,7 +29,13 @@ import {
   relayRuntime,
 } from './relay.ts'
 import { ownerOf } from './router.ts'
-import { createBotHost, forwardToBotHosts, forwardVoiceToBotHosts } from './tiers.ts'
+import { nodeListener } from './routes.ts'
+import {
+  createBotHost,
+  forwardRoutesToBotHosts,
+  forwardToBotHosts,
+  forwardVoiceToBotHosts,
+} from './tiers.ts'
 import { createVoiceUpgrade } from './voice.ts'
 
 const StderrLogging = Layer.succeed(Logger.LogToStderr)(true)
@@ -182,7 +187,6 @@ interface Handler {
 /** Serve `handler` over HTTP until the program stops. */
 const serve = (handler: Handler, host: string, port: number, name: string) =>
   Effect.gen(function* () {
-    const handle = toNodeHandler(handler)
     /** Upgraded sockets, which would hold the server open at shutdown. */
     const upgraded = new Set<Duplex>()
     const server = yield* Effect.acquireRelease(
@@ -196,17 +200,7 @@ const serve = (handler: Handler, host: string, port: number, name: string) =>
                   handler.upgrade !== undefined &&
                   request.headers.upgrade?.toLowerCase() === 'websocket',
               },
-              (request, response) => {
-                void handle(
-                  {
-                    method: request.method ?? 'GET',
-                    url: request.url ?? '/',
-                    headers: request.headers,
-                    [Symbol.asyncIterator]: () => request[Symbol.asyncIterator](),
-                  },
-                  response,
-                )
-              },
+              nodeListener(handler),
             )
             server.on('upgrade', (request, socket, head) => {
               upgraded.add(socket)
@@ -316,11 +310,10 @@ const main = Effect.gen(function* () {
       (botId) => ownerOf(members.hosts, botId) === self,
     )
     return yield* listen({
-      ...createBotHost(
-        { ...members, self },
-        createExecutor({ rest, scripts, ...hosting }),
-        voiceFor(hosting),
-      ),
+      ...createBotHost({ ...members, self }, createExecutor({ rest, scripts, ...hosting }), {
+        upgrade: voiceFor(hosting),
+        route: hosting?.workflows?.serve,
+      }),
       ...closing(hosting),
     })
   }
@@ -337,14 +330,18 @@ const main = Effect.gen(function* () {
     clientSecret: Config.redacted('DISCORD_OAUTH_CLIENT_SECRET'),
     encryptionKey: Config.redacted('OAUTH_ENCRYPTION_KEY'),
   })
-  // Central holds no bot tokens: it only forwards them to the bot host that owns each bot.
+  // Central holds no bot tokens: it only forwards them, voice sockets, and workflow routes to the
+  // bot host that owns each bot.
   const members = tier === 'central' ? yield* membership : undefined
   const hosting = members === undefined ? yield* startBotHosting(allowlist, rest) : undefined
   const execute =
     members === undefined
       ? createExecutor({ rest, scripts, ...hosting })
       : forwardToBotHosts(members)
-  const upgrade = members === undefined ? voiceFor(hosting) : forwardVoiceToBotHosts(members)
+  const owners =
+    members === undefined
+      ? { upgrade: voiceFor(hosting), route: hosting?.workflows?.serve }
+      : { upgrade: forwardVoiceToBotHosts(members), route: forwardRoutesToBotHosts(members) }
   const relay = createRelay(
     {
       allowedHosts: csv(config.allowedHosts),
@@ -360,7 +357,7 @@ const main = Effect.gen(function* () {
     },
     execute,
     fetch,
-    upgrade,
+    owners,
   )
   return yield* listen({ ...relay, ...closing(hosting) })
 })

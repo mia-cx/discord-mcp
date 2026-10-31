@@ -22,6 +22,7 @@ import {
   type BorrowedRest,
   type IsolateHost,
   makeIsolateHost,
+  ROUTE_PREFIX,
   ScriptRunner,
   scriptRun,
   type WorkflowHost,
@@ -32,6 +33,7 @@ import { createMcpHandler, McpServer } from '@modelcontextprotocol/server'
 import { Effect, Layer, ManagedRuntime, Redacted } from 'effect'
 import { createDiscordLogin, type LoginConfig } from './login.ts'
 import { botIdFromToken } from './router.ts'
+import { handleRoute, type ServeRoute } from './routes.ts'
 import {
   keepAlive,
   refuseUpgrade,
@@ -414,15 +416,26 @@ export const createTokenCheck =
   }
 
 /**
+ * What a request's bot serves besides MCP, in this process or on the bot host that owns it. Each
+ * answers 404 when absent.
+ */
+export interface OwnerRoutes {
+  /** Takes over each voice socket. */
+  readonly upgrade?: VoiceUpgrade | undefined
+  /** Answers workflow routes, which need no login. */
+  readonly route?: ServeRoute | undefined
+}
+
+/**
  * The MCP HTTP front: OAuth, the allowlist, origins, and the bot token's shape. `execute` runs each
- * request, and `upgrade` takes over each voice socket, in this process or on the bot host that
- * owns its bot.
+ * request, in this process or on the bot host that owns its bot, which also serves the
+ * `OwnerRoutes`.
  */
 export const createRelay = (
   config: RelayConfig,
   execute: Execute,
   discordFetch: typeof fetch = fetch,
-  upgrade?: VoiceUpgrade,
+  { upgrade, route }: OwnerRoutes = {},
 ) => {
   const login = createDiscordLogin(config.login, discordFetch)
 
@@ -459,6 +472,9 @@ export const createRelay = (
     }
     if (url.pathname === '/health/live' || url.pathname === '/health/ready') {
       return json(200, { ok: true })
+    }
+    if (url.pathname.startsWith(ROUTE_PREFIX)) {
+      return handleRoute(request, config.login.publicBaseUrl, route)
     }
     const oauth = await login.fetch(request)
     if (oauth !== undefined) return oauth
