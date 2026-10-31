@@ -303,4 +303,35 @@ describe('the stateless Discord relay', () => {
     expect((await list(current)).status).toBe(200)
     expect((await list(current)).status).toBe(200)
   })
+
+  it("stops checking a bot's accepted token once Discord keeps rejecting it", async () => {
+    // After one acceptance, Discord answers every check with a sublimit 429, which leaves the
+    // bucket open, so only the guard can stop the retries.
+    let checks = 0
+    const discord: typeof fetch = async () => {
+      checks += 1
+      if (checks === 1) return Response.json({ id: BOT_ID, bot: true })
+      return Response.json(
+        { message: 'You are being rate limited.', retry_after: 600, global: false },
+        {
+          status: 429,
+          headers: {
+            'retry-after': '600',
+            'x-ratelimit-limit': '5',
+            'x-ratelimit-remaining': '4',
+            'x-ratelimit-reset-after': '1',
+            'x-ratelimit-scope': 'user',
+          },
+        },
+      )
+    }
+    const oauth = discordOAuth()
+    const relay = createRelay(config, executor(undefined, { discordFetch: discord }), oauth.fetch)
+    const { tokens } = await login(relay)
+    const list = () => relay.fetch(request(tokens.access_token, botToken(), 'tools/list'))
+
+    expect((await list()).status).toBe(200)
+    for (let retry = 0; retry < DEFAULT_FAILURE_THRESHOLD + 5; retry++) await list()
+    expect(checks).toBe(1 + DEFAULT_FAILURE_THRESHOLD)
+  })
 })

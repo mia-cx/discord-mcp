@@ -11,6 +11,7 @@ import {
   DEFAULT_WINDOW_MS,
   DiscordRest,
   OperationCatalog,
+  RateGuard,
   type RateLimiter,
   type RestConfig,
   relayTools,
@@ -148,10 +149,18 @@ export const createExecutor = ({
   restLayer = DiscordRest.shared,
 }: ExecutorOptions): Execute => {
   const isolates = makeIsolateHost()
-  /** Each bot's limiter, with the fingerprint of the token Discord last accepted for it. */
+  /**
+   * Each bot's limiter, with the token Discord last accepted for it: its fingerprint, and the guard
+   * its own checks share, so a reset token's rejections stay with that token.
+   */
   const limiters = new Map<
     string,
-    { limiter: RateLimiter; accepted?: string; active: number; idleSince: number }
+    {
+      limiter: RateLimiter
+      accepted?: { readonly fingerprint: string; readonly guard: RateLimiter['guard'] }
+      active: number
+      idleSince: number
+    }
   >()
   const acquire = (botId: string) => {
     const now = Date.now()
@@ -174,26 +183,22 @@ export const createExecutor = ({
     entry.idleSince = Date.now()
   }
 
-  /**
-   * Check the token with Discord, queueing in `shared`'s buckets when given and otherwise on a
-   * client of its own. A rejected token is not yet known to be the bot's, so its rejections always
-   * go to a guard of their own, never the one the bot's accepted requests share.
-   */
+  /** Check the token with Discord, on a limiter of its own unless `shared` is given. */
   const verify = async (
     token: Redacted.Redacted<string>,
     signal: AbortSignal,
     shared?: RateLimiter,
   ) => {
-    const own = createRateLimiter(rest, discordFetch)
+    const limiter = shared ?? createRateLimiter(rest, discordFetch)
     try {
       return await Effect.runPromiseExit(
         Effect.flatMap(DiscordRest, (rest) =>
           rest.request({ method: 'GET', route: '/users/@me', operationFamily: 'authentication' }),
-        ).pipe(Effect.provide(restLayer(token, { ...(shared ?? own), guard: own.guard }))),
+        ).pipe(Effect.provide(restLayer(token, limiter))),
         { signal },
       )
     } finally {
-      own.close()
+      if (shared === undefined) limiter.close()
     }
   }
 
@@ -225,16 +230,25 @@ export const createExecutor = ({
     const token = Redacted.make(credential)
     const fingerprint = createHash('sha256').update(credential).digest('base64url')
     // Anyone can name a bot's public ID, so only the token Discord last accepted for this bot
-    // checks in through the bot's buckets. Any other token, forged or freshly reset, gets a client
-    // of its own and so never queues ahead of the bot's requests.
-    let lane = limiters.get(botId)?.accepted === fingerprint ? acquire(botId) : undefined
+    // checks in through the bot's buckets, recording rejections in that token's own guard. Any
+    // other token, forged or freshly reset, gets a limiter of its own and so never queues ahead of
+    // the bot's requests or counts against a guard they share.
+    const known = limiters.get(botId)?.accepted
+    const accepted = known?.fingerprint === fingerprint ? known : undefined
+    let lane = accepted === undefined ? undefined : acquire(botId)
     try {
-      const verified = await verify(token, request.signal, lane?.limiter)
+      const verified = await verify(
+        token,
+        request.signal,
+        lane && accepted && { ...lane.limiter, guard: accepted.guard },
+      )
       if (verified._tag === 'Failure') {
         const error = renderCause(verified.cause)
         // Discord now rejects the token it last accepted, so it was reset: its retries must not
         // keep queueing in the buckets the bot's new token will share.
-        if (error.httpStatus === 401 && lane?.accepted === fingerprint) delete lane.accepted
+        if (error.httpStatus === 401 && accepted !== undefined && lane?.accepted === accepted) {
+          delete lane.accepted
+        }
         return discordFailure(error)
       }
       // A token whose first segment names another bot was routed by a lie.
@@ -242,7 +256,9 @@ export const createExecutor = ({
       // Hosting never delays or fails the agent's call; `use` logs its own failures.
       void bots?.use(botId, credential)
       lane ??= acquire(botId)
-      lane.accepted = fingerprint
+      if (lane.accepted?.fingerprint !== fingerprint) {
+        lane.accepted = { fingerprint, guard: Effect.runSync(RateGuard.make()) }
+      }
       return await run(request, relayRuntime(restLayer(token, lane.limiter), isolates))
     } finally {
       if (lane !== undefined) release(lane)
