@@ -96,7 +96,19 @@ const refresh = (stale) =>
       throw new Error('Discord login expired. Run the login helper again.')
     }
     const tokens = await response.json()
-    const next = { ...current, ...tokens, expires_at: now() + tokens.expires_in }
+    if (
+      typeof tokens.access_token !== 'string' ||
+      typeof tokens.refresh_token !== 'string' ||
+      !Number.isInteger(tokens.expires_in)
+    )
+      throw new Error('Discord login refresh failed (invalid response).')
+    // Copy only token fields, so a response cannot redirect `resource` or swap `client_id`.
+    const next = {
+      ...current,
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      expires_at: now() + tokens.expires_in,
+    }
     const temporary = `${loginFile}.${randomBytes(16).toString('hex')}.tmp`
     await writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600, flag: 'wx' })
     await rename(temporary, loginFile)
