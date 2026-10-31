@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { randomBytes } from 'node:crypto'
-import { readFile, rename, writeFile } from 'node:fs/promises'
+import { readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
@@ -14,6 +14,7 @@ const REFRESH_EARLY_SECONDS = 24 * 3600
 // Longer than the relay's 15-second Discord call, so the bridge never abandons a rotation.
 const REFRESH_TIMEOUT_MS = 30_000
 const OVERLAP_POLL_MS = 250
+const UNSEEN_OVERLAP_WAIT_MS = 2_000
 const LOOPBACK = ['127.0.0.1', 'localhost', '[::1]']
 // A 2026-07-28 request names its own protocol version here; older clients negotiate it once.
 const VERSION_META_KEY = 'io.modelcontextprotocol/protocolVersion'
@@ -102,13 +103,13 @@ const refresh = (stale) =>
       if (error?.error !== 'invalid_grant')
         throw new Error(`Discord login refresh failed (HTTP ${response.status}).`)
       // A bridge that overlapped this one after a crash may have won the rotation; wait for it to
-      // save before calling the login expired. Without an overlap, nobody else can save it.
-      if (await overlapped()) {
-        for (let waited = 0; waited < REFRESH_TIMEOUT_MS; waited += OVERLAP_POLL_MS) {
-          const latest = await replaced()
-          if (latest) return latest
-          await delay(OVERLAP_POLL_MS)
-        }
+      // save before calling the login expired. Wait the whole refresh timeout when this holder
+      // knows of an overlap, and briefly otherwise, since a third bridge can hide one from it.
+      const wait = (await overlapped()) ? REFRESH_TIMEOUT_MS : UNSEEN_OVERLAP_WAIT_MS
+      for (let waited = 0; waited < wait; waited += OVERLAP_POLL_MS) {
+        const latest = await replaced()
+        if (latest) return latest
+        await delay(OVERLAP_POLL_MS)
       }
       throw new Error('Discord login expired. Run the login helper again.')
     }
@@ -126,11 +127,15 @@ const refresh = (stale) =>
       refresh_token: tokens.refresh_token,
       expires_at: now() + tokens.expires_in,
     }
-    // An overlapping `login.mjs --replace` may have saved a new login meanwhile; it wins.
-    const latest = await replaced()
-    if (latest) return latest
     const temporary = `${loginFile}.${randomBytes(16).toString('hex')}.tmp`
     await writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600, flag: 'wx' })
+    // An overlapping `login.mjs --replace` may have saved a new login meanwhile; it wins. Checking
+    // right before the rename leaves only that one step for it to land in.
+    const latest = await replaced()
+    if (latest) {
+      await rm(temporary, { force: true })
+      return latest
+    }
     await rename(temporary, loginFile)
     return next
   })

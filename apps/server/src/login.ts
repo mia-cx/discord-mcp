@@ -242,7 +242,10 @@ export const createDiscordLogin = (
           ? (response.headers.get('retry-after') ?? '1')
           : '1',
       )
-    return response.json() as Promise<unknown>
+    // A connection that drops while the body streams is a network failure too, not a rejection.
+    return response.json().catch(() => {
+      throw new DiscordUnavailable(502, '1')
+    }) as Promise<unknown>
   }
   const identity = async (token: string, subject?: string) => {
     const auth = Schema.decodeUnknownSync(Authorization)(

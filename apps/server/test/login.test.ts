@@ -255,6 +255,24 @@ describe('Discord login for the relay', () => {
     expect(oauth.calls.map((call) => call.path)).toContain('/api/v10/oauth2/token')
   })
 
+  it('reports a refresh that cannot reach Discord as unavailable, not as an expired login', async () => {
+    const oauth = discordOAuth()
+    let offline = false
+    const network: typeof fetch = (input, init) =>
+      offline ? Promise.reject(new TypeError('fetch failed')) : oauth.fetch(input, init)
+    const relay = createRelay(config, rest, network)
+    const { tokens, clientId } = await login(relay)
+    offline = true
+    const refreshed = await redeem(relay, {
+      grant_type: 'refresh_token',
+      refresh_token: tokens.refresh_token,
+      client_id: clientId,
+      resource: 'https://relay.test/mcp',
+    })
+    expect(refreshed.status).toBe(502)
+    expect(await refreshed.json()).toMatchObject({ error: 'temporarily_unavailable' })
+  })
+
   it('rejects malformed allowlist configuration instead of starting with unrestricted access', () => {
     expect(() =>
       createRelay({
