@@ -13,8 +13,11 @@ const Op = {
 
 /** Discord refuses a new session after these too, so reconnecting cannot help. */
 const FATAL_CLOSE_CODES = new Set([4004, 4010, 4011, 4012, 4013, 4014])
-/** An invalid sequence number or a timed-out session: reconnecting needs a new session. */
-const SESSION_ENDED_CLOSE_CODES = new Set([4007, 4009])
+/**
+ * An invalidated session, an invalid sequence number, or a timed-out session: reconnecting needs
+ * a new session. We never send a payload before identifying, the other cause of 4003.
+ */
+const SESSION_ENDED_CLOSE_CODES = new Set([4003, 4007, 4009])
 /** Ends the session, so Discord shows the bot offline at once. */
 const NORMAL_CLOSURE = 1000
 /** Closes a connection we are about to replace; any code but 1000 and 1001 keeps the session. */
@@ -69,8 +72,9 @@ export interface ShardOptions {
   /** A session to resume instead of identifying, such as one a previous process saved. */
   readonly session?: ShardSession
   /**
-   * The resumable session changed: a new session, a later sequence number, or `undefined` once
-   * the session can no longer be resumed. Called in order, once per change.
+   * The session to store changed: a new session, a later sequence number, or `undefined` once
+   * the bot goes offline for good. A session Discord invalidates is not reported: the next READY
+   * replaces it. Called in order.
    */
   readonly onSession: (session: ShardSession | undefined) => void
   readonly onReady: () => void
@@ -104,6 +108,10 @@ export const startShard = ({
 }: ShardOptions): Shard => {
   let socket: WebSocket | undefined
   let session = saved
+  /** A connection to this session's resume URL closed before Hello. */
+  let resumeUrlFailed = false
+  /** The current connection got Hello. */
+  let greeted = false
   let acknowledged = true
   let attempts = 0
   const identifiedAt: number[] = []
@@ -119,8 +127,14 @@ export const startShard = ({
     current?.close(code)
   }
 
+  // Discord invalidated the session: identify afresh. The stored copy stays until the next READY
+  // replaces it, so a restart in between still finds the bot; resuming it fails over to Identify.
   const forget = () => {
-    if (session === undefined) return
+    session = undefined
+  }
+
+  // The bot is going offline for good, so nothing may resume it.
+  const end = () => {
     session = undefined
     onSession(undefined)
   }
@@ -162,6 +176,7 @@ export const startShard = ({
         resumeGatewayUrl: ready.resume_gateway_url,
         sequence,
       }
+      resumeUrlFailed = false
     } else if (session !== undefined) {
       session = { ...session, sequence }
     }
@@ -176,6 +191,7 @@ export const startShard = ({
     switch (payload.op) {
       case Op.Hello: {
         const { heartbeat_interval: interval } = payload.d as { heartbeat_interval: number }
+        greeted = true
         cancelTimer()
         cancelTimer = clock.schedule(() => heartbeat(interval), interval * clock.random())
         if (session !== undefined) {
@@ -216,8 +232,13 @@ export const startShard = ({
   }
 
   function connect() {
-    const ws = new WebSocket(`${session?.resumeGatewayUrl ?? gatewayUrl}/?v=10&encoding=json`)
+    // Discord says to fall back to the initial URL when the resume URL fails.
+    const viaResumeUrl = session !== undefined && !resumeUrlFailed
+    const ws = new WebSocket(
+      `${viaResumeUrl ? session?.resumeGatewayUrl : gatewayUrl}/?v=10&encoding=json`,
+    )
     socket = ws
+    greeted = false
     acknowledged = true
     // Events from a socket we already dropped are stale.
     ws.addEventListener('message', (event) => {
@@ -227,9 +248,10 @@ export const startShard = ({
       if (ws !== socket) return
       if (FATAL_CLOSE_CODES.has(code)) {
         drop(code)
-        forget()
+        end()
         return onFatal(code)
       }
+      if (viaResumeUrl && !greeted) resumeUrlFailed = true
       if (SESSION_ENDED_CLOSE_CODES.has(code)) forget()
       reconnect()
     })
@@ -239,7 +261,7 @@ export const startShard = ({
   return {
     stop: () => {
       drop(NORMAL_CLOSURE)
-      forget()
+      end()
     },
     suspend: () => drop(RECONNECT_CLOSURE),
   }

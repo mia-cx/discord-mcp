@@ -70,6 +70,31 @@ it('resumes an online bot after a restart, from what the previous process stored
   await storage.close()
 })
 
+it('brings back a bot whose session Discord invalidated just before a restart', async () => {
+  const storage = await inMemoryStorage()
+  const gateway = await fakeGateway()
+  const options = { clock: manualClock(), log: () => {}, gatewayUrl: gateway.url }
+  const before = createBotRuntimes({ vault: createTokenVault(KEY, storage), ...options })
+
+  await before.use(BOT_ID, 'private-token-a')
+  await vi.waitFor(async () =>
+    expect(await createTokenVault(KEY, storage).loadSessions()).toHaveLength(1),
+  )
+  // The restart lands while the shard waits to identify afresh.
+  gateway.connections[0]?.send({ op: 9, d: false })
+  await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(4000))
+  await before.close()
+
+  const after = createBotRuntimes({ vault: createTokenVault(KEY, storage), ...options })
+  await after.resume()
+  // It resumes the stale session; Discord's answer to that is proven in the shard suite.
+  await vi.waitFor(() => expect(gateway.connections[1]?.received[0]?.op).toBe(6))
+
+  await after.close()
+  await gateway.close()
+  await storage.close()
+})
+
 it('retries a failed session store, so an online bot still resumes after a restart', async () => {
   const storage = await inMemoryStorage()
   const gateway = await fakeGateway(100 * HOUR)

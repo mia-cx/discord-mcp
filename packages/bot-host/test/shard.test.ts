@@ -95,7 +95,7 @@ describe('the shard supervisor', () => {
   })
 
   it('identifies afresh, within Identify limits, when Discord rejects a saved session', async () => {
-    const { gateway, clock, onSession } = await start({ sessionId: 'expired', sequence: 7 })
+    const { gateway, clock } = await start({ sessionId: 'expired', sequence: 7 })
     await vi.waitFor(() =>
       expect(gateway.connections[0]?.received[0]).toEqual({
         op: 6,
@@ -105,7 +105,7 @@ describe('the shard supervisor', () => {
     expect(gateway.connections[0]?.path).toBe('/resume/?v=10&encoding=json')
 
     gateway.connections[0]?.send({ op: 9, d: false })
-    await vi.waitFor(() => expect(onSession).toHaveBeenLastCalledWith(undefined))
+    await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(4000))
     // Discord asks for a random 1–5 second wait; random() is 0.5.
     clock.advance(3_000)
     await identified(gateway, 1)
@@ -119,6 +119,45 @@ describe('the shard supervisor', () => {
     expect(gateway.connections).toHaveLength(2)
     clock.advance(2_000)
     await identified(gateway, 2)
+  })
+
+  it.each([4003, 4007, 4009])(
+    'identifies afresh when Discord closes a resumed session with %i',
+    async (code) => {
+      const { gateway, clock } = await start({ sessionId: 'expired', sequence: 7 })
+      await vi.waitFor(() => expect(gateway.connections[0]?.received[0]?.op).toBe(6))
+
+      gateway.connections[0]?.close(code)
+      await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(code))
+      clock.advance(500)
+      await identified(gateway, 1)
+    },
+  )
+
+  it('resumes through the initial Gateway URL when the resume URL is unreachable', async () => {
+    const gateway = await fakeGateway()
+    const clock = manualClock()
+    const shard = startShard({
+      token: TOKEN,
+      gatewayUrl: gateway.url,
+      clock,
+      session: { sessionId: 'saved', resumeGatewayUrl: 'ws://127.0.0.1:1', sequence: 7 },
+      onSession: () => {},
+      onReady: () => {},
+      onFatal: () => {},
+      onIdentifyBudgetSpent: () => {},
+    })
+    cleanup.push(gateway.close, shard.stop)
+
+    // Nothing listens on port 1, so the first connection fails before Hello. Advance time until
+    // its reconnect backoff has run.
+    await vi.waitFor(() => {
+      clock.advance(500)
+      expect(gateway.connections[0]?.received[0]).toEqual({
+        op: 6,
+        d: { token: TOKEN, session_id: 'saved', seq: 7 },
+      })
+    })
   })
 
   it('stops for good when Discord rejects the token', async () => {
