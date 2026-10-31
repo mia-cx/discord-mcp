@@ -47,6 +47,9 @@ importers:
       '@discord-mcp/auth':
         specifier: workspace:*
         version: link:../../packages/auth
+      '@discord-mcp/bot-host':
+        specifier: workspace:*
+        version: link:../../packages/bot-host
       '@discord-mcp/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -62,6 +65,9 @@ importers:
       '@discord-mcp/persistence':
         specifier: workspace:*
         version: link:../../packages/persistence
+      '@discord-mcp/storage':
+        specifier: workspace:*
+        version: link:../../packages/storage
       '@discord-mcp/workflow-runtime':
         specifier: workspace:*
         version: link:../../packages/workflow-runtime

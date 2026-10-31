@@ -19,7 +19,9 @@
     "@discord-mcp/discord-gateway": "workspace:*",
     "@discord-mcp/auth": "workspace:*",
     "@discord-mcp/workflow-runtime": "workspace:*",
-    "@discord-mcp/workflow-sdk": "workspace:*"
+    "@discord-mcp/workflow-sdk": "workspace:*",
+    "@discord-mcp/bot-host": "workspace:*",
+    "@discord-mcp/storage": "workspace:*"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "2.3.1"

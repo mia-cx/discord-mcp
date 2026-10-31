@@ -29,6 +29,12 @@
     },
     {
       "path": "../../packages/workflow-sdk"
+    },
+    {
+      "path": "../../packages/bot-host"
+    },
+    {
+      "path": "../../packages/storage"
     }
   ]
 }

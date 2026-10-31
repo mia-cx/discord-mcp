@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import { createServer } from 'node:http'
+import { createBotRuntimes, createTokenVault, systemClock } from '@discord-mcp/bot-host'
 import { ConfigurationError } from '@discord-mcp/core'
 import { DiscordRest, RateGuard } from '@discord-mcp/discord-api/relay'
+import { connectStorage } from '@discord-mcp/storage'
 import { NodeRuntime } from '@effect/platform-node'
 import { toNodeHandler } from '@modelcontextprotocol/node'
 import { serveStdio } from '@modelcontextprotocol/server/stdio'
-import { Cause, Config, Effect, Layer, Logger } from 'effect'
+import { Cause, Config, Effect, Layer, Logger, Redacted } from 'effect'
 import { checkPublicExposure } from './public-exposure.ts'
 import { buildRelayServer, createRelay, relayRuntime } from './relay.ts'
 
@@ -15,6 +17,58 @@ const csv = (value: string) =>
     .split(',')
     .map((part) => part.trim())
     .filter(Boolean)
+
+const VAULT_KEY_BYTES = 32
+
+/**
+ * Bot hosting keeps bots online and stores their tokens. It starts only with a database and an
+ * allowlist naming who may use it; otherwise the process stays a plain relay.
+ */
+const startBotHosting = (allowedUserIds: ReadonlyArray<string> | undefined) =>
+  Effect.gen(function* () {
+    const databaseUrl = yield* Config.string('DATABASE_URL').pipe(Config.withDefault(''))
+    if (databaseUrl === '') return undefined
+    if (allowedUserIds === undefined || allowedUserIds.length === 0) {
+      yield* Effect.logWarning(
+        'Bot hosting is off: it needs DISCORD_OAUTH_ALLOWED_USER_IDS to list allowed users. Serving the relay only.',
+      )
+      return undefined
+    }
+    const vaultKey = Buffer.from(
+      Redacted.value(yield* Config.redacted('TOKEN_VAULT_KEY')),
+      'base64',
+    )
+    if (vaultKey.length !== VAULT_KEY_BYTES) {
+      return yield* Effect.fail(
+        new ConfigurationError({
+          variable: 'TOKEN_VAULT_KEY',
+          message: `Expected ${VAULT_KEY_BYTES} bytes, base64-encoded. Generate one with: openssl rand -base64 32`,
+        }),
+      )
+    }
+    const storage = yield* Effect.acquireRelease(
+      Effect.tryPromise({
+        try: () => connectStorage(databaseUrl),
+        catch: (cause) =>
+          new ConfigurationError({
+            variable: 'DATABASE_URL',
+            message: `DATABASE_URL: ${cause instanceof Error ? cause.message : String(cause)}`,
+          }),
+      }),
+      (storage) => Effect.promise(() => storage.close()),
+    )
+    const context = yield* Effect.context<never>()
+    return yield* Effect.acquireRelease(
+      Effect.sync(() =>
+        createBotRuntimes({
+          vault: createTokenVault(vaultKey, storage),
+          clock: systemClock,
+          log: (message) => Effect.runForkWith(context)(Effect.log(message)),
+        }),
+      ),
+      (bots) => Effect.sync(() => bots.close()),
+    )
+  })
 
 const main = Effect.gen(function* () {
   const config = yield* Config.all({
@@ -67,19 +121,26 @@ const main = Effect.gen(function* () {
     encryptionKey: Config.redacted('OAUTH_ENCRYPTION_KEY'),
     allowedUserIds: Config.string('DISCORD_OAUTH_ALLOWED_USER_IDS').pipe(Config.withDefault('*')),
   })
-  const relay = createRelay({
-    allowedHosts: csv(config.allowedHosts),
-    allowedOrigins: [
-      ...csv(config.allowedOrigins),
-      ...(config.publicBaseUrl === '' ? [] : [new URL(config.publicBaseUrl).origin]),
-    ],
-    rest,
-    login: {
-      ...oauth,
-      ...(allowedUserIds === '*' ? {} : { allowedUserIds: csv(allowedUserIds) }),
-      publicBaseUrl: config.publicBaseUrl || `http://127.0.0.1:${config.port}`,
+  const allowlist = allowedUserIds === '*' ? undefined : csv(allowedUserIds)
+  const bots = yield* startBotHosting(allowlist)
+  const relay = createRelay(
+    {
+      allowedHosts: csv(config.allowedHosts),
+      allowedOrigins: [
+        ...csv(config.allowedOrigins),
+        ...(config.publicBaseUrl === '' ? [] : [new URL(config.publicBaseUrl).origin]),
+      ],
+      rest,
+      login: {
+        ...oauth,
+        ...(allowlist === undefined ? {} : { allowedUserIds: allowlist }),
+        publicBaseUrl: config.publicBaseUrl || `http://127.0.0.1:${config.port}`,
+      },
     },
-  })
+    undefined,
+    fetch,
+    bots,
+  )
   const handle = toNodeHandler(relay)
   const server = yield* Effect.acquireRelease(
     Effect.tryPromise(
