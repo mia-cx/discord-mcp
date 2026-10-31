@@ -98,14 +98,18 @@ it('retries a failed session store, so an online bot still resumes after a resta
   await storage.close()
 })
 
-it('clears an idle bot’s session despite a failed write, even if it restarts first', async () => {
+it('clears an idle bot’s session even when the clear fails during shutdown', async () => {
   const storage = await inMemoryStorage()
   const gateway = await fakeGateway(100 * HOUR)
   const clock = manualClock()
   const vault = createTokenVault(KEY, storage)
-  const clearSession = vi
-    .fn(vault.clearSession)
-    .mockRejectedValueOnce(new Error('Connection terminated unexpectedly'))
+  let failClear = (_: Error) => {}
+  const clearSession = vi.fn(vault.clearSession).mockImplementationOnce(
+    () =>
+      new Promise((_, reject) => {
+        failClear = reject
+      }),
+  )
   const bots = createBotRuntimes({
     vault: { ...vault, clearSession },
     clock,
@@ -117,10 +121,10 @@ it('clears an idle bot’s session despite a failed write, even if it restarts f
   await vi.waitFor(async () => expect(await vault.loadSessions()).toHaveLength(1))
   clock.advance(IDLE_TIMEOUT_MS)
   await vi.waitFor(() => expect(clearSession).toHaveBeenCalledTimes(1))
-  expect(await vault.loadSessions()).toHaveLength(1)
-
-  // Shutting down inside the retry window still clears it.
-  await bots.close()
+  // Shutdown starts while the clear is in flight, and then the clear fails.
+  const closed = bots.close()
+  failClear(new Error('Connection terminated unexpectedly'))
+  await closed
   expect(await vault.loadSessions()).toEqual([])
   await gateway.close()
   await storage.close()

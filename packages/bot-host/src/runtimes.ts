@@ -184,6 +184,7 @@ export const createBotRuntimes = ({
         runtime.cancelIdle()
         runtime.shard?.suspend()
       }
+      await Promise.all(writes.values())
       // One last try at failed writes, so the next process starts from the newest state.
       for (const [botId, { session }] of retries) saveSession(botId, session)
       await Promise.all(writes.values())
