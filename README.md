@@ -212,7 +212,7 @@ Keep the environment file private. Rotating the encryption key invalidates all l
 | `ALLOWED_ORIGINS` | Optional additional browser origins. The request origin and configured public origin are accepted. |
 | `DISCORD_MCP_REST_TIMEOUT_MS` | `15000`, applied to Discord requests. |
 | `DATABASE_URL` | Optional Postgres URL. Turns on [bot hosting](#bot-hosting) when the allowlist names users. |
-| `TOKEN_VAULT_KEY` | Required for bot hosting. Stable random 32-byte base64 key that encrypts stored bot tokens. |
+| `TOKEN_VAULT_KEY` | Required for bot hosting. Stable random 32-byte base64 key that encrypts stored bot tokens and Gateway sessions. |
 | `DISCORD_TOKEN` | Stdio only. Ignored by the HTTP relay. |
 
 `/health/live` and `/health/ready` return HTTP 200 when the process is serving.
@@ -234,6 +234,11 @@ Bot hosting keeps agents' bots online. An agent's first call for a bot stores it
 encrypted, in Postgres and connects the bot to Discord's Gateway with an online presence.
 Each later call restarts a 24-hour timer; when it runs out, the bot disconnects and shows
 offline. Startup applies pending database migrations.
+
+A restart keeps bots online. The bot's Gateway session is stored encrypted alongside its
+token, and the next process resumes it, so Discord replays the events sent while the server was
+down. If Discord no longer accepts the session, the bot connects afresh. Each resumed bot gets a
+new 24-hour timer.
 
 Set `DATABASE_URL`, `TOKEN_VAULT_KEY` (generate it like `OAUTH_ENCRYPTION_KEY`), and a
 `DISCORD_OAUTH_ALLOWED_USER_IDS` list. Without that list, the server logs a warning and
