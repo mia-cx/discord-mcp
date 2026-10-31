@@ -483,3 +483,33 @@ it('sets a presence on every shard of the bot', async () => {
   await gateway.close()
   await storage.close()
 })
+
+it('holds a presence for a shard still waiting to identify, which Discord would close over it', async () => {
+  const storage = await inMemoryStorage()
+  const gateway = await fakeGateway(1000 * HOUR)
+  const clock = manualClock()
+  const bots = createBotRuntimes({
+    vault: createTokenVault(KEY, storage),
+    clock,
+    log: () => {},
+    // One Identify every five seconds: the second shard waits, connected, for its turn.
+    discordFetch: gateway.discordFetch({ shards: 2, maxConcurrency: 1 }),
+  })
+  await bots.use(BOT_ID, 'private-token-a')
+  await vi.waitFor(() => expect(gateway.connections).toHaveLength(2))
+  await vi.waitFor(() => expect(identified(gateway)).toHaveLength(1))
+  const waiting = gateway.connections.find((c) => !c.received.some((p) => p.op === 2))
+
+  const idle = { since: null, activities: [], status: 'idle', afk: false }
+  bots.updatePresence(BOT_ID, idle)
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  expect(waiting?.received.map((p) => p.op)).not.toContain(3)
+
+  clock.advance(5_000)
+  await vi.waitFor(() =>
+    expect(waiting?.received.find((p) => p.op === 2)).toMatchObject({ d: { presence: idle } }),
+  )
+  await bots.close()
+  await gateway.close()
+  await storage.close()
+})

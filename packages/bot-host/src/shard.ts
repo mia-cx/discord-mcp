@@ -128,8 +128,13 @@ export const startShard = ({
   let presence = ONLINE
   let presenceSentAt = Number.NEGATIVE_INFINITY
   let cancelPresence: (() => void) | undefined
-  /** The latest presence missed the connection; an Identify carries it, a Resume does not. */
+  /**
+   * The latest presence has not reached Discord. Discord closes a connection that sends one
+   * before its session starts, so it waits for READY or RESUMED.
+   */
   let presenceUnsent = false
+  /** The current connection's session has started: READY or RESUMED arrived. */
+  let authenticated = false
   let socket: WebSocket | undefined
   let session = saved
   /** A connection to this session's resume URL closed before Hello. */
@@ -218,9 +223,9 @@ export const startShard = ({
       session = { ...session, sequence }
     }
     if (session !== undefined) onSession(session)
-    if (event === 'READY') presenceUnsent = false
-    if (event === 'RESUMED' && presenceUnsent && cancelPresence === undefined) sendPresence()
     if (event === 'READY' || event === 'RESUMED') {
+      authenticated = true
+      if (presenceUnsent && cancelPresence === undefined) sendPresence()
       attempts = 0
       onReady()
     }
@@ -313,6 +318,7 @@ export const startShard = ({
     const ws = new WebSocket(url)
     socket = ws
     greeted = false
+    authenticated = false
     acknowledged = true
     // Events from a socket we already dropped are stale.
     ws.addEventListener('message', (event) => {
@@ -333,8 +339,8 @@ export const startShard = ({
 
   function sendPresence() {
     cancelPresence = undefined
-    presenceSentAt = clock.now()
-    presenceUnsent = !send({ op: Op.PresenceUpdate, d: presence })
+    presenceUnsent = !authenticated || !send({ op: Op.PresenceUpdate, d: presence })
+    if (!presenceUnsent) presenceSentAt = clock.now()
   }
 
   if (session === undefined) connectToIdentify()
