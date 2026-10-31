@@ -104,6 +104,27 @@ describe('the shard supervisor', () => {
     })
   })
 
+  it('sends a presence update that missed a reconnect once the session resumes', async () => {
+    const { gateway, clock, shard } = await start()
+    await identified(gateway, 1)
+    const presence = (status: string) => ({ since: null, activities: [], status, afk: false })
+    clock.advance(1_000)
+    shard.updatePresence(presence('idle'))
+    // Due at 6 s.
+    shard.updatePresence(presence('dnd'))
+
+    gateway.connections[0]?.close(4000)
+    await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(4000))
+    // Reconnects at 1.5 s; the update fires at 6 s, before the new socket can have opened.
+    clock.advance(5_000)
+    await vi.waitFor(() => expect(gateway.connections[1]?.received[0]?.op).toBe(6))
+    gateway.connections[1]?.send({ op: 0, t: 'RESUMED', s: 2, d: {} })
+
+    await vi.waitFor(() =>
+      expect(gateway.connections[1]?.received).toContainEqual({ op: 3, d: presence('dnd') }),
+    )
+  })
+
   it('resumes after a zombie connection or a dropped one, so Discord replays what it missed', async () => {
     const { gateway, clock, onSession } = await start()
     await identified(gateway, 1)

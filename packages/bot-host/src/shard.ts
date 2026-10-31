@@ -142,6 +142,8 @@ export const startShard = ({
   let presence = ONLINE
   let presenceSentAt = Number.NEGATIVE_INFINITY
   let cancelPresence: (() => void) | undefined
+  /** The latest presence missed the connection; an Identify carries it, a Resume does not. */
+  let presenceUnsent = false
   let socket: WebSocket | undefined
   let session = saved
   /** A connection to this session's resume URL closed before Hello. */
@@ -156,7 +158,9 @@ export const startShard = ({
 
   // A replacement socket may still be connecting when a deferred presence update fires.
   const send = (payload: Payload) => {
-    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload))
+    if (socket?.readyState !== WebSocket.OPEN) return false
+    socket.send(JSON.stringify(payload))
+    return true
   }
 
   const drop = (code: number) => {
@@ -220,6 +224,8 @@ export const startShard = ({
       session = { ...session, sequence }
     }
     if (session !== undefined) onSession(session)
+    if (t === 'READY') presenceUnsent = false
+    if (t === 'RESUMED' && presenceUnsent && cancelPresence === undefined) sendPresence()
     if (t === 'READY' || t === 'RESUMED') {
       attempts = 0
       onReady()
@@ -319,10 +325,10 @@ export const startShard = ({
     })
   }
 
-  const sendPresence = () => {
+  function sendPresence() {
     cancelPresence = undefined
     presenceSentAt = clock.now()
-    send({ op: Op.PresenceUpdate, d: presence })
+    presenceUnsent = !send({ op: Op.PresenceUpdate, d: presence })
   }
 
   connect()
