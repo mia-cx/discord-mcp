@@ -222,6 +222,8 @@ describe('the stateless Discord relay', () => {
     const oauth = discordOAuth()
     const relay = createRelay(config, executor(undefined, { discordFetch: discord }), oauth.fetch)
     const { tokens } = await login(relay)
+    // Accepted once, the real token checks in through the bot's limiter from now on.
+    expect((await relay.fetch(request(tokens.access_token, real, 'tools/list'))).status).toBe(200)
 
     const forged = relay.fetch(
       request(tokens.access_token, botToken(BOT_ID, 'forged'), 'tools/list'),
@@ -265,5 +267,26 @@ describe('the stateless Discord relay', () => {
     }
     expect(statuses).toEqual([200, 200, 200, 429, 429, 429])
     expect(tooManyRequests).toBe(0)
+  })
+
+  it("keeps a reset token's retries from locking out the bot's new token", async () => {
+    let current = botToken(BOT_ID, 'before-reset')
+    const discord: typeof fetch = async (_input, init) =>
+      new Headers(init?.headers).get('authorization') === `Bot ${current}`
+        ? Response.json({ id: BOT_ID, bot: true })
+        : Response.json({ message: '401: Unauthorized', code: 0 }, { status: 401 })
+    const oauth = discordOAuth()
+    const relay = createRelay(config, executor(undefined, { discordFetch: discord }), oauth.fetch)
+    const { tokens } = await login(relay)
+    const list = (token: string) => relay.fetch(request(tokens.access_token, token, 'tools/list'))
+
+    const old = current
+    expect((await list(old)).status).toBe(200)
+    current = botToken(BOT_ID, 'after-reset')
+    for (let retry = 0; retry < DEFAULT_FAILURE_THRESHOLD + 5; retry++) {
+      expect((await list(old)).status).toBe(403)
+    }
+    expect((await list(current)).status).toBe(200)
+    expect((await list(current)).status).toBe(200)
   })
 })

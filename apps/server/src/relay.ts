@@ -210,7 +210,13 @@ export const createExecutor = ({
     let lane = limiters.get(botId)?.accepted === fingerprint ? acquire(botId) : undefined
     try {
       const verified = await verify(token, request.signal, lane?.limiter)
-      if (verified._tag === 'Failure') return discordFailure(renderCause(verified.cause))
+      if (verified._tag === 'Failure') {
+        const error = renderCause(verified.cause)
+        // Discord now rejects the token it last accepted, so it was reset: its retries must not
+        // keep reaching the guard the bot's new token will share.
+        if (error.httpStatus === 401 && lane?.accepted === fingerprint) delete lane.accepted
+        return discordFailure(error)
+      }
       // A token whose first segment names another bot was routed by a lie.
       if (!isBot(verified.value) || verified.value.id !== botId) return invalidBot()
       // Hosting never delays or fails the agent's call; `use` logs its own failures.
