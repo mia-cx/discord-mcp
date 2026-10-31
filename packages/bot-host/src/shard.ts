@@ -43,8 +43,12 @@ interface Payload {
  */
 export const nextIdentifyAt = (identifiedAt: ReadonlyArray<number>, now: number): number => {
   const [oldest] = identifiedAt
-  if (oldest !== undefined && identifiedAt.length >= DAILY_IDENTIFY_BUDGET) return oldest + DAY_MS
-  return Math.max(now, (identifiedAt.at(-1) ?? Number.NEGATIVE_INFINITY) + IDENTIFY_INTERVAL_MS)
+  const latest = identifiedAt.at(-1) ?? Number.NEGATIVE_INFINITY
+  const budgetReopens =
+    oldest !== undefined && identifiedAt.length >= DAILY_IDENTIFY_BUDGET
+      ? oldest + DAY_MS
+      : Number.NEGATIVE_INFINITY
+  return Math.max(now, latest + IDENTIFY_INTERVAL_MS, budgetReopens)
 }
 
 export interface ShardOptions {

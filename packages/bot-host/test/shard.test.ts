@@ -107,7 +107,16 @@ describe('the shard supervisor', () => {
       identifiedAt: Array.from({ length: 500 }, (_, i) => i * 100),
       next: 24 * 60 * 60 * 1000,
     },
-  ])('schedules Identifies within Discord limits: $case', ({ identifiedAt, next }) => {
-    expect(nextIdentifyAt(identifiedAt, 100_000)).toBe(next)
-  })
+    {
+      case: 'a budget reopening still waits five seconds after the latest Identify',
+      identifiedAt: [0, ...Array.from({ length: 499 }, (_, i) => 86_398_000 - (498 - i) * 5_000)],
+      now: 86_398_000,
+      next: 86_403_000,
+    },
+  ])(
+    'schedules Identifies within Discord limits: $case',
+    ({ identifiedAt, now = 100_000, next }) => {
+      expect(nextIdentifyAt(identifiedAt, now)).toBe(next)
+    },
+  )
 })
