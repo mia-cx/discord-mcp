@@ -71,6 +71,7 @@ export const manualClock = (random = 0.5) => {
   let now = 0
   const pending = new Set<{ readonly at: number; readonly run: () => void }>()
   return {
+    now: () => now,
     random: () => random,
     schedule: (run, ms) => {
       const timer = { at: now + ms, run }

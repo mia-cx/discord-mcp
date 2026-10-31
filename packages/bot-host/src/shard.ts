@@ -16,6 +16,8 @@ const FATAL_CLOSE_CODES = new Set([4004, 4010, 4011, 4012, 4013, 4014])
 const NORMAL_CLOSURE = 1000
 /** Closes a connection we are about to replace. */
 const RECONNECT_CLOSURE = 4000
+/** Discord allows one Identify per five seconds for a bot without large-bot sharding. */
+const IDENTIFY_INTERVAL_MS = 5_000
 const BACKOFF_BASE_MS = 1_000
 const MAX_BACKOFF_MS = 60_000
 /** Discord asks for a random 1–5 second wait before identifying after an invalid session. */
@@ -52,6 +54,7 @@ export const startShard = ({ token, gatewayUrl, clock, onReady, onFatal }: Shard
   let sequence: number | null = null
   let acknowledged = true
   let attempts = 0
+  let lastIdentifyAt = Number.NEGATIVE_INFINITY
   // The heartbeat runs only while connected and the reconnect wait only while not, so one timer.
   let cancelTimer = () => {}
 
@@ -64,8 +67,10 @@ export const startShard = ({ token, gatewayUrl, clock, onReady, onFatal }: Shard
     current?.close(code)
   }
 
+  // Connecting no sooner than the Identify interval keeps the Identify after Hello within it.
   const connectAfter = (ms: number) => {
-    cancelTimer = clock.schedule(connect, ms)
+    const wait = Math.max(ms, lastIdentifyAt + IDENTIFY_INTERVAL_MS - clock.now())
+    cancelTimer = clock.schedule(connect, wait)
   }
 
   const reconnect = () => {
@@ -89,6 +94,7 @@ export const startShard = ({ token, gatewayUrl, clock, onReady, onFatal }: Shard
         const { heartbeat_interval: interval } = payload.d as { heartbeat_interval: number }
         cancelTimer()
         cancelTimer = clock.schedule(() => heartbeat(interval), interval * clock.random())
+        lastIdentifyAt = clock.now()
         send({
           op: Op.Identify,
           d: {

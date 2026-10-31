@@ -65,9 +65,13 @@ describe('the shard supervisor', () => {
     clock.advance(500)
     await identified(gateway, 2)
 
+    // A drop right after an Identify waits out Discord's five-second Identify window.
     gateway.connections[1]?.close(4000)
     await vi.waitFor(() => expect(gateway.connections[1]?.closeCode).toBe(4000))
-    clock.advance(500)
+    clock.advance(4_000)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(gateway.connections).toHaveLength(2)
+    clock.advance(1_000)
     await identified(gateway, 3)
   })
 
