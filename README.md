@@ -235,10 +235,16 @@ encrypted, in Postgres and connects the bot to Discord's Gateway with an online 
 Each later call restarts a 24-hour timer; when it runs out, the bot disconnects and shows
 offline. Startup applies pending database migrations.
 
-A restart keeps bots online. The bot's Gateway session is stored encrypted alongside its
-token, and the next process resumes it, so Discord replays the events sent while the server was
-down. If Discord no longer accepts the session, the bot connects afresh. Each resumed bot gets a
-new 24-hour timer.
+A bot runs as many shards as Discord recommends, all in one process. Shards identify as fast
+as Discord's `max_concurrency` allows, and spend at most half the Identifies Discord says the
+bot has left today, leaving the rest for the bot's other clients. When Discord says the bot
+needs more shards, it goes offline until the next agent call, which brings it back with
+Discord's new count.
+
+A restart keeps bots online. Each shard's Gateway session is stored encrypted alongside the
+bot's token, and the next process resumes it, so Discord replays the events sent while the
+server was down. If Discord no longer accepts a session, that shard connects afresh. A resumed
+bot keeps its shard count and gets a new 24-hour timer.
 
 Set `DATABASE_URL`, `TOKEN_VAULT_KEY` (generate it like `OAUTH_ENCRYPTION_KEY`), and a
 `DISCORD_OAUTH_ALLOWED_USER_IDS` list. Without that list, the server logs a warning and
