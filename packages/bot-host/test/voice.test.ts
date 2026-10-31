@@ -41,6 +41,8 @@ const start = async ({
   onDispatch = (_botId: string, _event: string, _data: unknown) => {},
   /** Stands between the bot and the fake Discord, as for slowing a request. */
   through = (discordFetch: typeof fetch): typeof fetch => discordFetch,
+  // Leases are proven in the runtimes suite; keep their lapses out of these clock jumps.
+  leaseTtlMs = 100 * HOUR,
 } = {}) => {
   const storage = await inMemoryStorage()
   const voiceServer = await fakeVoiceServer({ members })
@@ -56,10 +58,13 @@ const start = async ({
   let cut = false
   let held: Promise<void> | undefined
   let release = () => {}
+  let renewing = true
   const bots = createBotRuntimes({
     vault,
     storage: {
       ...storage,
+      renewLeases: (...args) =>
+        renewing ? storage.renewLeases(...args) : Promise.reject(new Error('Connection refused')),
       voiceOptedOut: async (...lookup) => {
         await held
         return storage.voiceOptedOut(...lookup)
@@ -79,8 +84,7 @@ const start = async ({
     self: 'bot-host-0',
     discordFetch: through(gateway.discordFetch({ shards, sendMessages, interactionsEndpoint })),
     onDispatch,
-    // Leases are proven in the runtimes suite; keep their lapses out of these clock jumps.
-    leaseTtlMs: 100 * HOUR,
+    leaseTtlMs,
   })
   cleanup.push(storage.close, voiceServer.close, gateway.close, bots.close)
   await bots.use(BOT_ID, TOKEN)
@@ -107,7 +111,11 @@ const start = async ({
       release()
     },
   }
-  return { bots, storage, vault, voice, voiceServer, gateway, clock, outage, lookups }
+  /** Postgres stops answering lease renewals. */
+  const cutRenewals = () => {
+    renewing = false
+  }
+  return { bots, storage, vault, voice, voiceServer, gateway, clock, outage, lookups, cutRenewals }
 }
 
 /** An agent's WebSocket and the server side of it, which the bot host takes over. */
@@ -250,6 +258,24 @@ describe('voice', () => {
     voice.attach(GUILD_ID, socket, { codec: 'opus' })
     bots.close()
     expect(await closed).toEqual({ code: 1001, reason: 'The bot went offline.' })
+  })
+
+  it('closes the socket when the host can no longer rely on serving the bot', async () => {
+    const { voice, clock, cutRenewals } = await start({ leaseTtlMs: 15_000 })
+    await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID)
+    const { socket, closed } = await agentSocket()
+    voice.attach(GUILD_ID, socket, { codec: 'opus' })
+    let outcome: { code: number; reason: string } | undefined
+    void closed.then((result) => {
+      outcome = result
+    })
+
+    // Another host may take the bot's REST lease, and with it the bot's voice, once it expires.
+    cutRenewals()
+    await vi.waitFor(() => {
+      clock.advance(5_000)
+      expect(outcome).toEqual({ code: 1001, reason: 'The bot went offline.' })
+    })
   })
 
   it('closes the socket on a text message or audio that does not fit the codec', async () => {

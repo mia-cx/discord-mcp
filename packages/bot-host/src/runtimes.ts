@@ -60,7 +60,8 @@ const LIFECYCLE = 'lifecycle:'
 const HOST_LEASE = 'host:'
 const SHARD_LEASE = 'shard:'
 const shardLease = (botId: string, shardId: number) => `${SHARD_LEASE}${botId}:${shardId}`
-const restLease = (botId: string) => `bot:${botId}`
+const REST_LEASE = 'bot:'
+const restLease = (botId: string) => `${REST_LEASE}${botId}`
 
 export interface BotRuntimesOptions {
   readonly vault: TokenVault
@@ -265,6 +266,17 @@ export const createBotRuntimes = ({
     storage,
     clock,
     (name) => {
+      if (name.startsWith(REST_LEASE)) {
+        const botId = name.slice(REST_LEASE.length)
+        // Voice runs on the REST owner; another host may serve the bot now.
+        voices.get(botId)?.voice.close()
+        if (voices.delete(botId)) {
+          log(
+            `Bot ${botId}'s voice stopped on this host: it could not renew its REST lease in time.`,
+          )
+        }
+        return
+      }
       const lost = running.get(name)
       if (lost === undefined) return
       running.delete(name)
@@ -364,18 +376,9 @@ export const createBotRuntimes = ({
     }
   }
 
-  /**
-   * Take a bot offline for good because Discord refused `token`, unless the token has changed
-   * since: a refusal of the old token says nothing about its successor.
-   */
-  const refuse = async (botId: string, token: string, options: { rejectedCode?: number }) => {
-    if ((await vault.load(botId))?.token !== token) return
-    await storage.setBotOffline(botId, options)
-  }
-
   const reject = (botId: string, token: string) => {
     log(`Bot ${botId} is offline: Discord rejected its token. It stays offline until it changes.`)
-    return refuse(botId, token, { rejectedCode: UNAUTHORIZED })
+    return vault.setOffline(botId, token, { rejectedCode: UNAUTHORIZED })
   }
 
   // Each host takes its share of the budget, so hosts together still leave half of it.
@@ -530,7 +533,7 @@ export const createBotRuntimes = ({
    */
   const onlineBots = async () => {
     for (const { botId, token, fatal } of running.values()) {
-      if (fatal !== undefined) await refuse(botId, token, fatal)
+      if (fatal !== undefined) await vault.setOffline(botId, token, fatal)
     }
     const now = clock.date()
     const online = new Map<string, OnlineVaultBot>()
@@ -651,8 +654,13 @@ export const createBotRuntimes = ({
       const bot = fresh.get(botId)
       // The read may have outlasted the lease.
       const gone = closed || !leases.holds(name)
-      if (gone || bot === undefined || bot.shardCount <= shardId) await leases.release(name)
-      else start(name, bot, shardId)
+      if (gone || bot === undefined || bot.shardCount <= shardId) {
+        await leases.release(name)
+        continue
+      }
+      // Its token may be newer than the pass's read; routes and voice use the shards' token.
+      known.set(botId, bot)
+      start(name, bot, shardId)
     }
   }
 
@@ -780,11 +788,13 @@ export const createBotRuntimes = ({
     // it online again would end the sessions it saved.
     if (closed) return
     if (gateway === undefined) return void (await reject(botId, token))
-    await storage.setBotOnline(botId, {
+    // Another host may have brought the bot online meanwhile, maybe with a newer token.
+    const started = await vault.setOnline(botId, token, {
       shardCount: gateway.shards,
       gatewayUrl: gateway.url,
       until: clock.date() + IDLE_TIMEOUT_MS,
     })
+    if (!started) return
     // This host already knows the limits, should any of its shards identify.
     gates.get(botId)?.cancel()
     gates.set(botId, {

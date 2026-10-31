@@ -893,3 +893,41 @@ it('leaves the next host’s sessions alone when Discord answers after this host
   await gateway.close()
   await storage.close()
 })
+
+it('names the token its shards start with, even one stored during the pass', async () => {
+  const storage = await inMemoryStorage()
+  const gateway = await fakeGateway(1000 * HOUR)
+  const clock = manualClock()
+  const vault = createTokenVault(KEY, storage)
+  const online = (token: string) =>
+    vault.setOnline(BOT_ID, token, { shardCount: 1, gatewayUrl: gateway.url, until: HOUR })
+  await vault.store(BOT_ID, 'private-token-a')
+  await online('private-token-a')
+  // Another host resets the token, and brings the bot back, while this host's pass is under way.
+  let reset = true
+  const racing: Storage = {
+    ...storage,
+    loadOnlineBots: async () => {
+      const bots = await storage.loadOnlineBots()
+      if (reset) {
+        reset = false
+        await vault.store(BOT_ID, 'private-token-b')
+        await online('private-token-b')
+      }
+      return bots
+    },
+  }
+  const bots = startHost(racing, clock, gateway.discordFetch())
+
+  await vi.waitFor(() =>
+    expect(gateway.connections[0]?.received[0]).toMatchObject({
+      op: 2,
+      d: { token: 'private-token-b' },
+    }),
+  )
+  expect(bots.tokenOf(BOT_ID)).toBe('private-token-b')
+
+  await bots.close()
+  await gateway.close()
+  await storage.close()
+})
