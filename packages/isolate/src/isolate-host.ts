@@ -48,6 +48,8 @@ export type ScriptOutcome =
   | { readonly outcome: 'crashed'; readonly message: string }
 
 export interface ScriptExecution {
+  /** The bot it runs for. Bots take turns at process slots, so none can hold them all. */
+  readonly botId: string
   /**
    * Executions with the same queue run one at a time, in order; others run side by side. Scripts
    * queue per bot, workflow events per bot and guild.
@@ -63,8 +65,8 @@ export interface ScriptExecution {
    */
   readonly input?: { readonly event: GatewayEvent } | { readonly probe: true }
   /**
-   * Starts without waiting for a free process slot, for an interaction Discord expects answered
-   * within three seconds. Interactions are rare enough to leave uncounted.
+   * Takes a slot set aside for interactions, which Discord expects answered within three seconds,
+   * so it never waits behind ordinary runs.
    */
   readonly urgent?: boolean
   readonly timeoutMs: number
@@ -272,40 +274,66 @@ export interface IsolateHost {
 }
 
 /**
+ * Process slots, handed out to waiting bots in turn, so a bot with many slow runs gets one slot
+ * per round while every other bot still gets its own.
+ */
+const slots = (size: number) => {
+  let free = size
+  /** Each waiting bot's line, in the order bots get their next turn. */
+  const waiting = new Map<string, Array<() => void>>()
+  return {
+    acquire: (botId: string) => {
+      if (free > 0) {
+        free -= 1
+        return Promise.resolve()
+      }
+      return new Promise<void>((resolve) => {
+        waiting.set(botId, [...(waiting.get(botId) ?? []), resolve])
+      })
+    },
+    // A finished execution hands its slot straight to the next bot's oldest waiting one. Its own
+    // bot goes to the back of the line, behind every bot still waiting for a turn.
+    release: (botId: string) => {
+      const own = waiting.get(botId)
+      if (own !== undefined) {
+        waiting.delete(botId)
+        waiting.set(botId, own)
+      }
+      const [turn] = waiting
+      if (turn === undefined) {
+        free += 1
+        return
+      }
+      const [next, [first, ...rest]] = turn
+      waiting.delete(next)
+      if (rest.length > 0) waiting.set(next, rest)
+      first?.()
+    },
+  }
+}
+
+/**
  * Runs executions one at a time per queue, each in its own workerd process, with at most
- * `concurrency` processes at once. Executions over the limit wait their turn, oldest first.
+ * `concurrency` ordinary processes and as many urgent ones at once.
  */
 export const makeIsolateHost = (
   concurrency = Math.max(MIN_CONCURRENCY, availableParallelism()),
 ): IsolateHost => {
   const queues = new Map<string, Promise<unknown>>()
-  let running = 0
-  const waiting: Array<() => void> = []
-  // A finished execution hands its slot straight to the oldest waiting one.
-  const release = () => {
-    const next = waiting.shift()
-    if (next === undefined) running -= 1
-    else next()
-  }
-  const acquire = () => {
-    if (running < concurrency) {
-      running += 1
-      return Promise.resolve()
-    }
-    return new Promise<void>((resolve) => waiting.push(resolve))
-  }
+  const ordinary = slots(concurrency)
+  const urgent = slots(concurrency)
   return {
     run: (execution) => {
       const previous = queues.get(execution.queue) ?? Promise.resolve()
+      const pool = execution.urgent ? urgent : ordinary
       const current = previous.then(async () => {
         execution.signal?.throwIfAborted()
-        if (execution.urgent) return execute(execution)
-        await acquire()
+        await pool.acquire(execution.botId)
         try {
           execution.signal?.throwIfAborted()
           return await execute(execution)
         } finally {
-          release()
+          pool.release(execution.botId)
         }
       })
       const settled = current.catch(() => undefined)

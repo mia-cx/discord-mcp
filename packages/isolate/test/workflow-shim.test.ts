@@ -99,6 +99,7 @@ const sentMessage = (content: string) => ({
 const run = async (input: { event: GatewayEvent } | { probe: true }) => {
   const requests: Array<{ method: string; url: string; auth: string | null; body: unknown }> = []
   const outcome = await makeIsolateHost().run({
+    botId: BOT.id,
     queue: BOT.id,
     botUser: BOT,
     modules: await prepareScript(WORKFLOW),
@@ -249,6 +250,7 @@ for (const name of ['messageCreate', 'messageUpdate', 'messageDelete', 'messageR
     ['guildMemberRemove', { t: 'GUILD_MEMBER_REMOVE', d: { guild_id: GUILD, user: USER } }],
   ] as const)('delivers %s with no cache and default options (%#)', async (name, event) => {
     const outcome = await makeIsolateHost().run({
+      botId: BOT.id,
       queue: BOT.id,
       botUser: BOT,
       modules: await prepareScript(LOGGER),
@@ -295,6 +297,7 @@ client.on('messageReactionAdd', (reaction) => reaction.message.channel.fetch())
   ])('fetches the DM channel of %s by the route Discord needs', async (_, event, request) => {
     const requests: string[] = []
     const outcome = await makeIsolateHost().run({
+      botId: BOT.id,
       queue: BOT.id,
       botUser: BOT,
       modules: await prepareScript(DM_FETCHER),

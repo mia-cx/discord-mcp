@@ -185,9 +185,17 @@ const refuseAll = async () =>
 
 interface Enabled {
   readonly revision: WorkflowRevision
-  readonly modules: Promise<ReadonlyArray<ScriptModule>>
+  /** Replaced when compiling fails, so the next event compiles it again. */
+  modules: Promise<ReadonlyArray<ScriptModule>>
   /** Aborted once the revision stops running: its queued runs never start, running ones end. */
   readonly stop: AbortController
+}
+
+/** Compile a revision for later events; a failure is reported by the event that awaits it. */
+const compile = (source: string) => {
+  const modules = prepareScript(source)
+  modules.catch(() => {})
+  return modules
 }
 
 /** Identifies a revision across a delete and a republish under the same name. */
@@ -285,7 +293,7 @@ export const makeWorkflowHost = ({
         (revision) =>
           kept.get(revisionKey(revision)) ?? {
             revision,
-            modules: prepareScript(revision.source),
+            modules: compile(revision.source),
             stop: new AbortController(),
           },
       ),
@@ -368,6 +376,7 @@ export const makeWorkflowHost = ({
         // Each workflow sees a guild's events, and a direct message channel's, in order, and never
         // waits on another workflow. Interactions skip the queue: Discord needs an answer within
         // three seconds, whatever else the guild is doing.
+        botId,
         queue: `${botId}:${name}:${
           isInteraction
             ? `interaction:${String(d.id)}`
@@ -439,16 +448,29 @@ export const makeWorkflowHost = ({
     const { client, user } = restFor(event.botId, event.token)
     const [botUser, modules] = await Promise.all([
       user,
-      Promise.all(matching.map(({ workflow }) => workflow.modules)),
+      Promise.all(
+        matching.map(({ workflow }) =>
+          workflow.modules.catch((error: unknown) => {
+            const { name, revision, source } = workflow.revision
+            log(
+              `Workflow ${name} (revision ${revision}) of bot ${event.botId} did not compile: ${String(error)}`,
+            )
+            workflow.modules = compile(source)
+            return undefined
+          }),
+        ),
+      ),
     ])
     // Enqueued together, in order, so every workflow sees a guild's events in the order they came.
     matching.forEach(({ workflow, dispatch }, index) => {
-      void run(event, dispatch, workflow, botUser, modules[index] ?? [], client)
+      const compiled = modules[index]
+      if (compiled !== undefined) void run(event, dispatch, workflow, botUser, compiled, client)
     })
   }
 
   const probe = async (caller: WorkflowCaller, modules: ReadonlyArray<ScriptModule>) => {
     const outcome = await isolates.run({
+      botId: caller.botId,
       queue: `${caller.botId}:publish`,
       botUser: caller.botUser,
       modules,

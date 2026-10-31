@@ -7,6 +7,7 @@ const execution = async (
   source: string,
   timeoutMs: number,
 ): Promise<ScriptExecution> => ({
+  botId,
   queue: botId,
   botUser: { id: botId, username: `bot-${botId}`, discriminator: '0', bot: true },
   modules: await prepareScript(source),
@@ -118,21 +119,43 @@ describe('the isolate host', () => {
     expect(finished).toEqual(['slow', 'quick'])
   })
 
-  it('starts an urgent execution, such as an interaction, without waiting for a slot', async () => {
+  it('runs urgent executions in slots of their own, bounded like the rest', async () => {
     const host = makeIsolateHost(1)
     const finished: string[] = []
-    const slow = await execution(
+    const sleep = (ms: number) => `export default () => new Promise((r) => setTimeout(r, ${ms}))`
+    const ordinary = await execution('1', sleep(2000), 5000)
+    const first = { ...(await execution('2', sleep(600), 5000)), urgent: true }
+    const second = { ...(await execution('3', sleep(0), 5000)), urgent: true }
+
+    await Promise.all(
+      Object.entries({ ordinary, first, second }).map(([name, run]) =>
+        host.run(run).then(() => finished.push(name)),
+      ),
+    )
+
+    // Never behind the ordinary run, but one at a time in a single urgent slot.
+    expect(finished).toEqual(['first', 'second', 'ordinary'])
+  })
+
+  it('hands a free slot to each waiting bot in turn', async () => {
+    const host = makeIsolateHost(1)
+    const finished: string[] = []
+    const busy = await execution(
       '1',
-      'export default () => new Promise((r) => setTimeout(r, 1000))',
+      'export default () => new Promise((r) => setTimeout(r, 300))',
       5000,
     )
-    const urgent = { ...(await execution('2', 'export default () => "now"', 5000)), urgent: true }
+    const runs = [
+      { ...busy, queue: 'bot-1:a', label: 'bot-1 a' },
+      { ...busy, queue: 'bot-1:b', label: 'bot-1 b' },
+      { ...busy, queue: 'bot-1:c', label: 'bot-1 c' },
+      { ...(await execution('2', 'export default () => 0', 5000)), label: 'bot-2' },
+    ]
 
-    await Promise.all([
-      host.run(slow).then(() => finished.push('slow')),
-      host.run(urgent).then(() => finished.push('urgent')),
-    ])
+    await Promise.all(
+      runs.map(({ label, ...run }) => host.run(run).then(() => finished.push(label))),
+    )
 
-    expect(finished).toEqual(['urgent', 'slow'])
+    expect(finished).toEqual(['bot-1 a', 'bot-2', 'bot-1 b', 'bot-1 c'])
   })
 })
