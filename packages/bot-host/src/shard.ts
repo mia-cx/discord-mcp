@@ -233,10 +233,32 @@ export const startShard = ({
 
   function connect() {
     // Discord says to fall back to the initial URL when the resume URL fails.
-    const viaResumeUrl = session !== undefined && !resumeUrlFailed
-    const ws = new WebSocket(
-      `${viaResumeUrl ? session?.resumeGatewayUrl : gatewayUrl}/?v=10&encoding=json`,
-    )
+    let url = new URL(gatewayUrl)
+    let viaResumeUrl = false
+    if (session !== undefined && !resumeUrlFailed) {
+      try {
+        const resume = new URL(session.resumeGatewayUrl)
+        // A received or stored URL must not redirect the connection (and token) off Discord.
+        // The configured origin is also trusted, so a local test Gateway can resume itself.
+        if (
+          resume.username === '' &&
+          resume.password === '' &&
+          ((resume.protocol === url.protocol && resume.host === url.host) ||
+            (resume.protocol === 'wss:' &&
+              resume.port === '' &&
+              resume.hostname.endsWith('.discord.gg')))
+        ) {
+          url = resume
+          viaResumeUrl = true
+        }
+      } catch {
+        // A malformed resume URL falls back too, without losing the session.
+      }
+    }
+    url.pathname = `${url.pathname.replace(/\/$/, '')}/`
+    url.search = '?v=10&encoding=json'
+    url.hash = ''
+    const ws = new WebSocket(url)
     socket = ws
     greeted = false
     acknowledged = true
