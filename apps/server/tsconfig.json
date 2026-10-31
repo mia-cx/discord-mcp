@@ -25,6 +25,9 @@
       "path": "../../packages/auth"
     },
     {
+      "path": "../../packages/isolate"
+    },
+    {
       "path": "../../packages/workflow-runtime"
     },
     {

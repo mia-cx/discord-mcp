@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*", "../../types/globals.d.ts"],
+  "references": [
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../discord-api"
+    },
+    {
+      "path": "../discord-catalog"
+    }
+  ]
+}

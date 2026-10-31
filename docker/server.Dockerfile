@@ -1,14 +1,16 @@
 # Stateless Discord MCP relay. HTTP credentials arrive with each request.
-FROM node:24.22.1-alpine AS build
+# Debian rather than Alpine: script isolates run workerd, which ships glibc binaries only.
+FROM node:24.22.1-bookworm-slim AS build
 
 RUN corepack enable && corepack prepare pnpm@10.20.0 --activate
 
 # `pnpm prune` refuses to remove a modules directory without a TTY unless it knows it is in CI.
 ENV CI=true
 
-# The workspace retains the legacy auth library, whose native dependency needs a musl build.
+# The workspace retains the legacy auth library, whose native dependency may build from source.
 # The relay entrypoint does not load that library.
-RUN apk add --no-cache python3 make g++
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
+  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 
@@ -21,10 +23,14 @@ COPY vendor ./vendor
 RUN pnpm install --frozen-lockfile
 RUN pnpm build
 
-FROM node:24.22.1-alpine
+FROM node:24.22.1-bookworm-slim
+
+# workerd refuses to start without the system CA bundle.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 
 # Run the relay as an unprivileged user.
-RUN addgroup -g 10000 discord-mcp && adduser -D -u 10001 -G discord-mcp discord-mcp
+RUN groupadd -g 10000 discord-mcp && useradd -M -u 10001 -g discord-mcp discord-mcp
 
 COPY --from=build /src/node_modules /app/node_modules
 COPY --from=build /src/packages /app/packages
