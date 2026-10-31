@@ -183,8 +183,9 @@ await kv.set('count', count)
 Values are anything JSON can hold. State belongs to the workflow, not a revision: it lasts
 across events, revisions, and restarts, and goes when the workflow is deleted. A workflow's
 keys and values take at most 1 MiB together, and a key at most 512 bytes; a `set` past
-either throws and stores nothing. Writes from different guilds' events can interleave, and
-the last one wins.
+either throws and stores nothing. Only one guild's non-interaction events run in order:
+interactions, direct messages from different channels, and other guilds' events run at the
+same time, so their writes to one key can interleave, and the last one wins.
 
 `discord_workflow_logs` shows the bot's recent runs, newest first: each run's event,
 outcome, error, and console output, filtered by workflow or to failures only. A run keeps up

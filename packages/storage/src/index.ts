@@ -146,7 +146,6 @@ export interface Storage {
     botId: string,
     query: WorkflowRunQuery,
   ) => Promise<ReadonlyArray<RecordedWorkflowRun>>
-  /**
   /** Delete runs that finished before `before`. Resolves to how many were deleted. */
   readonly pruneWorkflowRuns: (before: Date) => Promise<number>
   readonly close: () => Promise<void>

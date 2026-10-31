@@ -6,6 +6,7 @@ import { GrantsInput, resolveGrants } from './tool.ts'
 import {
   EVENT_TIMEOUT_MS,
   intentNames,
+  KV_KEY_LIMIT_BYTES,
   KV_LIMIT_BYTES,
   RUN_RETENTION_MS,
   RUNS_KEPT,
@@ -62,7 +63,7 @@ export const workflowPublish = defineTool({
     "Publish discord.js code that runs as this bot on Gateway events, even while no agent is connected. Each publish stores the workflow's next immutable revision; it runs only once enabled with discord_workflow_enable.",
     `\`source\` is a module that creates a discord.js Client at the top level and adds listeners, as an ordinary bot does; \`login()\` does nothing. It can listen for ${Object.keys(WORKFLOW_EVENTS).join(', ')}, and receives the events its Client's intents cover. Import only from discord.js, textile, and node:*, with no top-level await.`,
     `Each event runs in a fresh isolate for at most ${EVENT_TIMEOUT_MS / 1000} seconds, so nothing in memory lasts between events: collectors and awaitMessages never fire, and caches start empty, so listeners may receive partial objects (check \`.partial\` and fetch). Without MessageContent, guild messages arrive without content unless they mention the bot. Events of one guild run in order. The bot's own messages are not delivered.`,
-    `To remember things between events, \`import { kv } from 'textile'\`: \`await kv.get(key)\` returns the stored value or undefined, \`await kv.set(key, value)\` stores any JSON value, and \`await kv.delete(key)\` removes it. State belongs to the workflow: it lasts across events, revisions, and restarts, and goes when the workflow is deleted. Keys and values together take at most ${KV_LIMIT_BYTES / 1024} KiB; a set past that throws and stores nothing. Writes from events of different guilds can interleave, so the last one wins. Read console output and failures with discord_workflow_logs.`,
+    `To remember things between events, \`import { kv } from 'textile'\`: \`await kv.get(key)\` returns the stored value or undefined, \`await kv.set(key, value)\` stores any JSON value, and \`await kv.delete(key)\` removes it. State belongs to the workflow: it lasts across events, revisions, and restarts, and goes when the workflow is deleted. Keys and values together take at most ${KV_LIMIT_BYTES / 1024} KiB, and a key at most ${KV_KEY_LIMIT_BYTES} bytes; a set past either throws and stores nothing. Only one guild's non-interaction events run in order: interactions, direct messages from different channels, and other guilds' events run at the same time, so their writes to one key can interleave and the last one wins. Read console output and failures with discord_workflow_logs.`,
     'Every request the workflow makes is checked against `grants`, as for discord_script_run. Answering an interaction (reply, deferReply, editReply, followUp) needs the `interaction` and `webhook` families or those operations, and works only for the interaction being handled. setPresence needs no grant.',
     '`name` is unique per bot: lowercase letters, digits, and dashes. Publishing an existing name adds a revision and leaves the running one in place.',
   ].join('\n\n'),
