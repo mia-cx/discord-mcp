@@ -34,7 +34,10 @@ export interface TokenVault {
   readonly setOffline: (
     botId: string,
     token: string,
-    options: { readonly rejectedCode?: number },
+    options: {
+      readonly rejectedCode?: number
+      readonly ranAs?: { readonly shardCount: number; readonly intents: number }
+    },
   ) => Promise<boolean>
   /** Store a shard's resumable session while `fence` holds. The bot's token must be stored first. */
   readonly storeSession: (

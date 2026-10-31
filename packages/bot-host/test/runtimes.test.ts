@@ -1136,3 +1136,126 @@ it('takes a bot offline once when Discord closes its shards one at a time', asyn
   await gateway.close()
   await storage.close()
 })
+
+it('takes a shard back from the session its last owner saved, not a write that failed before', async () => {
+  const storage = await inMemoryStorage()
+  const gateway = await fakeGateway(100 * HOUR)
+  const clock = manualClock()
+  const vault = createTokenVault(KEY, storage)
+  const lease = `shard:${BOT_ID}:0`
+  let failSave = false
+  let handOver = false
+  const bots = startHost(
+    {
+      ...storage,
+      renewLeases: async (holder, names, ...rest) => {
+        if (!handOver) return storage.renewLeases(holder, names, ...rest)
+        handOver = false
+        // Another host takes the shard, resumes it, and saves a newer sequence, then lets go.
+        const renewed = await storage.renewLeases(
+          holder,
+          names.filter((name) => name !== lease),
+          ...rest,
+        )
+        await storage.releaseLease(lease, holder)
+        await storage.claimLease(lease, 'host-b', clock.date(), HOUR)
+        const [bot] = await vault.loadOnline()
+        const session = bot?.sessions.get(0)
+        if (session === undefined) throw new Error('no stored session')
+        await vault.storeSession(
+          BOT_ID,
+          0,
+          { ...session, sequence: 9 },
+          { lease, holder: 'host-b' },
+        )
+        await storage.releaseLease(lease, 'host-b')
+        return renewed
+      },
+    },
+    clock,
+    gateway.discordFetch(),
+    {
+      vault: {
+        ...vault,
+        storeSession: async (...args) => {
+          if (!failSave) return vault.storeSession(...args)
+          failSave = false
+          throw new Error('Connection terminated unexpectedly')
+        },
+      },
+    },
+  )
+  await bots.use(BOT_ID, 'private-token-a')
+  await vi.waitFor(async () => expect(await storedSequences(storage)).toEqual({ 0: 1 }))
+  // Saving sequence 2 fails, and waits a minute to retry.
+  failSave = true
+  gateway.connections[0]?.send({ op: 0, t: 'MESSAGE_CREATE', s: 2, d: {} })
+  await vi.waitFor(() => expect(failSave).toBe(false))
+
+  handOver = true
+  clock.advance(RECONCILE_MS)
+
+  await vi.waitFor(() =>
+    expect(gateway.connections[1]?.received[0]).toMatchObject({ op: 6, d: { seq: 9 } }),
+  )
+
+  await bots.close()
+  await gateway.close()
+  await storage.close()
+})
+
+it('leaves a bot another host brought back online when a shard here closed before', async () => {
+  const storage = await inMemoryStorage()
+  const gateway = await fakeGateway(100 * HOUR)
+  const clock = manualClock()
+  let shards = 4
+  const discordFetch: typeof fetch = (input, init) =>
+    gateway.discordFetch({ shards, maxConcurrency: 4 })(input, init)
+  let paused: Promise<void> | undefined
+  let resume = () => {}
+  let offlineCalls = 0
+  const slow: Storage = {
+    ...storage,
+    renewLeases: async (...args) => {
+      await paused
+      return storage.renewLeases(...args)
+    },
+    setBotOffline: async (...args) => {
+      const changed = await storage.setBotOffline(...args)
+      offlineCalls += 1
+      return changed
+    },
+  }
+  const hosts = ['host-a', 'host-b']
+  const a = startHost(storage, clock, discordFetch, { self: 'host-a' })
+  const b = startHost(slow, clock, discordFetch, { self: 'host-b' })
+  await hostsLive(storage, clock, 2)
+  await a.use(BOT_ID, 'private-token-a')
+  clock.advance(RECONCILE_MS)
+  await vi.waitFor(() => expect(identified(gateway)).toHaveLength(4))
+  const onA = [0, 1, 2, 3].find((id) => shardOwner(hosts, BOT_ID, id) === 'host-a')
+  const onB = [0, 1, 2, 3].find((id) => shardOwner(hosts, BOT_ID, id) === 'host-b')
+  if (onA === undefined || onB === undefined) throw new Error('the shards did not spread')
+
+  // Sharding required on both hosts, while host b's pass is slow to start.
+  paused = new Promise((resolve) => {
+    resume = resolve
+  })
+  shards = 8
+  shardConnection(gateway, onB)?.close(4011)
+  shardConnection(gateway, onA)?.close(4011)
+  await vi.waitFor(async () => expect((await storage.loadBot(BOT_ID))?.online).toBeUndefined())
+  // An agent call brings the bot back with Discord's new count.
+  await a.use(BOT_ID, 'private-token-a')
+  expect((await storage.loadBot(BOT_ID))?.online).toMatchObject({ shardCount: 8 })
+
+  paused = undefined
+  resume()
+  await vi.waitFor(() => expect(offlineCalls).toBe(1))
+  expect((await storage.loadBot(BOT_ID))?.online).toMatchObject({ shardCount: 8 })
+
+  await a.close()
+  await b.close()
+  await gateway.close()
+  await storage.close()
+})

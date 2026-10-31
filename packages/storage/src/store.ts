@@ -195,7 +195,7 @@ export const createStorage = (
       .returning({ id: bots.id })
     return set.length > 0
   },
-  setBotOffline: (botId, { idleAt, rejectedCode, sealedToken } = {}) =>
+  setBotOffline: (botId, { idleAt, rejectedCode, sealedToken, ranAs } = {}) =>
     db.transaction(async (tx) => {
       const ended = await tx
         .update(bots)
@@ -205,6 +205,9 @@ export const createStorage = (
             eq(bots.id, botId),
             idleAt === undefined ? undefined : and(sql`not ${held}`, lte(bots.onlineUntil, idleAt)),
             sealedToken === undefined ? undefined : eq(bots.sealedToken, sealedToken),
+            ranAs === undefined
+              ? undefined
+              : and(eq(bots.shardCount, ranAs.shardCount), sql`${intents} = ${ranAs.intents}`),
           ),
         )
         .returning({ id: bots.id })

@@ -269,6 +269,7 @@ export const createBotRuntimes = ({
     clock,
     (name) => {
       if (name.startsWith(REST_LEASE)) return dropVoice(name.slice(REST_LEASE.length))
+      forgetRetry(name)
       const lost = running.get(name)
       if (lost === undefined) return
       running.delete(name)
@@ -326,6 +327,15 @@ export const createBotRuntimes = ({
       readonly cancel: () => void
     }
   >()
+  const forgetRetry = (key: string) => {
+    retries.get(key)?.cancel()
+    retries.delete(key)
+  }
+  /** Give up a shard's lease, and the session write waiting to retry under it. */
+  const giveUp = (name: string) => {
+    forgetRetry(name)
+    return leases.release(name)
+  }
   /** Agent calls waiting in their bot's write chain, by bot. Only the newest token is recorded. */
   const unrecorded = new Map<string, string>()
 
@@ -353,8 +363,7 @@ export const createBotRuntimes = ({
   // host holds the shard's lease, so a host that lost a shard never overwrites its new owner's.
   const saveSession = (botId: string, shardId: number, session: ShardSession | undefined) => {
     const key = shardLease(botId, shardId)
-    retries.get(key)?.cancel()
-    retries.delete(key)
+    forgetRetry(key)
     const queued = unsaved.has(key)
     unsaved.set(key, session)
     if (queued) return
@@ -368,8 +377,9 @@ export const createBotRuntimes = ({
         : vault.storeSession(botId, shardId, latest, fence)
     }).catch((cause) => {
       log(`Saving bot ${botId}'s shard ${shardId} Gateway session failed: ${reason(cause)}`)
-      // A newer session is already queued behind this one.
-      if (unsaved.has(key)) return
+      // A newer session is already queued behind this one. Without the shard's lease it can never
+      // land, and taking the shard again later it would overwrite its next owner's newer session.
+      if (unsaved.has(key) || !leases.holds(key)) return
       // Retry until storage recovers. A lost store can leave an online shard unresumable, since
       // READY may be its last dispatch.
       const cancel = clock.schedule(() => saveSession(botId, shardId, latest), RETRY_MS)
@@ -539,11 +549,11 @@ export const createBotRuntimes = ({
     running.set(name, run)
   }
 
-  const gatewayOf = (bot: OnlineVaultBot) => ({ intents: intentsOf(bot), presence: bot.presence })
+  const gatewayOf = (bot: OnlineVaultBot) => ({ intents: bot.intents, presence: bot.presence })
 
   /** Give a running shard the intents and presence storage has for its bot. */
   const update = (run: Running, bot: OnlineVaultBot) => {
-    if (run.intents !== intentsOf(bot)) run.shard.setIntents(intentsOf(bot))
+    if (run.intents !== bot.intents) run.shard.setIntents(intentsOf(bot))
     if (run.presence !== bot.presence && bot.presence !== null) {
       run.shard.updatePresence(JSON.parse(bot.presence))
     }
@@ -555,7 +565,7 @@ export const createBotRuntimes = ({
     running.delete(name)
     halt(run, end)
     await flushSessions(run.botId)
-    await leases.release(name)
+    await giveUp(name)
   }
 
   /**
@@ -565,7 +575,10 @@ export const createBotRuntimes = ({
   const onlineBots = async () => {
     for (const run of running.values()) {
       if (run.fatal === undefined) continue
-      await vault.setOffline(run.botId, run.token, run.fatal)
+      // Only while the bot is online as the shard ran it: once brought back, by any host, a close
+      // from before says nothing about it.
+      const { shardCount, intents } = run
+      await vault.setOffline(run.botId, run.token, { ...run.fatal, ranAs: { shardCount, intents } })
       // Every shard on this token ends with it, at once: should this pass fail, the bot may come
       // back online with the same token before a shard closed later could take it offline again.
       const ended = [...running].filter(
@@ -695,7 +708,7 @@ export const createBotRuntimes = ({
       // The read may have outlasted the lease.
       const gone = closed || !leases.holds(name)
       if (gone || bot === undefined || bot.shardCount <= shardId) {
-        await leases.release(name)
+        await giveUp(name)
         continue
       }
       // Its token may be newer than the pass's read; routes and voice use the shards' token.
@@ -734,7 +747,7 @@ export const createBotRuntimes = ({
       if (!name.startsWith(SHARD_LEASE) || running.has(name)) continue
       // A shard stopped between passes may still be saving the session its next host starts from.
       await flushSessions(botOfShardLease(name))
-      await leases.release(name)
+      await giveUp(name)
     }
     for (const botId of online.keys()) {
       if (owns(botId) && !leases.holds(restLease(botId))) await leases.claim(restLease(botId))

@@ -160,7 +160,8 @@ export interface Storage {
   /**
    * Take a bot offline and end its sessions. With `idleAt`, only if it has no enabled workflows
    * and its time online ended by then; with `rejectedCode`, it stays offline until its token is stored again;
-   * with `sealedToken`, only if that is still its token. Resolves whether it changed.
+   * with `sealedToken`, only if that is still its token; with `ranAs`, only while it is online
+   * with that shard count and those workflow intents. Resolves whether it changed.
    */
   readonly setBotOffline: (
     botId: string,
@@ -168,6 +169,7 @@ export interface Storage {
       readonly idleAt?: number
       readonly rejectedCode?: number
       readonly sealedToken?: string
+      readonly ranAs?: { readonly shardCount: number; readonly intents: number }
     },
   ) => Promise<boolean>
   /** Every online bot with its sealed token and stored sessions. */
