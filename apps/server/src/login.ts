@@ -14,6 +14,8 @@ const FLOW_SECONDS = 600
 const CODE_SECONDS = 60
 const ACCESS_SECONDS = 7 * 24 * 3600
 const CLIENT_SECONDS = 30 * 24 * 3600
+// Each refresh issues a new envelope, so active logins never lapse; an idle one dies after this.
+const REFRESH_SECONDS = 30 * 24 * 3600
 const MAX_CODES = 10_000
 const BODY_LIMIT = 16_384
 const CONSENT_STYLES =
@@ -29,6 +31,7 @@ const text = (value: unknown) => {
 
 const TokenResponse = Schema.Struct({
   access_token: Schema.String,
+  refresh_token: Schema.String,
   expires_in: Schema.Number,
   scope: Schema.String,
   token_type: Schema.Literal('Bearer'),
@@ -118,6 +121,7 @@ const readBody = async (request: Request) => {
  * Discord-backed OAuth issuer and resource gate. Bot credentials never enter this module.
  * Login state and Discord grants travel in purpose-bound AES-GCM envelopes, not a database.
  * Only spent authorization-code hashes live in memory, until their one-minute expiry.
+ * Refresh envelopes enclose Discord's rotating refresh token, so Discord rejects any replay.
  * `discordFetch` is the external network seam, shared by login and per-request revocation checks.
  */
 export const createDiscordLogin = (
@@ -258,6 +262,11 @@ export const createDiscordLogin = (
         { sub: subject, clientId, discordToken: tokens.access_token },
         expiresIn,
       ),
+      refresh_token: await seal(
+        'refresh',
+        { sub: subject, clientId, discordRefresh: tokens.refresh_token },
+        REFRESH_SECONDS,
+      ),
       token_type: 'Bearer',
       expires_in: expiresIn,
       scope: 'mcp',
@@ -293,7 +302,7 @@ export const createDiscordLogin = (
     token_endpoint: `${issuer}/token`,
     registration_endpoint: `${issuer}/register`,
     response_types_supported: ['code'],
-    grant_types_supported: ['authorization_code'],
+    grant_types_supported: ['authorization_code', 'refresh_token'],
     token_endpoint_auth_methods_supported: ['none'],
     code_challenge_methods_supported: ['S256'],
     scopes_supported: ['mcp'],
@@ -318,7 +327,7 @@ export const createDiscordLogin = (
       ),
       client_id_issued_at: now(),
       token_endpoint_auth_method: 'none',
-      grant_types: ['authorization_code'],
+      grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
     })
   }
@@ -465,9 +474,9 @@ export const createDiscordLogin = (
   const token = async (request: Request) => {
     const params = new URLSearchParams(await readBody(request))
     const clientId = text(params.get('client_id'))
-    await open('client', clientId)
     if (params.get('resource') !== resource) throw new Error('Wrong resource')
     if (params.get('grant_type') === 'authorization_code') {
+      await open('client', clientId)
       const code = await open('code', text(params.get('code')))
       const verifier = text(params.get('code_verifier'))
       if (
@@ -479,6 +488,18 @@ export const createDiscordLogin = (
         throw new Error('Wrong code binding')
       consumeCode(code)
       return issue(Schema.decodeUnknownSync(TokenResponse)(code.tokens), clientId, text(code.sub))
+    }
+    if (params.get('grant_type') === 'refresh_token') {
+      // The sealed client ID was a live registration at sign-in, so a chain outlives its expiry.
+      // Bindings are checked before Discord rotates, so a misdirected request spends nothing.
+      const grant = await open('refresh', text(params.get('refresh_token')))
+      if (grant.clientId !== clientId || !['mcp', null].includes(params.get('scope')))
+        throw new Error('Wrong refresh binding')
+      const tokens = await exchange({
+        grant_type: 'refresh_token',
+        refresh_token: text(grant.discordRefresh),
+      })
+      return issue(tokens, clientId, await identity(tokens.access_token, text(grant.sub)))
     }
 
     return json(400, { error: 'unsupported_grant_type' })

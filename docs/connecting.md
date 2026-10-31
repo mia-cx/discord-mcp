@@ -54,9 +54,20 @@ your operator allowed. The helper uses a local loopback callback and saves
 `~/.config/discord-mcp/login.json` with owner-only permissions. It never reads
 your bot token. `--no-open` prints the browser URL without opening it.
 
-Keep both credential files private. For a headless agent machine, transfer them
-over SSH to the same private directory there and retain the permissions above.
-Anyone who can read both files can act through the relay as your bot.
+Keep both credential files private. Anyone who can read both files can act
+through the relay as your bot.
+
+Each machine needs its own sign-in. The bridge refreshes the login before it
+expires, and a refresh revokes every other copy of that login file. For a
+headless agent machine, sign in for it separately on your browser machine:
+
+```sh
+node scripts/login.mjs https://YOUR_RELAY_HOST/mcp --output ./remote-login.json
+```
+
+Move `remote-login.json` over SSH to `~/.config/discord-mcp/login.json` on that
+machine, keeping owner-only permissions, and delete the local copy. Copy
+`bot.env` there the same way; the bot token can be shared.
 
 ## 4. Register the stdio bridge
 
@@ -121,12 +132,13 @@ Start a new agent session or reconnect its MCP servers. In T3 Code, use
 Ask the agent to list the Discord servers its bot can access. It should discover
 eight tools, including `discord_api_search` and `discord_api_read`, and complete
 the read through the relay. No second OAuth login is needed for another agent
-under the same OS account.
+under the same OS account; its bridges share the login and take turns refreshing it.
 
 ## Renew or troubleshoot
 
 - Expired or revoked login: run the login command again with `--replace`.
-  Logins last at most seven days; the bridge cannot refresh them automatically.
+  The bridge renews a login while you use it. A login lapses after 30 days unused,
+  when you revoke the app in Discord, or when another machine refreshed a copy of it.
 - `access_denied` or an allowlist error: ask the operator for access. Signing in
   repeatedly does not add your account to the allowlist.
 - Bot-token rejection: fix `bot.env` or the bot's permissions. Another OAuth login does not fix the bot.
