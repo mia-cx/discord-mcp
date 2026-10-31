@@ -17,19 +17,72 @@ export type Decision =
 const allow: Decision = { allowed: true }
 const deny = (reason: string): Decision => ({ allowed: false, reason })
 
-/**
- * A bot token can call it, and it carries no other credential. Interaction and webhook tokens in a
- * path are credentials too: the broker forwards no interactions to a script, so it answers none.
- */
-const scriptCallable = (operation: OperationEntry) =>
-  operation.auth.includes('bot') &&
-  operation.risk !== 'credential' &&
-  !operation.pathParams.some((param) => param.endsWith('_token'))
+/** The interaction a workflow run received. Its token is the credential its replies carry. */
+export interface ForwardedInteraction {
+  readonly id: string
+  readonly applicationId: string
+  readonly token: string
+}
 
-export const checkOperation = (grants: ScriptGrants, operation: OperationEntry): Decision => {
+/** Answering an interaction: the response, its original message, and follow-up messages. */
+const INTERACTION_REPLIES = new Set([
+  'create_interaction_response',
+  'get_original_webhook_message',
+  'update_original_webhook_message',
+  'delete_original_webhook_message',
+  'execute_webhook',
+  'get_webhook_message',
+  'update_webhook_message',
+  'delete_webhook_message',
+])
+
+/** The value of each `{param}` in `operation`'s path template, read from a path it matched. */
+const pathParams = (operation: OperationEntry, path: string) => {
+  const values = path.split('/')
+  return Object.fromEntries(
+    operation.path
+      .split('/')
+      .flatMap((segment, index) =>
+        /^\{\w+\}$/.test(segment) ? [[segment.slice(1, -1), values[index]]] : [],
+      ),
+  )
+}
+
+/**
+ * Interaction and webhook tokens in a path are credentials. A run may use only the token of the
+ * interaction it was handed, and only to answer it.
+ */
+const answersInteraction = (
+  operation: OperationEntry,
+  path: string,
+  interaction: ForwardedInteraction | undefined,
+) => {
+  if (interaction === undefined || !INTERACTION_REPLIES.has(operation.operationId)) return false
+  const params = pathParams(operation, path)
+  return operation.operationId === 'create_interaction_response'
+    ? params.interaction_id === interaction.id && params.interaction_token === interaction.token
+    : params.webhook_id === interaction.applicationId && params.webhook_token === interaction.token
+}
+
+/**
+ * Whether a run may make a Discord call: `path` is the one it requested, and `interaction` the
+ * interaction it received, if any.
+ */
+export const checkOperation = (
+  grants: ScriptGrants,
+  operation: OperationEntry,
+  path: string,
+  interaction?: ForwardedInteraction,
+): Decision => {
   const { operationId, family, risk } = operation
-  if (!scriptCallable(operation)) {
+  if (!operation.auth.includes('bot') || risk === 'credential') {
     return deny(`${operationId} is not available to scripts.`)
+  }
+  if (
+    operation.pathParams.some((param) => param.endsWith('_token')) &&
+    !answersInteraction(operation, path, interaction)
+  ) {
+    return deny(`${operationId} is available only to answer the interaction this run received.`)
   }
   if (grants.operations.includes(operationId)) return allow
   if (!grants.families.includes(family)) {

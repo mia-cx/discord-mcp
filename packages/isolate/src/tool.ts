@@ -112,7 +112,7 @@ export const scriptRun = defineTool({
       // A failure here is workerd failing to run at all: a defect, not something the agent can fix.
       const outcome = yield* Effect.promise((signal) =>
         runner.run({
-          botId: bot.id,
+          queue: bot.id,
           botUser: bot,
           modules,
           timeoutMs: (args.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS) * 1000,

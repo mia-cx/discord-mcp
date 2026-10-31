@@ -7,7 +7,7 @@ const execution = async (
   source: string,
   timeoutMs: number,
 ): Promise<ScriptExecution> => ({
-  botId,
+  queue: botId,
   botUser: { id: botId, username: `bot-${botId}`, discriminator: '0', bot: true },
   modules: await prepareScript(source),
   timeoutMs,

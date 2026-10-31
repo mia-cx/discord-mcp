@@ -19,6 +19,8 @@ export interface DiscordRequest {
   readonly auditLogReason?: string
   /** Groups rate-guard accounting. Derived from the catalog once phase 2 lands. */
   readonly operationFamily: string
+  /** False sends no bot token, for routes that carry their own, such as interaction replies. */
+  readonly auth?: false
 }
 
 export interface RestConfig {
@@ -122,6 +124,7 @@ export class DiscordRest extends Context.Service<
               ...(req.query === undefined ? {} : { query: req.query }),
               ...(req.body === undefined ? {} : { body: req.body }),
               ...(req.auditLogReason === undefined ? {} : { reason: req.auditLogReason }),
+              ...(req.auth === false ? { auth: false } : {}),
               ...(signal === undefined ? {} : { signal }),
             }
 

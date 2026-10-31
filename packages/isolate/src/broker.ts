@@ -2,7 +2,13 @@ import type { DiscordRequest, DiscordRestError } from '@discord-mcp/discord-api/
 import type { OperationEntry } from '@mia-cx/discord-catalog'
 import { Effect } from 'effect'
 import { EgressBlockedError, fetchPublic } from './egress.ts'
-import { checkHost, checkOperation, matchOperation, type ScriptGrants } from './grants.ts'
+import {
+  checkHost,
+  checkOperation,
+  type ForwardedInteraction,
+  matchOperation,
+  type ScriptGrants,
+} from './grants.ts'
 
 /** Handles every request an isolate makes, whatever its URL. */
 export type Broker = (request: Request) => Promise<Response>
@@ -23,10 +29,57 @@ export interface BrokerOptions {
   ) => Effect.Effect<unknown, DiscordRestError>
   /** Outbound HTTP to granted hosts. Defaults to the public internet only. */
   readonly egress?: (request: Request) => Promise<Response>
+  /** The interaction a workflow run received. Without one, interaction replies are refused. */
+  readonly interaction?: ForwardedInteraction
+  /**
+   * Sets the bot's presence over its Gateway connection. Without it, setPresence is refused.
+   * Rejects with a message the run sees.
+   */
+  readonly updatePresence?: (presence: Presence) => Promise<void>
   readonly onDenied: (denial: Denial) => void
 }
 
+/** A Gateway presence update, as discord.js's setPresence sends it. */
+export interface Presence {
+  readonly since: number | null
+  readonly activities: ReadonlyArray<Record<string, unknown>>
+  readonly status: string
+  readonly afk: boolean
+}
+
 const DISCORD_API = '/api/v10/'
+
+const decodeSegment = (segment: string) => {
+  try {
+    return decodeURIComponent(segment)
+  } catch {
+    return undefined
+  }
+}
+/** Where the discord.js shim sends Gateway commands. */
+const GATEWAY_HOST = 'gateway.textile.internal'
+const PRESENCE_UPDATE = 3
+const STATUSES = new Set(['online', 'idle', 'dnd', 'invisible'])
+
+/** A malformed presence makes Discord drop the bot's whole Gateway connection, so check its shape. */
+const isPresence = (value: unknown): value is Presence => {
+  if (typeof value !== 'object' || value === null) return false
+  const { since, activities, status, afk } = value as Record<string, unknown>
+  return (
+    (since === null || typeof since === 'number') &&
+    typeof afk === 'boolean' &&
+    typeof status === 'string' &&
+    STATUSES.has(status) &&
+    Array.isArray(activities) &&
+    activities.every(
+      (activity: unknown) =>
+        typeof activity === 'object' &&
+        activity !== null &&
+        typeof (activity as { name?: unknown }).name === 'string' &&
+        typeof (activity as { type?: unknown }).type === 'number',
+    )
+  )
+}
 
 /** A Discord-shaped error body, so discord.js inside the isolate raises its usual DiscordAPIError. */
 const discordError = (status: number, message: string, headers: Record<string, string> = {}) =>
@@ -125,8 +178,10 @@ export const makeBroker = (options: BrokerOptions): Broker => {
     if (operation === undefined) {
       return refuse(request, `${request.method} ${route} is not a cataloged Discord operation.`)
     }
-    const decision = checkOperation(options.grants, operation)
+    const decision = checkOperation(options.grants, operation, route, options.interaction)
     if (!decision.allowed) return refuse(request, decision.reason)
+    // An interaction reply carries its own credential in the path; the bot's token stays out.
+    const ownCredential = operation.pathParams.some((param) => param.endsWith('_token'))
 
     const reason = auditLogReason(request)
     if ('refusal' in reason) return refuse(request, reason.refusal)
@@ -139,6 +194,7 @@ export const makeBroker = (options: BrokerOptions): Broker => {
             method: operation.method,
             route,
             operationFamily: operation.family,
+            ...(ownCredential ? { auth: false } : {}),
             ...(url.search === '' ? {} : { query: url.searchParams }),
             ...(body.body === undefined ? {} : { body: body.body }),
             ...(reason.reason === undefined ? {} : { auditLogReason: reason.reason }),
@@ -162,12 +218,37 @@ export const makeBroker = (options: BrokerOptions): Broker => {
     })
   }
 
+  const gateway = async (request: Request) => {
+    if (options.updatePresence === undefined) {
+      return refuse(request, 'Gateway calls such as setPresence need the bot online.')
+    }
+    const body = await readBody(request)
+    if ('refusal' in body) return refuse(request, body.refusal)
+    const { op, d } = (body.body ?? {}) as { op?: unknown; d?: unknown }
+    if (op !== PRESENCE_UPDATE) {
+      return refuse(request, `Gateway opcode ${String(op)} is not supported; only setPresence is.`)
+    }
+    if (!isPresence(d)) return refuse(request, 'The presence is malformed.')
+    try {
+      await options.updatePresence(d)
+    } catch (error) {
+      return discordError(503, error instanceof Error ? error.message : String(error))
+    }
+    return new Response(null, { status: 204 })
+  }
+
   return async (request) => {
     const url = new URL(request.url)
+    if (url.hostname === GATEWAY_HOST) return gateway(request)
     if (url.hostname !== 'discord.com') return outbound(request, url)
     if (!url.pathname.startsWith(DISCORD_API)) {
       return refuse(request, `${url.pathname} is not part of Discord's v10 REST API.`)
     }
-    return discord(request, url, `/${url.pathname.slice(DISCORD_API.length)}` as const)
+    // discord.js encodes path segments, such as `@original` as `%40original`; templates do not.
+    const segments = url.pathname.slice(DISCORD_API.length).split('/').map(decodeSegment)
+    if (segments.some((segment) => segment === undefined || segment.includes('/'))) {
+      return refuse(request, `${url.pathname} is not a valid path.`)
+    }
+    return discord(request, url, `/${segments.join('/')}` as const)
   }
 }

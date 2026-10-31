@@ -25,6 +25,12 @@ const RESULT_LIMIT_BYTES = 1024 * 1024
 const STDERR_TAIL_BYTES = 4 * 1024
 const STARTUP_RETRY_MS = 10
 
+/** A Gateway dispatch: its event name and data. */
+export interface GatewayEvent {
+  readonly t: string
+  readonly d: Record<string, unknown>
+}
+
 export type ScriptOutcome =
   | {
       readonly outcome: 'completed'
@@ -40,12 +46,20 @@ export type ScriptOutcome =
   | { readonly outcome: 'crashed'; readonly message: string }
 
 export interface ScriptExecution {
-  /** Executions for one bot run one at a time; different bots run side by side. */
-  readonly botId: string
+  /**
+   * Executions with the same queue run one at a time, in order; others run side by side. Scripts
+   * queue per bot, workflow events per bot and guild.
+   */
+  readonly queue: string
   /** The bot's own user object, which the isolate's client reports as `client.user`. */
   readonly botUser: unknown
   /** From `prepareScript`; the first is the entry module. */
   readonly modules: ReadonlyArray<ScriptModule>
+  /**
+   * What to run. Omitted, the script's default export; `event`, a workflow's listeners for one
+   * Gateway dispatch; `probe`, a report of the events and intents a workflow's clients declare.
+   */
+  readonly input?: { readonly event: GatewayEvent } | { readonly probe: true }
   readonly timeoutMs: number
   readonly broker: Broker
   readonly signal?: AbortSignal
@@ -124,8 +138,7 @@ const readLimited = async (response: IncomingMessage) => {
 }
 
 /** Send the one request that runs the script, waiting for workerd to open its socket first. */
-const invoke = async (socketPath: string, botUser: unknown, signal: AbortSignal) => {
-  const payload = JSON.stringify({ user: botUser })
+const invoke = async (socketPath: string, payload: string, signal: AbortSignal) => {
   for (;;) {
     try {
       return await new Promise<string | undefined>((resolve, reject) => {
@@ -220,7 +233,11 @@ const execute = async (execution: ScriptExecution): Promise<ScriptOutcome> => {
             `workerd exited (${code ?? exitSignal}) before the script finished.${dropped}\n${stderr}`.trim(),
         }),
       )
-      invoke(runSocket, execution.botUser, signal).then(
+      invoke(
+        runSocket,
+        JSON.stringify({ user: execution.botUser, ...execution.input }),
+        signal,
+      ).then(
         (body) => resolve(parseOutcome(body, () => stderr)),
         // The connection dropped: workerd died or is dying. Its exit reports why, with stderr.
         (error: unknown) => {
@@ -245,20 +262,20 @@ export interface IsolateHost {
   readonly run: (execution: ScriptExecution) => Promise<ScriptOutcome>
 }
 
-/** Runs scripts one at a time per bot, each in its own workerd process. */
+/** Runs executions one at a time per queue, each in its own workerd process. */
 export const makeIsolateHost = (): IsolateHost => {
   const queues = new Map<string, Promise<unknown>>()
   return {
     run: (execution) => {
-      const previous = queues.get(execution.botId) ?? Promise.resolve()
+      const previous = queues.get(execution.queue) ?? Promise.resolve()
       const current = previous.then(() => {
         execution.signal?.throwIfAborted()
         return execute(execution)
       })
       const settled = current.catch(() => undefined)
-      queues.set(execution.botId, settled)
+      queues.set(execution.queue, settled)
       void settled.then(() => {
-        if (queues.get(execution.botId) === settled) queues.delete(execution.botId)
+        if (queues.get(execution.queue) === settled) queues.delete(execution.queue)
       })
       return current
     },
