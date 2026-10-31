@@ -1,5 +1,5 @@
 import { DiscordApiError, DiscordRateLimitError } from '@discord-mcp/core'
-import { DiscordRest } from '@discord-mcp/discord-api'
+import { DEFAULT_FAILURE_THRESHOLD, DiscordRest } from '@discord-mcp/discord-api'
 import { Effect, Layer, Redacted } from 'effect'
 import { describe, expect, it } from 'vitest'
 import { createRelay } from '../src/relay.ts'
@@ -187,5 +187,22 @@ describe('the stateless Discord relay', () => {
     expect(response.status).toBe(429)
     expect(response.headers.get('retry-after')).toBe('2')
     expect(response.headers.get('www-authenticate')).toBeNull()
+  })
+
+  it("keeps forged tokens naming a bot from tripping that bot's rejection guard", async () => {
+    const real = botToken()
+    const discord: typeof fetch = async (_input, init) =>
+      new Headers(init?.headers).get('authorization') === `Bot ${real}`
+        ? Response.json({ id: BOT_ID, bot: true })
+        : Response.json({ message: '401: Unauthorized', code: 0 }, { status: 401 })
+    const oauth = discordOAuth()
+    const relay = createRelay(config, executor(undefined, { discordFetch: discord }), oauth.fetch)
+    const { tokens } = await login(relay)
+    const list = (token: string) => request(tokens.access_token, token, 'tools/list')
+
+    for (let forged = 0; forged < DEFAULT_FAILURE_THRESHOLD + 5; forged++) {
+      expect((await relay.fetch(list(botToken(BOT_ID, `forged-${forged}`)))).status).toBe(403)
+    }
+    expect((await relay.fetch(list(real))).status).toBe(200)
   })
 })

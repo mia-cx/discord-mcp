@@ -10,6 +10,7 @@ import {
   DEFAULT_WINDOW_MS,
   DiscordRest,
   OperationCatalog,
+  RateGuard,
   type RateLimiter,
   type RestConfig,
   relayTools,
@@ -156,10 +157,13 @@ export const createExecutor = ({
       maxSubscriptions: 0,
     })
     try {
-      const verified = await runtime.runPromiseExit(
+      // Anyone can name a bot's public ID, so until Discord accepts the token its rejections go to
+      // a guard of its own rather than the one this bot's verified requests share.
+      const unverified = { ...lane.limiter, guard: Effect.runSync(RateGuard.make()) }
+      const verified = await Effect.runPromiseExit(
         Effect.flatMap(DiscordRest, (rest) =>
           rest.request({ method: 'GET', route: '/users/@me', operationFamily: 'authentication' }),
-        ),
+        ).pipe(Effect.provide(restLayer(Redacted.make(credential), unverified))),
         { signal: request.signal },
       )
       if (verified._tag === 'Failure') {
