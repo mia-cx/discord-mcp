@@ -9,12 +9,17 @@ describe('preparing a script', () => {
     expect(modules.map((module) => module.name)).toEqual(['entry.js', 'discord.js', 'script.js'])
   })
 
-  it('reports a syntax error with its location', async () => {
-    const failure = prepareScript('export default async ( => 1')
+  it.each([
+    ['a syntax error', 'export default async ( => 1', /^script\.ts:1:\d+: /],
+    [
+      'top-level await',
+      "const value = await Promise.resolve('ok')\nexport default () => value",
+      /await inside the default export/,
+    ],
+  ])('refuses %s with a reason an agent can act on', async (_, source, issue) => {
+    const failure = prepareScript(source)
 
     await expect(failure).rejects.toBeInstanceOf(ScriptBuildError)
-    await expect(failure).rejects.toMatchObject({
-      issues: [expect.stringMatching(/^script.ts:1:/)],
-    })
+    await expect(failure).rejects.toMatchObject({ issues: [expect.stringMatching(issue)] })
   })
 })

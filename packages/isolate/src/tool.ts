@@ -75,7 +75,7 @@ export const scriptRun = defineTool({
   title: 'Run a discord.js script',
   description: [
     'Run one-off discord.js code as this bot, so many Discord calls cost one tool call.',
-    '`source` is a JavaScript or TypeScript module whose default export is `async ({ client }) => result`; `client` is a discord.js Client already logged in as the bot, with REST only and no Gateway. Import only from discord.js and node:*. The result must be JSON-serializable; console output comes back as logs.',
+    '`source` is a JavaScript or TypeScript module whose default export is `async ({ client }) => result`; `client` is a discord.js Client already logged in as the bot, with REST only and no Gateway. Import only from discord.js and node:*, with no top-level await. The result must be JSON-serializable; console output comes back as logs.',
     'Every request the script makes is checked against `grants`: `operations` lists catalog operation IDs; `families` grants every read and write operation in a family, never a destructive or admin one, which must be listed in `operations`; `hosts` lists hostnames reachable with fetch(). Private, loopback, and link-local addresses are never reachable. A refused call fails in the script with a 403 and is listed under `denied`.',
     `The script is stopped after timeoutSeconds (default ${DEFAULT_TIMEOUT_SECONDS}, at most ${MAX_TIMEOUT_SECONDS}). JSON bodies only; file uploads and Gateway-only calls such as setPresence are unsupported.`,
   ].join('\n\n'),

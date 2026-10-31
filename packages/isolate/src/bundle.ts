@@ -22,8 +22,15 @@ export class ScriptBuildError extends Error {
   }
 }
 
-const describeMessage = ({ text, location }: Message) =>
-  location === null ? text : `script.ts:${location.line}:${location.column + 1}: ${text}`
+/** esbuild names the output format; an agent needs to know what to change instead. */
+const TOP_LEVEL_AWAIT = /^Top-level await is currently not supported/
+
+const describeMessage = ({ text, location }: Message) => {
+  const reason = TOP_LEVEL_AWAIT.test(text)
+    ? 'Top-level await is not supported; await inside the default export instead.'
+    : text
+  return location === null ? reason : `script.ts:${location.line}:${location.column + 1}: ${reason}`
+}
 
 /**
  * discord.js with the shim's Client, bundled once per process as a CommonJS module. CommonJS, so a
@@ -71,6 +78,8 @@ export const prepareScript = async (source: string): Promise<ReadonlyArray<Scrip
     loader: 'ts',
     format: 'cjs',
     target: 'es2023',
+    // Compiles `import()` to `require()` too, or a CommonJS module's namespace hides its names.
+    supported: { 'dynamic-import': false },
     logLevel: 'silent',
   }).catch((error: { errors?: ReadonlyArray<Message> }) => {
     if (error.errors === undefined) throw error
