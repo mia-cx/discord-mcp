@@ -5,8 +5,10 @@ packages:
 # Native builds we deliberately allow.
 #
 # `argon2` is load-bearing: personal access tokens are hashed with argon2id, and without its native
-# binding the auth package does not work at all. The other two are build tooling.
+# binding the auth package does not work at all. `@discordjs/opus` encodes `pcm16` voice audio and
+# has no prebuilt binary for Node 24, so it compiles from source. The other two are build tooling.
 allowBuilds:
+  '@discordjs/opus': true
   argon2: true
   esbuild: true
   msgpackr-extract: true

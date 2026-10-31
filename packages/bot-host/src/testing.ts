@@ -3,6 +3,8 @@ import type { AddressInfo } from 'node:net'
 import { WebSocketServer } from 'ws'
 import type { Clock } from './clock.ts'
 
+export * from './fake-voice.ts'
+
 export interface GatewayPayload {
   readonly op: number
   readonly d?: unknown
@@ -26,12 +28,24 @@ export interface FakeConnection {
 
 export const DEFAULT_HEARTBEAT_INTERVAL_MS = 41_250
 
+/** Where the fake Gateway sends a bot that asks to join a voice channel. */
+export interface FakeVoiceRoute {
+  readonly botId: string
+  /** A voice server endpoint, such as `fakeVoiceServer().endpoint`. */
+  readonly endpoint: string
+}
+
 /**
  * A local stand-in for Discord's Gateway: it says Hello, answers Identify with READY naming
- * itself as the resume URL, and acknowledges heartbeats. Tests drive replays, drops, and closes
- * through `connections`.
+ * itself as the resume URL, and acknowledges heartbeats. Given `voice`, it answers a voice state
+ * update as Discord does, with the bot's new voice state and, when it joined a channel, the voice
+ * server to connect to. Without it, voice joins go unanswered. Tests drive replays, drops, and
+ * closes through `connections`.
  */
-export const fakeGateway = async (heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS) => {
+export const fakeGateway = async (
+  heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS,
+  voice?: FakeVoiceRoute,
+) => {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 })
   await once(server, 'listening')
   const { port } = server.address() as AddressInfo
@@ -47,6 +61,7 @@ export const fakeGateway = async (heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERV
       close: (code) => socket.close(code),
     }
     connections.push(connection)
+    let sequence = 1
     socket.on('message', (data) => {
       const payload: GatewayPayload = JSON.parse(String(data))
       connection.received.push(payload)
@@ -59,6 +74,26 @@ export const fakeGateway = async (heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERV
         })
       }
       if (payload.op === 1 && connection.acknowledge) connection.send({ op: 11 })
+      if (payload.op === 4 && voice !== undefined) {
+        const { guild_id, channel_id } = payload.d as {
+          guild_id: string
+          channel_id: string | null
+        }
+        connection.send({
+          op: 0,
+          t: 'VOICE_STATE_UPDATE',
+          s: ++sequence,
+          d: { guild_id, channel_id, user_id: voice.botId, session_id: 'fake-voice-session' },
+        })
+        if (channel_id !== null) {
+          connection.send({
+            op: 0,
+            t: 'VOICE_SERVER_UPDATE',
+            s: ++sequence,
+            d: { guild_id, token: 'fake-voice-token', endpoint: voice.endpoint },
+          })
+        }
+      }
     })
     socket.on('close', (code) => {
       connection.closeCode = code

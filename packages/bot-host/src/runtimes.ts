@@ -1,6 +1,7 @@
 import type { Clock } from './clock.ts'
 import { type Shard, type ShardSession, startShard } from './shard.ts'
 import type { TokenVault } from './vault.ts'
+import { type BotVoice, createVoice, type Voice } from './voice.ts'
 
 export const IDLE_TIMEOUT_MS = 24 * 60 * 60 * 1000
 export const DISCORD_GATEWAY_URL = 'wss://gateway.discord.gg'
@@ -28,15 +29,19 @@ export interface BotRuntimes {
    * replays the events it missed. Each starts a fresh 24-hour idle timer. Failures are logged.
    */
   readonly resume: () => Promise<void>
+  /** The voice of a bot this process runs, or `undefined` when it is offline. */
+  readonly voice: (botId: string) => BotVoice | undefined
   /**
-   * Disconnect every bot without ending its session, so the next process can resume it.
-   * Resolves once every pending storage write has settled.
+   * Disconnect every bot without ending its session, so the next process can resume it. Voice
+   * cannot move between processes, so bots leave their voice channels first. Resolves once every
+   * pending storage write has settled.
    */
   readonly close: () => Promise<void>
 }
 
 interface Runtime {
   readonly token: string
+  readonly voice: Voice
   shard?: Shard
   cancelIdle: () => void
 }
@@ -106,19 +111,31 @@ export const createBotRuntimes = ({
     if (running.get(botId) !== runtime) return
     running.delete(botId)
     runtime.cancelIdle()
+    // Before the shard stops, so the leave payloads still go out.
+    runtime.voice.close()
     runtime.shard?.stop()
   }
 
   const keepAlive = (botId: string, runtime: Runtime) => {
     runtime.cancelIdle()
     runtime.cancelIdle = clock.schedule(() => {
+      if (runtime.voice.streaming()) return keepAlive(botId, runtime)
       log(`Bot ${botId} went offline after 24 hours without an agent call.`)
       stop(botId, runtime)
     }, IDLE_TIMEOUT_MS)
   }
 
   const add = (botId: string, token: string) => {
-    const runtime: Runtime = { token, cancelIdle: () => {} }
+    const runtime: Runtime = {
+      token,
+      voice: createVoice({
+        botId,
+        send: (payload) => runtime.shard?.send(payload) ?? false,
+        clock,
+        log,
+      }),
+      cancelIdle: () => {},
+    }
     running.set(botId, runtime)
     keepAlive(botId, runtime)
     return runtime
@@ -132,6 +149,7 @@ export const createBotRuntimes = ({
       ...(session && { session }),
       onSession: (next) => saveSession(botId, next),
       onReady: () => log(`Bot ${botId} is online.`),
+      onDispatch: runtime.voice.dispatch,
       onIdentifyBudgetSpent: (waitMs) =>
         log(
           `Bot ${botId} is offline: it spent its daily Gateway Identify budget. Reconnecting in ${Math.ceil(waitMs / 60_000)} minutes.`,
@@ -179,10 +197,12 @@ export const createBotRuntimes = ({
         connect(botId, add(botId, token), session)
       }
     },
+    voice: (botId) => running.get(botId)?.voice,
     close: async () => {
       for (const [botId, runtime] of running) {
         running.delete(botId)
         runtime.cancelIdle()
+        runtime.voice.close()
         runtime.shard?.suspend()
       }
       await Promise.all(writes.values())
