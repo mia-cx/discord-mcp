@@ -2,6 +2,8 @@
 
 > Historical design. The project now targets a stateless bot-token API relay.
 > See DIRECTION.md and README.md for the current scope.
+> The sandbox supervisor and workflow containers described here are no longer in the workspace;
+> Textile's workerd runners replace them.
 
 A self-hosted Discord automation platform driven by an AI agent through MCP.
 

@@ -8,7 +8,7 @@ Serve Discord's bot-authenticated HTTP API through stateless MCP tools.
 - Keep OAuth grants encrypted in client-held relay credentials; keep only short-lived code-replay hashes in memory.
 - Let Discord enforce bot permissions; require no local accounts or grants.
 - Keep local schema validation and actionable Discord errors.
-- Run without a database, Gateway, workflow engine, or sandbox supervisor.
+- Run without a database, Gateway, or workflow engine.
 
 The old phase checklist belonged to the control-plane design in `PLAN.md`.
 It is no longer the implementation contract.

@@ -19,7 +19,6 @@
     "@discord-mcp/discord-gateway": "workspace:*",
     "@discord-mcp/auth": "workspace:*",
     "@discord-mcp/workflow-runtime": "workspace:*",
-    "@discord-mcp/sandbox-supervisor": "workspace:*",
     "@discord-mcp/workflow-sdk": "workspace:*"
   },
   "devDependencies": {

@@ -14,7 +14,7 @@ corepack pnpm start
 
 For containers, fill `docker/.env.example` into a private `.env`, then run
 `docker compose --env-file .env up -d` from `docker/`. Use one server process
-and TLS termination. There is no database, state volume, or supervisor.
+and TLS termination. There is no database or state volume.
 
 Local stdio uses `MCP_TRANSPORT=stdio DISCORD_TOKEN=...` and does not require OAuth.
 Never expose a local stdio process as an unauthenticated network proxy.

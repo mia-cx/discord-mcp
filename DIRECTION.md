@@ -23,9 +23,11 @@ envelope expires after 30 days. Never issue a refresh token that Discord's rotat
 One login serves one machine: its bridges share `login.json` and serialise refreshes with a lock
 file. Every other machine signs in separately, since one holder's refresh revokes every copy.
 
-The relay needs no database, local accounts, PATs, stored OAuth profiles, Gateway, workflow engine, or
-sandbox supervisor. The earlier control-plane libraries remain in the workspace as legacy code;
-the server executable no longer starts them. `PLAN.md` describes that historical design.
+The relay needs no database, local accounts, PATs, stored OAuth profiles, Gateway, or workflow
+engine. The earlier control-plane libraries remain in the workspace as legacy code; the server
+executable no longer starts them. Textile keeps their broker, grants, dispatcher, and catalog.
+Their Docker sandbox supervisor is gone, so workflows have no execution backend until Textile's
+runners land. `PLAN.md` describes that historical design.
 
 ## Heading: Textile, a bot platform for agents
 

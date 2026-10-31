@@ -5,9 +5,9 @@ import { Context, Effect, Layer } from 'effect'
 /**
  * The control plane's port to the sandbox.
  *
- * An interface rather than the supervisor client itself, so the dependency runs one way: the
- * runtime states what it needs, and the application wires it to a process holding the Docker
- * socket. It also means the lifecycle tools are testable without Docker.
+ * An interface rather than a backend client, so the dependency runs one way: the runtime states
+ * what it needs, and the application wires it to whatever executes workflows. It also means the
+ * lifecycle tools are testable without one.
  */
 
 export interface SandboxBuild {
@@ -55,7 +55,7 @@ export class SandboxSupervisor extends Context.Service<
   }
 >()('workflow-runtime/SandboxSupervisor') {
   /**
-   * A supervisor that refuses everything, for deployments running with workflows disabled.
+   * A sandbox that refuses everything, for a server with no workflow execution backend.
    *
    * The alternative — omitting the service — would make every workflow tool fail at layer
    * construction rather than with an explanation the operator can act on.

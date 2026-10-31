@@ -158,7 +158,7 @@ Configure one Discord application for the hosted relay, not one per caller:
 3. Set `DISCORD_OAUTH_CLIENT_ID`, `DISCORD_OAUTH_CLIENT_SECRET`, and a stable
    `OAUTH_ENCRYPTION_KEY` generated with `openssl rand -base64 32`.
 
-`docker/compose.yaml` runs one HTTP relay without data volumes or a supervisor.
+`docker/compose.yaml` runs one HTTP relay without data volumes.
 Set these OAuth values, `PUBLIC_BASE_URL`, and `ALLOWED_HOSTS` using
 [docker/.env.example](./docker/.env.example), then run Compose from `docker/`.
 Keep the environment file private. Rotating the encryption key invalidates all logins.
@@ -218,7 +218,8 @@ Stateless HTTP was already possible before that revision.
 [PLAN.md](./PLAN.md) describes the earlier stateful control-plane design.
 Its libraries and tests remain in the workspace, but the server executable no
 longer starts that application. Workflows, persistent templates/blueprints,
-PAT/OIDC administration, and the sandbox supervisor are outside the relay.
+and PAT/OIDC administration are outside the relay. Its Docker sandbox supervisor
+has been removed; workflows have no execution backend.
 
 ## License
 
