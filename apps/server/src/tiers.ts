@@ -47,6 +47,12 @@ export const forwardToBotHosts =
         redirect: 'error',
         signal: request.signal,
       })
+      // The host refused central's secret, not the caller's login. Passed on, a 401 would send
+      // every client to log in again.
+      if (response.status === 401) {
+        await response.body?.cancel()
+        return json(502, { error: 'bot_host_rejected_central' })
+      }
       const returned = new Headers(response.headers)
       for (const name of NOT_FORWARDED) returned.delete(name)
       return new Response(response.body, { status: response.status, headers: returned })

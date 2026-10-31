@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createRelay } from '../src/relay.ts'
 import { ownerOf } from '../src/router.ts'
+import { forwardToBotHosts } from '../src/tiers.ts'
 import { botToken, config, discordOAuth, executor, login } from './login-fixture.ts'
 
 const BIN = fileURLToPath(new URL('../src/bin.ts', import.meta.url))
@@ -275,5 +276,24 @@ describe('central and bot-host tiers', () => {
     const misrouted = await direct(other?.host ?? '', `Bearer ${SECRET}`)
     expect(misrouted.status).toBe(503)
     expect(misrouted.headers.get('retry-after')).toBe('1')
+  })
+})
+
+describe('forwarding to a bot host', () => {
+  it('reports a host that refuses central as a server fault, not a failed login', async () => {
+    const host = createServer((_request, response) => response.writeHead(401).end()).listen(
+      0,
+      '127.0.0.1',
+    )
+    await once(host, 'listening')
+    const url = `http://127.0.0.1:${(host.address() as AddressInfo).port}`
+    const forward = forwardToBotHosts({ hosts: [url], secret: SECRET })
+    const response = await forward(
+      new Request('https://relay.test/mcp', { method: 'POST', body: '{}' }),
+      '',
+      '345678901234567890',
+    )
+    host.close()
+    expect(response.status).toBe(502)
   })
 })
