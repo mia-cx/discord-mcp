@@ -213,12 +213,35 @@ const visibleTo = (revision: WorkflowRevision, kind: WorkflowEventKind, event: W
   if (!isMessage || !inGuild || mentioned || (revision.intents & MESSAGE_CONTENT) !== 0) {
     return event.dispatch
   }
-  const { poll: _, ...rest } = d
-  return {
-    t: kind.t,
-    d: { ...rest, content: '', embeds: [], attachments: [], components: [] },
-  }
+  return { t: kind.t, d: withoutContent(d) }
 }
+
+type Message = Record<string, unknown>
+
+/** A message as an app without MessageContent sees it, including the ones it quotes or forwards. */
+const withoutContent = ({
+  poll: _,
+  referenced_message,
+  message_snapshots,
+  ...rest
+}: Message): Message => ({
+  ...rest,
+  content: '',
+  embeds: [],
+  attachments: [],
+  components: [],
+  ...(referenced_message == null
+    ? { referenced_message }
+    : { referenced_message: withoutContent(referenced_message as Message) }),
+  ...(Array.isArray(message_snapshots)
+    ? {
+        message_snapshots: message_snapshots.map((snapshot: { message?: Message }) => ({
+          ...snapshot,
+          ...(snapshot.message === undefined ? {} : { message: withoutContent(snapshot.message) }),
+        })),
+      }
+    : {}),
+})
 
 export const makeWorkflowHost = ({
   storage,
@@ -248,22 +271,31 @@ export const makeWorkflowHost = ({
     }
   >()
 
-  const enabledFor = (botId: string) => {
-    let list = enabled.get(botId)
-    if (list === undefined) {
-      list = storage.enabledRevisions(botId).then((revisions) =>
-        revisions.map((revision) => ({
-          revision,
-          modules: prepareScript(revision.source),
-          stop: new AbortController(),
-        })),
-      )
-      enabled.set(botId, list)
-      // A failed read is retried on the next event.
-      list.catch(() => enabled.delete(botId))
-    }
+  /**
+   * Read the bot's enabled revisions. A revision still enabled keeps its entry from `previous`,
+   * so the stop signal its queued runs carry is the one a later change aborts.
+   */
+  const load = (botId: string, previous: ReadonlyArray<Enabled> = []) => {
+    const kept = new Map(previous.map((entry) => [revisionKey(entry.revision), entry]))
+    const list = storage.enabledRevisions(botId).then((revisions) =>
+      revisions.map(
+        (revision) =>
+          kept.get(revisionKey(revision)) ?? {
+            revision,
+            modules: prepareScript(revision.source),
+            stop: new AbortController(),
+          },
+      ),
+    )
+    enabled.set(botId, list)
+    // A failed read is retried on the next event.
+    list.catch(() => {
+      if (enabled.get(botId) === list) enabled.delete(botId)
+    })
     return list
   }
+
+  const enabledFor = (botId: string) => enabled.get(botId) ?? load(botId)
 
   /**
    * Point the bot host and the dispatcher at the bot's enabled revisions after a change, and stop
@@ -272,12 +304,8 @@ export const makeWorkflowHost = ({
   const refresh = (botId: string) => {
     const done = (refreshing.get(botId) ?? Promise.resolve()).then(async () => {
       const previous = (await enabled.get(botId)?.catch(() => undefined)) ?? []
-      enabled.delete(botId)
-      const revisions = await enabledFor(botId)
-      const running = new Set(revisions.map(({ revision }) => revisionKey(revision)))
-      for (const { revision, stop } of previous) {
-        if (!running.has(revisionKey(revision))) stop.abort()
-      }
+      const revisions = await load(botId, previous)
+      for (const entry of previous) if (!revisions.includes(entry)) entry.stop.abort()
       await bots.hold(
         botId,
         revisions.length === 0
@@ -329,11 +357,14 @@ export const makeWorkflowHost = ({
     const isInteraction = dispatch.t === 'INTERACTION_CREATE'
     return isolates
       .run({
-        // A guild's events, and a direct message channel's, run in order. Interactions skip the
-        // queue: Discord needs an answer within three seconds, whatever else the guild is doing.
-        queue: isInteraction
-          ? `${botId}:interaction:${String(d.id)}`
-          : `${botId}:${String(d.guild_id ?? `direct:${String(d.channel_id)}`)}`,
+        // Each workflow sees a guild's events, and a direct message channel's, in order, and never
+        // waits on another workflow. Interactions skip the queue: Discord needs an answer within
+        // three seconds, whatever else the guild is doing.
+        queue: `${botId}:${name}:${
+          isInteraction
+            ? `interaction:${String(d.id)}`
+            : String(d.guild_id ?? `direct:${String(d.channel_id)}`)
+        }`,
         botUser,
         modules,
         timeoutMs: EVENT_TIMEOUT_MS,

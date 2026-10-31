@@ -114,20 +114,25 @@ describe('the workflow dispatcher', () => {
 
     host.dispatch(message('secret'))
     host.dispatch(message('hey bot', { mentions: [{ id: BOT.id }] }))
+    host.dispatch(message('reply', { referenced_message: { content: 'quoted' } }))
 
-    await vi.waitFor(() => expect(runs).toHaveLength(4))
+    await vi.waitFor(() => expect(runs).toHaveLength(6))
     // Workflows run in name order: content, then no-content.
-    expect(handed(runs)).toEqual(['secret', '', 'hey bot', 'hey bot'])
+    expect(handed(runs)).toEqual(['secret', '', 'hey bot', 'hey bot', 'reply', ''])
+    const quoted = runs.map(
+      (run) =>
+        (run.execution.input as { event: { d: { referenced_message?: { content: string } } } })
+          .event.d.referenced_message?.content,
+    )
+    expect(quoted.slice(4)).toEqual(['quoted', ''])
   })
 
-  it("runs a guild's events in order across workflows, and lets interactions skip the queue", async () => {
+  it("runs each workflow's guild events in order, never waiting on another workflow or for interactions", async () => {
     const { runs, host: isolates } = recordingIsolates()
     const { host, enable } = await setup(isolates)
-    await enable('a', GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT, [
-      'messageCreate',
-      'interactionCreate',
-    ])
-    await enable('b', GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT)
+    const events = ['messageCreate', 'interactionCreate']
+    await enable('a', GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT, events)
+    await enable('b', GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT, events)
 
     host.dispatch(message('first'))
     host.dispatch(message('second'))
@@ -135,11 +140,11 @@ describe('the workflow dispatcher', () => {
       event('INTERACTION_CREATE', { id: '7', application_id: BOT.id, token: 't', guild_id: GUILD }),
     )
 
-    await vi.waitFor(() => expect(runs).toHaveLength(5))
-    expect(handed(runs)).toEqual(['first', 'first', 'second', 'second', undefined])
-    // The first message is still running; the slash command already started.
+    await vi.waitFor(() => expect(runs).toHaveLength(6))
+    expect(handed(runs)).toEqual(['first', 'first', 'second', 'second', undefined, undefined])
+    // Both workflows are still on the first message; both have started the slash command.
     await vi.waitFor(() =>
-      expect(runs.map((r) => r.started)).toEqual([true, false, false, false, true]),
+      expect(runs.map((r) => r.started)).toEqual([true, true, false, false, true, true]),
     )
   })
 
@@ -151,6 +156,8 @@ describe('the workflow dispatcher', () => {
     host.dispatch(message('first'))
     host.dispatch(message('second'))
     await vi.waitFor(() => expect(runs).toHaveLength(2))
+    // An unrelated change in between must not orphan the signal the queued runs carry.
+    await enable('other', GUILDS)
     await host.disable(caller, 'slow')
 
     expect(runs.map((r) => r.execution.signal?.aborted)).toEqual([true, true])
