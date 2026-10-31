@@ -336,6 +336,9 @@ export const createBotRuntimes = ({
    */
   const lifecycle = (botId: string) => `${LIFECYCLE}${botId}`
   const isLifecycle = (chain: string) => chain.startsWith(LIFECYCLE)
+  /** Session writes queued so far. A token or online-state write may wait on Discord. */
+  const sessionWrites = () =>
+    Promise.all([...writes].flatMap(([chain, done]) => (isLifecycle(chain) ? [] : [done])))
 
   // A crash loses the writes still queued or waiting to retry, so the next host finds an older
   // session or none. It may replay events twice or identify afresh. Writes land only while this
@@ -662,7 +665,9 @@ export const createBotRuntimes = ({
       )
     ).flat()
     if (claimed.length === 0) return
-    // Read sessions again: a host that just handed a shard over saved it before releasing.
+    // Read sessions again: a host that just handed a shard over saved it before releasing, and
+    // this host may be saving one it stopped.
+    await sessionWrites()
     const fresh = new Map((await vault.loadOnline()).map((bot) => [bot.botId, bot]))
     for (const { name, botId, shardId } of claimed) {
       const bot = fresh.get(botId)
@@ -704,9 +709,10 @@ export const createBotRuntimes = ({
    * bot's lease, so its schedules run here without an agent call.
    */
   const tidyLeases = async (online: ReadonlyMap<string, OnlineVaultBot>) => {
-    for (const name of leases.names()) {
-      if (name.startsWith(SHARD_LEASE) && !running.has(name)) await leases.release(name)
-    }
+    const idle = leases.names().filter((name) => name.startsWith(SHARD_LEASE) && !running.has(name))
+    // A shard stopped between passes may still be saving the session its next host starts from.
+    if (idle.length > 0) await sessionWrites()
+    for (const name of idle) await leases.release(name)
     for (const botId of online.keys()) {
       if (owns(botId) && !leases.holds(restLease(botId))) await leases.claim(restLease(botId))
     }
@@ -946,10 +952,7 @@ export const createBotRuntimes = ({
         shard.suspend(owing.get(botId)?.has(shardId) ?? false)
       }
       running.clear()
-      // Sessions only: a token or online-state write may wait on Discord, and the next agent call
-      // makes it again.
-      const sessionWrites = () =>
-        Promise.all([...writes].flatMap(([chain, done]) => (isLifecycle(chain) ? [] : [done])))
+      // Sessions only: the next agent call makes a token or online-state write again.
       await sessionWrites()
       // One last try at failed writes, so the next host starts from the newest state.
       for (const { botId, shardId, session } of retries.values()) {

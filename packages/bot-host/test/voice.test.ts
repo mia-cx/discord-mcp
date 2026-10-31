@@ -59,12 +59,25 @@ const start = async ({
   let held: Promise<void> | undefined
   let release = () => {}
   let renewing = true
+  let keepsRest = true
+  let saving: Promise<void> | undefined
   const bots = createBotRuntimes({
-    vault,
+    vault: {
+      ...vault,
+      storeSession: async (...args) => {
+        await saving
+        return vault.storeSession(...args)
+      },
+    },
     storage: {
       ...storage,
-      renewLeases: (...args) =>
-        renewing ? storage.renewLeases(...args) : Promise.reject(new Error('Connection refused')),
+      renewLeases: async (...args) => {
+        if (!renewing) throw new Error('Connection refused')
+        const renewed = await storage.renewLeases(...args)
+        if (keepsRest) return renewed
+        keepsRest = true
+        return renewed.filter((name) => !name.startsWith('bot:'))
+      },
       voiceOptedOut: async (...lookup) => {
         await held
         return storage.voiceOptedOut(...lookup)
@@ -111,11 +124,28 @@ const start = async ({
       release()
     },
   }
-  /** Postgres stops answering lease renewals. */
-  const cutRenewals = () => {
-    renewing = false
+  const leases = {
+    /** Postgres stops answering lease renewals. */
+    cut: () => {
+      renewing = false
+    },
+    /** The next renewal keeps every lease but the bot's REST lease, which another host took. */
+    loseRest: () => {
+      keepsRest = false
+    },
+    /** Session writes wait until the returned function is called. */
+    holdSessions: () => {
+      let release = () => {}
+      saving = new Promise((resolve) => {
+        release = resolve
+      })
+      return () => {
+        saving = undefined
+        release()
+      }
+    },
   }
-  return { bots, storage, vault, voice, voiceServer, gateway, clock, outage, lookups, cutRenewals }
+  return { bots, storage, vault, voice, voiceServer, gateway, clock, outage, lookups, leases }
 }
 
 /** An agent's WebSocket and the server side of it, which the bot host takes over. */
@@ -261,7 +291,7 @@ describe('voice', () => {
   })
 
   it('closes the socket when the host can no longer rely on serving the bot', async () => {
-    const { voice, clock, cutRenewals } = await start({ leaseTtlMs: 15_000 })
+    const { voice, clock, leases } = await start({ leaseTtlMs: 15_000 })
     await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID)
     const { socket, closed } = await agentSocket()
     voice.attach(GUILD_ID, socket, { codec: 'opus' })
@@ -271,7 +301,7 @@ describe('voice', () => {
     })
 
     // Another host may take the bot's REST lease, and with it the bot's voice, once it expires.
-    cutRenewals()
+    leases.cut()
     await vi.waitFor(() => {
       clock.advance(5_000)
       expect(outcome).toEqual({ code: 1001, reason: 'The bot went offline.' })
@@ -279,9 +309,9 @@ describe('voice', () => {
   })
 
   it('ends the session of a shard that could not say the bot left, once the host loses the bot', async () => {
-    const { voice, vault, gateway, clock, cutRenewals } = await start({ leaseTtlMs: 15_000 })
+    const { voice, vault, gateway, clock, leases } = await start({ leaseTtlMs: 15_000 })
     await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID)
-    cutRenewals()
+    leases.cut()
     // The leases lapse 10 s in, while Discord has the shard reconnecting.
     clock.advance(9_500)
     gateway.connections[0]?.send({ op: 9, d: true })
@@ -292,6 +322,27 @@ describe('voice', () => {
     await vi.waitFor(async () =>
       expect((await vault.loadOnline())[0]?.sessions.get(0)).toMatchObject({ stale: true }),
     )
+  })
+
+  it('restarts such a shard only once its ended session is saved', async () => {
+    const { voice, gateway, clock, leases } = await start()
+    await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID)
+    // Discord has the shard reconnecting when the next pass hears another host took the bot.
+    clock.advance(4_500)
+    gateway.connections[0]?.send({ op: 9, d: true })
+    await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(4000))
+    const saved = leases.holdSessions()
+    leases.loseRest()
+    clock.advance(500)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    saved()
+
+    // It waits out the turn of the Identify that started the session it replaces.
+    await vi.waitFor(() => {
+      clock.advance(1_000)
+      expect(gateway.connections[1]?.received[0]).toBeDefined()
+    })
+    expect(gateway.connections[1]?.received[0]).toMatchObject({ op: 2 })
   })
 
   it('closes the socket on a text message or audio that does not fit the codec', async () => {
@@ -790,7 +841,7 @@ describe('receiving voice', () => {
   it('posts no notice once another host took the bot while Discord was answering', async () => {
     const asked: string[] = []
     let answer = () => {}
-    const { voice, voiceServer, storage, clock, cutRenewals } = await start({
+    const { voice, voiceServer, storage, clock, leases } = await start({
       leaseTtlMs: 15_000,
       through: (discordFetch) => async (input, init) => {
         const path = new URL(String(input)).pathname
@@ -809,7 +860,7 @@ describe('receiving voice', () => {
     await vi.waitFor(() => expect(asked).toContain('/api/v10/applications/@me'))
 
     // This host loses Postgres, its REST lease expires, and another host takes the bot.
-    cutRenewals()
+    leases.cut()
     clock.advance(15_000)
     const successor = await storage.claimLease(`bot:${BOT_ID}`, 'host-b', clock.date(), 15_000)
     expect(successor.holder).toBe('host-b')
