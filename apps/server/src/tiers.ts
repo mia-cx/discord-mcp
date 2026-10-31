@@ -80,6 +80,8 @@ export const forwardToBotHosts =
 export const forwardVoiceToBotHosts =
   ({ hosts, secret }: Membership): VoiceUpgrade =>
   (request, socket, head, _credential, botId) => {
+    // The agent left while its login was checked.
+    if (socket.destroyed) return
     const owner = ownerOf(hosts, botId)
     if (owner === undefined) return void refuseUpgrade(socket, moving('bot_host_unavailable'))
     // The upgrade's own headers go along, so the host can complete the WebSocket handshake.
@@ -88,18 +90,25 @@ export const forwardVoiceToBotHosts =
     const upstream = send(`${owner}${request.url ?? VOICE_PATH}`, {
       headers: { ...headers, authorization: `Bearer ${secret}` },
     })
-    upstream.on('upgrade', (response: IncomingMessage, hostSocket: Duplex, hostHead: Buffer) => {
+    let hostSocket: Duplex | undefined
+    // An agent that leaves, even while the host is still admitting it, takes the host's side down.
+    socket.once('close', () => {
+      upstream.destroy()
+      hostSocket?.destroy()
+    })
+    upstream.on('upgrade', (response: IncomingMessage, upgraded: Duplex, hostHead: Buffer) => {
+      hostSocket = upgraded
+      if (socket.destroyed) return void upgraded.destroy()
       const lines = [`HTTP/1.1 101 ${response.statusMessage ?? 'Switching Protocols'}`]
       for (let at = 0; at < response.rawHeaders.length; at += 2) {
         lines.push(`${response.rawHeaders[at]}: ${response.rawHeaders[at + 1]}`)
       }
       socket.write(`${lines.join('\r\n')}\r\n\r\n`)
       if (hostHead.length > 0) socket.write(hostHead)
-      if (head.length > 0) hostSocket.write(head)
-      hostSocket.on('error', () => socket.destroy())
-      socket.on('close', () => hostSocket.destroy())
-      hostSocket.on('close', () => socket.destroy())
-      hostSocket.pipe(socket).pipe(hostSocket)
+      if (head.length > 0) upgraded.write(head)
+      upgraded.on('error', () => socket.destroy())
+      upgraded.on('close', () => socket.destroy())
+      upgraded.pipe(socket).pipe(upgraded)
     })
     upstream.on('response', (response: IncomingMessage) => {
       // The host refused central's secret, not the caller's login; see `forwardToBotHosts`.
@@ -121,7 +130,9 @@ export const forwardVoiceToBotHosts =
         )
       })
     })
-    upstream.on('error', () => void refuseUpgrade(socket, moving('bot_host_unavailable')))
+    upstream.on('error', () => {
+      if (!socket.destroyed) void refuseUpgrade(socket, moving('bot_host_unavailable'))
+    })
     upstream.end()
   }
 
@@ -164,7 +175,8 @@ export const createBotHost = (
     /** Serves voice sockets central forwards; attach it to the HTTP server's `upgrade` event. */
     upgrade: (request: IncomingMessage, socket: Duplex, head: Buffer) => {
       socket.on('error', () => socket.destroy())
-      const { pathname } = new URL(request.url ?? '/', 'http://bot-host')
+      // A request target no URL can hold must not throw at the listener.
+      const pathname = URL.parse(request.url ?? '/', 'http://bot-host')?.pathname
       if (pathname !== VOICE_PATH || upgrade === undefined) {
         return void refuseUpgrade(socket, json(404, { error: 'not_found' }))
       }

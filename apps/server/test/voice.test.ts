@@ -15,7 +15,7 @@ import { inMemoryStorage } from '@discord-mcp/storage/testing'
 import { toNodeHandler } from '@modelcontextprotocol/node'
 import { Effect, Layer } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { WebSocket } from 'ws'
+import { WebSocket, WebSocketServer } from 'ws'
 import { createRelay, createTokenCheck } from '../src/relay.ts'
 import { createBotHost, forwardToBotHosts, forwardVoiceToBotHosts } from '../src/tiers.ts'
 import { createVoiceUpgrade } from '../src/voice.ts'
@@ -150,19 +150,24 @@ const start = async () => {
       cleanup.push(() => socket.terminate())
     })
 
-  /** Send a raw upgrade request with a Host header no URL can hold; resolves when it ends. */
-  const upgradeWithBadHost = async () => {
-    const socket = connect(central.port, '127.0.0.1')
+  /** Send a raw upgrade request that no URL can hold to a tier; resolves when it ends. */
+  const upgradeMalformed = async (port: number, target: string, hostHeader: string) => {
+    const socket = connect(port, '127.0.0.1')
     await once(socket, 'connect')
     socket.end(
-      'GET /voice HTTP/1.1\r\nHost: [\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n' +
-        'Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n',
+      `GET ${target} HTTP/1.1\r\nHost: ${hostHeader}\r\nConnection: Upgrade\r\n` +
+        'Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n' +
+        'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n',
     )
     socket.resume()
     await once(socket, 'close')
   }
+  const upgradeWithBadUrls = async () => {
+    await upgradeMalformed(central.port, '/voice', '[')
+    await upgradeMalformed(host.port, '//[', 'localhost')
+  }
 
-  return { callTool, openSocket, upgradeWithBadHost, voiceServer }
+  return { callTool, openSocket, upgradeWithBadUrls, voiceServer }
 }
 
 describe('the voice socket', () => {
@@ -195,8 +200,9 @@ describe('the voice socket', () => {
   })
 
   it('refuses a socket without credentials, before joining, or with an unknown codec', async () => {
-    const { callTool, openSocket, upgradeWithBadHost } = await start()
-    await upgradeWithBadHost()
+    const { callTool, openSocket, upgradeWithBadUrls } = await start()
+    // Neither tier may crash on them, so the requests below still get answers.
+    await upgradeWithBadUrls()
     expect(await openSocket(`guild_id=${GUILD_ID}&codec=opus`, {})).toBe(401)
     expect(await openSocket(`guild_id=${GUILD_ID}&codec=opus`)).toBe(409)
 
@@ -205,5 +211,54 @@ describe('the voice socket', () => {
     expect(await openSocket(`guild_id=${GUILD_ID}&codec=pcm16&sample_rate=24000`)).toBeInstanceOf(
       WebSocket,
     )
+  })
+
+  it('takes the host side down when an agent leaves while the host is still admitting it', async () => {
+    // A bot host that holds the handshake until told to finish it.
+    const sockets = new WebSocketServer({ noServer: true })
+    let finish = () => {}
+    const finished = new Promise<void>((resolve) => {
+      finish = resolve
+    })
+    let admitting = false
+    const host = createServer()
+    host.on('upgrade', (request, socket, head) => {
+      admitting = true
+      void finished.then(() => sockets.handleUpgrade(request, socket, head, () => {}))
+    })
+    host.listen(0, '127.0.0.1')
+    await once(host, 'listening')
+    const forward = forwardVoiceToBotHosts({
+      hosts: [`http://127.0.0.1:${(host.address() as AddressInfo).port}`],
+      secret: SECRET,
+    })
+    const central = createServer()
+    central.on('upgrade', (request, socket, head) => forward(request, socket, head, TOKEN, BOT_ID))
+    central.listen(0, '127.0.0.1')
+    await once(central, 'listening')
+    cleanup.push(
+      () => new Promise((resolve) => central.close(resolve)),
+      () => {
+        for (const client of sockets.clients) client.terminate()
+        host.closeAllConnections()
+        return new Promise((resolve) => host.close(resolve))
+      },
+    )
+
+    // The agent's connection resets, so central sees it close without an end.
+    const agent = connect((central.address() as AddressInfo).port, '127.0.0.1')
+    agent.on('error', () => {})
+    await once(agent, 'connect')
+    agent.write(
+      `GET /voice?guild_id=${GUILD_ID}&codec=opus HTTP/1.1\r\nHost: localhost\r\n` +
+        'Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\n' +
+        'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n',
+    )
+    await vi.waitFor(() => expect(admitting).toBe(true))
+    agent.resetAndDestroy()
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    finish()
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(sockets.clients.size).toBe(0)
   })
 })
