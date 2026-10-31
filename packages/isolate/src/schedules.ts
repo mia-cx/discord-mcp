@@ -97,7 +97,8 @@ export const makeScheduler = ({
     }
     for (const workflow of workflows) {
       const { botId, cursor } = workflow
-      if (!locked.has(botId) || now <= cursor) continue
+      // Asked again: it may have stopped being able to fire while the locks were taken.
+      if (!locked.has(botId) || !online(botId) || now <= cursor) continue
       if (!(await storage.advanceScheduleCursor(workflow, cursor, now))) continue
       for (const tick of dueTicks(workflow.schedules, cursor, now)) fire(workflow, tick)
     }

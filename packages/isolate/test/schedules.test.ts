@@ -186,6 +186,39 @@ describe('workflow schedules', () => {
     )
   })
 
+  it('keep a tick for later when the host stops serving the bot while taking its lock', async () => {
+    const memory = await inMemoryStorage()
+    cleanup.push(() => memory.close())
+    let losing = false
+    let host: ReturnType<typeof botHost> | undefined
+    const storage: Storage = {
+      ...memory,
+      // The host loses the bot's REST lease while this answer is on its way.
+      lockSchedules: async (botId) => {
+        const locked = await memory.lockSchedules(botId)
+        if (losing) host?.setOnline(false)
+        return locked
+      },
+    }
+    host = botHost(storage)
+    await host.start()
+    await enableSchedules(storage, host.host, ['0 9 * * *'])
+    await host.nextMinute()
+    // At 09:00, with the tick due.
+    losing = true
+    await host.nextMinute()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(host.ticks()).toEqual([])
+
+    // It serves the bot again, and the 09:00 tick it held back runs.
+    losing = false
+    host.setOnline(true)
+    await host.nextMinute()
+    await vi.waitFor(() =>
+      expect(host?.ticks()).toEqual([tick('0 9 * * *', '2026-11-02T09:00:00.000Z')]),
+    )
+  })
+
   it('run the revision another bot host enabled', async () => {
     const storage = await inMemoryStorage()
     cleanup.push(() => storage.close())
