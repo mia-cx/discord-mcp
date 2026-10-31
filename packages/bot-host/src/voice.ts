@@ -110,6 +110,12 @@ const stereo = (mono: Buffer) => {
   return out
 }
 
+/** A paused socket cannot read the peer's close reply, so resume it to finish the handshake. */
+const closeSocket = (socket: WebSocket, code: number, reason: string) => {
+  socket.resume()
+  socket.close(code, reason)
+}
+
 /** A Gateway payload the bot's shard sends for voice. */
 export interface VoicePayload {
   readonly op: number
@@ -262,7 +268,10 @@ export const createVoice = ({ botId, send, clock, log }: VoiceOptions): Voice =>
       if (state.status !== VoiceConnectionStatus.Destroyed) return
       if (sessions.get(guildId) === session) sessions.delete(guildId)
       player.stop(true)
-      session.socket?.close(session.ending.code, session.ending.reason)
+      const { socket } = session
+      // Detached first, so messages still buffered on it never restart the stopped player.
+      session.socket = undefined
+      if (socket !== undefined) closeSocket(socket, session.ending.code, session.ending.reason)
     })
     session.ready = connected(connection)
     session.ready.catch(() => {})
@@ -270,8 +279,11 @@ export const createVoice = ({ botId, send, clock, log }: VoiceOptions): Voice =>
   }
 
   const attach = (session: Session, socket: WebSocket, format: AudioFormat) => {
-    session.socket?.close(VoiceClose.Replaced, 'Another voice socket replaced this one.')
+    const replaced = session.socket
     session.socket = socket
+    if (replaced !== undefined) {
+      closeSocket(replaced, VoiceClose.Replaced, 'Another voice socket replaced this one.')
+    }
     const packetize = packetizer(format)
     let spurt: { readonly stream: Readable; readonly resource: AudioResource } | undefined
 
@@ -290,17 +302,20 @@ export const createVoice = ({ botId, send, clock, log }: VoiceOptions): Voice =>
       if (!spurt.stream.push(packet)) socket.pause()
     }
 
+    const reject = (code: number, reason: string) => {
+      session.socket = undefined
+      closeSocket(socket, code, reason)
+    }
     socket.on('message', (data: RawData, isBinary) => {
       if (session.socket !== socket) return
-      if (!isBinary) return socket.close(VoiceClose.NotBinary, 'Send audio as binary messages.')
+      if (!isBinary) return reject(VoiceClose.NotBinary, 'Send audio as binary messages.')
       const packets = packetize(data as Buffer)
-      if (typeof packets === 'string') return socket.close(VoiceClose.InvalidAudio, packets)
+      if (typeof packets === 'string') return reject(VoiceClose.InvalidAudio, packets)
       for (const packet of packets) play(packet)
     })
     socket.on('error', (error) => log(`Bot ${botId} voice socket error: ${error.message}`))
     socket.on('close', () => {
-      if (session.socket !== socket) return
-      session.socket = undefined
+      if (session.socket === socket) session.socket = undefined
       // Queued audio plays out.
       spurt?.stream.push(null)
     })

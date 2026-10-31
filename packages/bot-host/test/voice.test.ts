@@ -153,6 +153,9 @@ describe('voice', () => {
       reason: 'Another voice socket replaced this one.',
     })
 
+    // Two seconds ahead of playback, so the bot host has stopped reading the socket.
+    for (let index = 0; index < 100; index++) left.agent.send(Buffer.alloc(1000, 0xfc))
+    await new Promise((resolve) => setTimeout(resolve, 100))
     expect(voice.leave(GUILD_ID)).toBe(true)
     expect(await left.closed).toEqual({ code: 1000, reason: 'The bot left the voice channel.' })
     expect(gateway.connections[0]?.received.at(-1)).toMatchObject({
