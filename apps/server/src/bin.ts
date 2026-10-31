@@ -2,8 +2,13 @@
 import { createServer } from 'node:http'
 import { createBotRuntimes, createTokenVault, systemClock } from '@discord-mcp/bot-host'
 import { ConfigurationError } from '@discord-mcp/core'
-import { DiscordRest, RateGuard } from '@discord-mcp/discord-api/relay'
-import { makeIsolateHost } from '@discord-mcp/isolate'
+import {
+  DiscordRest,
+  OperationCatalog,
+  RateGuard,
+  type RestConfig,
+} from '@discord-mcp/discord-api/relay'
+import { makeIsolateHost, makeWorkflowHost, type WorkflowHost } from '@discord-mcp/isolate'
 import { connectStorage } from '@discord-mcp/storage'
 import { NodeRuntime } from '@effect/platform-node'
 import { toNodeHandler } from '@modelcontextprotocol/node'
@@ -22,11 +27,14 @@ const csv = (value: string) =>
 const VAULT_KEY_BYTES = 32
 
 /**
- * Bot hosting keeps bots online and stores their tokens and Gateway sessions, resuming the bots
- * the previous process left online. It starts only with a database and an allowlist naming who
- * may use it; otherwise the process stays a plain relay.
+ * Bot hosting keeps bots online, stores their tokens and Gateway sessions, and runs their
+ * workflows, resuming the bots the previous process left online. It starts only with a database
+ * and an allowlist naming who may use it; otherwise the process stays a plain relay.
  */
-const startBotHosting = (allowedUserIds: ReadonlyArray<string> | undefined) =>
+const startBotHosting = (
+  allowedUserIds: ReadonlyArray<string> | undefined,
+  rest: Omit<RestConfig, 'token'>,
+) =>
   Effect.gen(function* () {
     const databaseUrl = yield* Config.string('DATABASE_URL').pipe(Config.withDefault(''))
     if (databaseUrl === '') return undefined
@@ -64,18 +72,39 @@ const startBotHosting = (allowedUserIds: ReadonlyArray<string> | undefined) =>
       }),
       (storage) => Effect.promise(() => storage.close()),
     )
-    return yield* Effect.acquireRelease(
-      Effect.promise(async () => {
-        const bots = createBotRuntimes({
+    const catalog = yield* Effect.provide(OperationCatalog, OperationCatalog.layer)
+    // The runtimes hand events to the workflow host, which needs the runtimes in turn.
+    let workflows: WorkflowHost | undefined
+    const bots = yield* Effect.acquireRelease(
+      Effect.sync(() =>
+        createBotRuntimes({
           vault: createTokenVault(vaultKey, storage),
           clock: systemClock,
           log,
-        })
-        await bots.resume()
-        return bots
-      }),
+          onEvent: (event) => workflows?.dispatch(event),
+        }),
+      ),
       (bots) => Effect.promise(() => bots.close()),
     )
+    workflows = makeWorkflowHost({
+      storage,
+      isolates: makeIsolateHost(),
+      bots,
+      operations: catalog.all,
+      rest: (token) => DiscordRest.layer({ ...rest, token }).pipe(Layer.provide(RateGuard.layer())),
+      log,
+    })
+    // Bots with enabled workflows are held first, so resuming gives their sessions those intents.
+    yield* Effect.tryPromise({
+      try: workflows.restore,
+      catch: (cause) =>
+        new ConfigurationError({
+          variable: 'DATABASE_URL',
+          message: `Could not read enabled workflows: ${cause instanceof Error ? cause.message : String(cause)}`,
+        }),
+    })
+    yield* Effect.promise(() => bots.resume())
+    return { bots, workflows }
   })
 
 const main = Effect.gen(function* () {
@@ -104,7 +133,9 @@ const main = Effect.gen(function* () {
       (runtime) => Effect.promise(() => runtime.dispose()),
     )
     yield* Effect.acquireRelease(
-      Effect.sync(() => serveStdio(() => buildRelayServer(runtime, true))),
+      Effect.sync(() =>
+        serveStdio(() => buildRelayServer(runtime, { scripts: true, workflows: false })),
+      ),
       (handle) => Effect.promise(() => handle.close()),
     )
     yield* Effect.log('discord-mcp ready on stdio')
@@ -134,7 +165,7 @@ const main = Effect.gen(function* () {
     allowedUserIds: Config.string('DISCORD_OAUTH_ALLOWED_USER_IDS').pipe(Config.withDefault('*')),
   })
   const allowlist = allowedUserIds === '*' ? undefined : csv(allowedUserIds)
-  const bots = yield* startBotHosting(allowlist)
+  const hosting = yield* startBotHosting(allowlist, rest)
   const relay = createRelay(
     {
       allowedHosts: csv(config.allowedHosts),
@@ -151,7 +182,7 @@ const main = Effect.gen(function* () {
     },
     undefined,
     fetch,
-    bots,
+    hosting,
   )
   const handle = toNodeHandler(relay)
   const server = yield* Effect.acquireRelease(

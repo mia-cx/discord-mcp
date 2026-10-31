@@ -12,7 +12,15 @@ import {
   type RestConfig,
   relayTools,
 } from '@discord-mcp/discord-api/relay'
-import { type IsolateHost, makeIsolateHost, ScriptRunner, scriptRun } from '@discord-mcp/isolate'
+import {
+  type IsolateHost,
+  makeIsolateHost,
+  ScriptRunner,
+  scriptRun,
+  type WorkflowHost,
+  Workflows,
+  workflowTools,
+} from '@discord-mcp/isolate'
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server'
 import { Effect, Layer, ManagedRuntime, Redacted } from 'effect'
 import { createDiscordLogin, type LoginConfig } from './login.ts'
@@ -27,17 +35,35 @@ export interface RelayConfig {
 /**
  * The token lives only in this runtime, which the HTTP handler disposes after one response.
  * The isolate host is process-wide, so one bot's scripts queue behind each other across requests.
+ * `workflows` serves the workflow tools, for the human whose relay login made the request.
  */
-export const relayRuntime = (rest: Layer.Layer<DiscordRest>, isolates: IsolateHost) =>
+export const relayRuntime = (
+  rest: Layer.Layer<DiscordRest>,
+  isolates: IsolateHost,
+  workflows?: Workflows['Service'],
+) =>
   ManagedRuntime.make(
-    Layer.mergeAll(rest, OperationCatalog.layer, Layer.succeed(ScriptRunner)(isolates)),
+    Layer.mergeAll(
+      rest,
+      OperationCatalog.layer,
+      Layer.succeed(ScriptRunner)(isolates),
+      workflows === undefined ? Layer.empty : Layer.succeed(Workflows)(workflows),
+    ),
   )
 
-/**
- * Register the same fixed bot-only tools for HTTP requests and local stdio. `scripts` adds
- * `discord_script_run`, which runs agent code on this host.
- */
-export const buildRelayServer = (runtime: ReturnType<typeof relayRuntime>, scripts: boolean) => {
+/** Which agent-code tools a relay offers beside the fixed bot-only ones. */
+export interface RelayFeatures {
+  /** `discord_script_run`, which runs agent code on this host. */
+  readonly scripts: boolean
+  /** The workflow lifecycle tools, which need bot hosting. */
+  readonly workflows: boolean
+}
+
+/** Register the same fixed bot-only tools for HTTP requests and local stdio, plus `features`. */
+export const buildRelayServer = (
+  runtime: ReturnType<typeof relayRuntime>,
+  features: RelayFeatures,
+) => {
   const principal: Principal = {
     id: 'request-bot',
     kind: 'discord-bot',
@@ -52,7 +78,11 @@ export const buildRelayServer = (runtime: ReturnType<typeof relayRuntime>, scrip
   )
   registerTools({
     server,
-    tools: scripts ? [...relayTools, scriptRun] : relayTools,
+    tools: [
+      ...relayTools,
+      ...(features.scripts ? [scriptRun] : []),
+      ...(features.workflows ? workflowTools : []),
+    ],
     selection: { toolsets: new Set(['operator', 'api']), enabledGates: new Set(['always']) },
     runtime,
     authorize: authorizeWithPrincipal(() => Effect.succeed(principal)),
@@ -100,10 +130,17 @@ const discordFailure = (error: ReturnType<typeof renderCause>) => {
   return json(502, { error: 'discord_unavailable' })
 }
 
+/** The platform side of a relay: the bots it keeps online and the workflows they run. */
+export interface BotHosting {
+  readonly bots: Pick<BotRuntimes, 'use'>
+  readonly workflows?: WorkflowHost
+}
+
 /**
  * MCP HTTP relay. Discord validates both login and bot credentials on every request.
- * Without `bots`, bot credentials, identities, and Discord responses never survive the request.
- * With `bots`, each verified call keeps its bot online and stores its token encrypted.
+ * Without `hosting`, bot credentials, identities, and Discord responses never survive the request.
+ * With it, each verified call keeps its bot online and stores its token encrypted, and agents
+ * manage the bot's workflows.
  * `restLayer` is the Discord network seam used by offline integration tests.
  */
 export const createRelay = (
@@ -111,12 +148,19 @@ export const createRelay = (
   restLayer: (token: Redacted.Redacted<string>) => Layer.Layer<DiscordRest> = (token) =>
     DiscordRest.layer({ ...config.rest, token }).pipe(Layer.provide(RateGuard.layer())),
   discordFetch: typeof fetch = fetch,
-  bots?: Pick<BotRuntimes, 'use'>,
+  hosting?: BotHosting,
 ) => {
   const login = createDiscordLogin(config.login, discordFetch)
   // Running agent code is a platform feature, which an unrestricted relay never offers.
-  const scripts = config.login.allowedUserIds !== undefined
+  const restricted = config.login.allowedUserIds !== undefined
   const isolates = makeIsolateHost()
+  /** Workflow changes are recorded against the human whose login made the request. */
+  const workflowsFor = ({ extra }: { readonly extra?: Record<string, unknown> }) => {
+    const actorId = extra?.discordUserId
+    return restricted && hosting?.workflows !== undefined && typeof actorId === 'string'
+      ? { host: hosting.workflows, actorId }
+      : undefined
+  }
   const handle = async (request: Request): Promise<Response> => {
     const url = new URL(request.url)
     if (config.allowedHosts.length > 0 && !config.allowedHosts.includes(url.hostname)) {
@@ -151,8 +195,10 @@ export const createRelay = (
     const credential = request.headers.get('x-discord-bot-token')
     if (credential === null || !/^\S+$/.test(credential)) return invalidBot()
 
-    const runtime = relayRuntime(restLayer(Redacted.make(credential)), isolates)
-    const mcp = createMcpHandler(() => buildRelayServer(runtime, scripts), {
+    const workflows = workflowsFor(authenticated)
+    const runtime = relayRuntime(restLayer(Redacted.make(credential)), isolates, workflows)
+    const features = { scripts: restricted, workflows: workflows !== undefined }
+    const mcp = createMcpHandler(() => buildRelayServer(runtime, features), {
       legacy: 'stateless',
       maxSubscriptions: 0,
     })
@@ -168,7 +214,7 @@ export const createRelay = (
       }
       if (!isBot(verified.value)) return invalidBot()
       // Hosting never delays or fails the agent's call; `use` logs its own failures.
-      void bots?.use(verified.value.id, credential)
+      void hosting?.bots.use(verified.value.id, credential)
 
       const response = await mcp.fetch(request, { authInfo: authenticated })
       // Complete the bounded response before releasing the runtime. The SDK's legacy fallback

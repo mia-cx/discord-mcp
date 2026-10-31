@@ -65,11 +65,10 @@ const PROBE_TIMEOUT_MS = 10_000
 /** How long one workflow may take over one event. */
 export const EVENT_TIMEOUT_MS = 30_000
 
-/** A Gateway event for an online bot, with what a run needs to act as that bot. */
+/** A Gateway event for an online bot, with the token a run acts with. */
 export interface WorkflowEvent {
   readonly botId: string
   readonly token: string
-  readonly user: unknown
   readonly dispatch: GatewayEvent
 }
 
@@ -175,13 +174,17 @@ export const makeWorkflowHost = ({
   const enabled = new Map<string, Promise<ReadonlyArray<Enabled>>>()
   /** Routing for one bot runs in event order, so its guilds' queues fill in event order. */
   const routing = new Map<string, Promise<void>>()
-  /** One REST client per bot, so its workflows share its rate limits. */
+  /**
+   * One REST client per bot, so its workflows share its rate limits, and the bot's user, which
+   * its isolates report as `client.user`. A resumed session brings no READY to read it from.
+   */
   const clients = new Map<
     string,
     {
       readonly token: string
       readonly runtime: ManagedRuntime.ManagedRuntime<DiscordRest, never>
       readonly client: Promise<DiscordRest['Service']>
+      readonly user: Promise<unknown>
     }
   >()
 
@@ -214,20 +217,30 @@ export const makeWorkflowHost = ({
 
   const restFor = (botId: string, token: string) => {
     const current = clients.get(botId)
-    if (current?.token === token) return current.client
+    if (current?.token === token) return current
     // A reset token retires the old client.
     void current?.runtime.dispose()
     const runtime = ManagedRuntime.make(rest(Redacted.make(token)))
     const client = runtime.runPromise(Effect.flatMap(DiscordRest, Effect.succeed))
-    clients.set(botId, { token, runtime, client })
-    return client
+    const user = client.then((c) =>
+      Effect.runPromise(c.request({ method: 'GET', route: '/users/@me', operationFamily: 'user' })),
+    )
+    const entry = { token, runtime, client, user }
+    clients.set(botId, entry)
+    // A failed lookup is retried with a new client on the next event.
+    user.catch(() => {
+      if (clients.get(botId) !== entry) return
+      clients.delete(botId)
+      void runtime.dispose()
+    })
+    return entry
   }
 
   const run = async (event: WorkflowEvent, workflow: Enabled) => {
-    const { botId, token, user, dispatch } = event
+    const { botId, token, dispatch } = event
     const { name, revision, grants } = workflow.revision
     const label = `Workflow ${name} (revision ${revision}) of bot ${botId}`
-    const client = restFor(botId, token)
+    const { client, user } = restFor(botId, token)
     const interaction =
       dispatch.t === 'INTERACTION_CREATE'
         ? {
@@ -238,7 +251,7 @@ export const makeWorkflowHost = ({
         : undefined
     const outcome = await isolates.run({
       queue: `${botId}:${String(dispatch.d.guild_id ?? 'direct')}`,
-      botUser: user,
+      botUser: await user,
       modules: await workflow.modules,
       timeoutMs: EVENT_TIMEOUT_MS,
       input: { event: dispatch },
@@ -267,7 +280,7 @@ export const makeWorkflowHost = ({
     if (name === undefined) return
     // Answering its own messages would loop.
     const author = d.author as { id?: unknown } | undefined
-    if (t === 'MESSAGE_CREATE' && author?.id === (event.user as { id?: unknown }).id) return
+    if (t === 'MESSAGE_CREATE' && author?.id === event.botId) return
     for (const workflow of await enabledFor(event.botId)) {
       if (!workflow.revision.events.includes(name)) continue
       void run(event, workflow).catch((error: unknown) =>

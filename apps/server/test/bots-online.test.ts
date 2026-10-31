@@ -54,7 +54,7 @@ describe('bot hosting', () => {
           request: () => Effect.succeed({ id: BOT_ID, bot: true }),
         }),
       discordOAuth().fetch,
-      bots,
+      { bots },
     )
     const { tokens } = await login(relay)
 
