@@ -2,7 +2,7 @@ import { drizzle } from 'drizzle-orm/node-postgres'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import { Pool } from 'pg'
 import * as schema from './schema.ts'
-import { createStorage, migrationsFolder } from './store.ts'
+import { createStorage, migrationsFolder, rootMessage } from './store.ts'
 
 /**
  * The platform's Postgres tables. Callers get plain functions; Drizzle stays inside this package.
@@ -16,10 +16,6 @@ export interface Storage {
 
 const CONNECT_TIMEOUT_MS = 10_000
 const QUERY_TIMEOUT_MS = 30_000
-
-/** Drizzle wraps driver errors in "Failed query"; the driver's own message says what went wrong. */
-const rootMessage = (error: unknown): string =>
-  error instanceof Error && error.cause !== undefined ? rootMessage(error.cause) : String(error)
 
 /**
  * Connect to Postgres and apply pending migrations before anything reads or writes.

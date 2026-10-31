@@ -15,3 +15,15 @@ it('stores bot tokens that only the vault key can read', async () => {
   ).rejects.toThrow()
   await storage.close()
 })
+
+it('keeps the sealed token out of a failed write', async () => {
+  const storage = await inMemoryStorage()
+  const vault = createTokenVault(Buffer.alloc(32, 1), storage)
+  await storage.close()
+
+  const failure = await vault.store('111111111111111111', 'private-bot-token').catch((e) => e)
+
+  expect(failure).toBeInstanceOf(Error)
+  expect(failure.message).toContain('111111111111111111')
+  expect(failure.message).not.toContain('v1.')
+})
