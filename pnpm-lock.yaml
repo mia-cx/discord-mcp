@@ -42,21 +42,6 @@ importers:
         specifier: 4.0.0-beta.101
         version: 4.0.0-beta.101
 
-  apps/sandbox-supervisor:
-    dependencies:
-      '@discord-mcp/core':
-        specifier: workspace:*
-        version: link:../../packages/core
-      '@discord-mcp/workflow-sdk':
-        specifier: workspace:*
-        version: link:../../packages/workflow-sdk
-      '@effect/platform-node':
-        specifier: 4.0.0-beta.101
-        version: 4.0.0-beta.101(effect@4.0.0-beta.101)(ioredis@5.11.1)
-      effect:
-        specifier: 4.0.0-beta.101
-        version: 4.0.0-beta.101
-
   apps/server:
     dependencies:
       '@discord-mcp/auth':
@@ -77,9 +62,6 @@ importers:
       '@discord-mcp/persistence':
         specifier: workspace:*
         version: link:../../packages/persistence
-      '@discord-mcp/sandbox-supervisor':
-        specifier: workspace:*
-        version: link:../sandbox-supervisor
       '@discord-mcp/workflow-runtime':
         specifier: workspace:*
         version: link:../../packages/workflow-runtime
