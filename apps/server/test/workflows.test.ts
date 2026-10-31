@@ -375,6 +375,7 @@ describe('workflow state and logs', () => {
         const client = new Client({ intents: [1, 512, 32768] })
 
         client.on('messageCreate', async (message) => {
+          if (message.content === 'shout') throw new Error('x'.repeat(100000))
           if (message.content === 'hoard') {
             await kv.set('a', 'x'.repeat(600000))
             await kv.set('b', 'x'.repeat(600000))
@@ -402,6 +403,7 @@ describe('workflow state and logs', () => {
     connection.send(message(3, 'hoard'))
     connection.send(message(4, 'count'))
     connection.send(slashCommand(5))
+    connection.send(message(6, 'shout'))
 
     // The run past the limit stored nothing and counted nothing.
     await vi.waitFor(
@@ -419,11 +421,15 @@ describe('workflow state and logs', () => {
     }
     const runs = async (args: Record<string, unknown> = {}) =>
       (await asA('discord_workflow_logs', args)).structuredContent.data as Runs
-    await vi.waitFor(async () => expect((await runs()).runs).toHaveLength(4), { timeout: 20_000 })
+    await vi.waitFor(async () => expect((await runs()).runs).toHaveLength(5), { timeout: 20_000 })
 
     expect((await runs({ name: 'counter', limit: 1 })).runs).toHaveLength(1)
     const failed = await runs({ failed: true })
-    expect(failed.runs).toHaveLength(2)
+    expect(failed.runs).toHaveLength(3)
+    // A listener's error is cut like its logs, however long the message it throws.
+    expect(failed.runs).toContainEqual(
+      expect.objectContaining({ error: `Error: ${'x'.repeat(16_377)} [truncated]` }),
+    )
     expect(failed.runs).toContainEqual(
       expect.objectContaining({
         event: 'MESSAGE_CREATE',

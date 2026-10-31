@@ -100,12 +100,12 @@ const INTERACTION_ADMISSION_MS = 2_000
 export const EVENT_TIMEOUT_MS = 30_000
 /** What a workflow's KV keys and values may take together. */
 export const KV_LIMIT_BYTES = 1024 * 1024
-const KV_KEY_LIMIT_BYTES = 512
+export const KV_KEY_LIMIT_BYTES = 512
 const HOUR_MS = 60 * 60 * 1000
 /** How long a run's record stays readable, and how many records each workflow keeps at most. */
 export const RUN_RETENTION_MS = 7 * 24 * HOUR_MS
 export const RUNS_KEPT = 1000
-/** A run's console output is stored up to this many characters. */
+/** A run's console output, and its error, are each stored up to this many characters. */
 const RUN_LOG_LIMIT_CHARS = 16 * 1024
 /** How often expired run records are deleted, at most. */
 const PRUNE_INTERVAL_MS = HOUR_MS
@@ -228,6 +228,10 @@ const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[
 
 /** `text` as Postgres can store it: it refuses NUL and lone surrogates, which JavaScript allows. */
 const storable = (text: string) => text.replaceAll('\0', '�').replace(LONE_SURROGATE, '�')
+
+/** A run's error, cut to what a record keeps. Its listener can throw any message. */
+const clippedError = (text: string) =>
+  text.length > RUN_LOG_LIMIT_CHARS ? `${text.slice(0, RUN_LOG_LIMIT_CHARS)} [truncated]` : text
 
 /** A run's console lines, cut to what a record keeps. */
 const storedLogs = (lines: ReadonlyArray<string>) => {
@@ -464,6 +468,7 @@ export const makeWorkflowHost = ({
       event.token,
       ...(isInteraction && typeof d.token === 'string' && d.token !== '' ? [d.token] : []),
     ])
+    /** Record this run. `error` arrives redacted and clipped; logs are redacted and cut here. */
     const record = (
       outcome: WorkflowRunOutcome,
       error: string | null,
@@ -476,7 +481,7 @@ export const makeWorkflowHost = ({
             revision,
             event: dispatch.t,
             outcome,
-            error: error === null ? null : storable(redact(error)),
+            error: error === null ? null : storable(error),
             logs: storedLogs(logs.map((line) => storable(redact(line)))),
             receivedAt,
             finishedAt: new Date(now()),
@@ -537,14 +542,14 @@ export const makeWorkflowHost = ({
       .then(
         (outcome) => {
           if (outcome.outcome === 'completed') return record('completed', null, outcome.logs)
-          const reason = redact(failure(outcome))
+          const reason = clippedError(redact(failure(outcome)))
           log(`${label} failed on ${dispatch.t}: ${reason}`)
           return record(outcome.outcome, reason, 'logs' in outcome ? outcome.logs : [])
         },
         (error: unknown) => {
           // Disabled or deleted while queued or running.
           if (workflow.stop.signal.aborted) return
-          const reason = redact(String(error))
+          const reason = clippedError(redact(String(error)))
           log(`${label} did not run: ${reason}`)
           return record('skipped', reason, [])
         },
