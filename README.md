@@ -161,8 +161,9 @@ events Discord replays.
 Workflows listen for `messageCreate`, `messageUpdate`, `messageDelete`,
 `messageReactionAdd`, `messageReactionRemove`, `guildMemberAdd`, `guildMemberRemove`, and
 `interactionCreate`. Each event runs each listening workflow in its own fresh workerd
-process for at most 30 seconds, so nothing in memory lasts between events. A guild's events
-run in order. The bot's own messages are not delivered. Grants work as for scripts. A
+process for at most 30 seconds, so nothing in memory lasts between events, and listeners
+may receive partial objects. Each workflow receives only the events its own intents cover.
+A guild's events run in order; interactions run at once. The bot's own messages are not delivered. Grants work as for scripts. A
 workflow may also answer the interaction it is handling (`reply`, `deferReply`, `editReply`,
 `followUp`) with the `interaction` and `webhook` families, and set the bot's presence.
 

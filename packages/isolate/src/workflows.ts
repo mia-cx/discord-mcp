@@ -1,4 +1,4 @@
-import { ValidationError } from '@discord-mcp/core'
+import { McpRequestContext, type Principal, ValidationError } from '@discord-mcp/core'
 import { DiscordRest } from '@discord-mcp/discord-api/relay'
 import type { Storage, WorkflowGrants, WorkflowRevision } from '@discord-mcp/storage'
 import type { OperationEntry } from '@mia-cx/discord-catalog'
@@ -7,18 +7,43 @@ import { makeBroker, type Presence } from './broker.ts'
 import { prepareScript, ScriptBuildError, type ScriptModule } from './bundle.ts'
 import type { GatewayEvent, IsolateHost, ScriptOutcome } from './isolate-host.ts'
 
-/** The Gateway dispatch behind each discord.js event a workflow may listen for. */
-export const WORKFLOW_EVENTS: Readonly<Record<string, string>> = {
-  messageCreate: 'MESSAGE_CREATE',
-  messageUpdate: 'MESSAGE_UPDATE',
-  messageDelete: 'MESSAGE_DELETE',
-  messageReactionAdd: 'MESSAGE_REACTION_ADD',
-  messageReactionRemove: 'MESSAGE_REACTION_REMOVE',
-  guildMemberAdd: 'GUILD_MEMBER_ADD',
-  guildMemberRemove: 'GUILD_MEMBER_REMOVE',
-  interactionCreate: 'INTERACTION_CREATE',
+const GUILD_MEMBERS = 1 << 1
+const GUILD_MESSAGES = 1 << 9
+const GUILD_MESSAGE_REACTIONS = 1 << 10
+const DIRECT_MESSAGES = 1 << 12
+const DIRECT_MESSAGE_REACTIONS = 1 << 13
+const MESSAGE_CONTENT = 1 << 15
+
+interface WorkflowEventKind {
+  /** The Gateway dispatch that fires it. */
+  readonly t: string
+  /** The intent a workflow must declare to receive it in a guild, and in a direct message. */
+  readonly guild: number
+  readonly direct: number
 }
-const EVENT_FOR_DISPATCH = new Map(Object.entries(WORKFLOW_EVENTS).map(([e, t]) => [t, e]))
+
+/** The discord.js events a workflow may listen for. */
+export const WORKFLOW_EVENTS: Readonly<Record<string, WorkflowEventKind>> = {
+  messageCreate: { t: 'MESSAGE_CREATE', guild: GUILD_MESSAGES, direct: DIRECT_MESSAGES },
+  messageUpdate: { t: 'MESSAGE_UPDATE', guild: GUILD_MESSAGES, direct: DIRECT_MESSAGES },
+  messageDelete: { t: 'MESSAGE_DELETE', guild: GUILD_MESSAGES, direct: DIRECT_MESSAGES },
+  messageReactionAdd: {
+    t: 'MESSAGE_REACTION_ADD',
+    guild: GUILD_MESSAGE_REACTIONS,
+    direct: DIRECT_MESSAGE_REACTIONS,
+  },
+  messageReactionRemove: {
+    t: 'MESSAGE_REACTION_REMOVE',
+    guild: GUILD_MESSAGE_REACTIONS,
+    direct: DIRECT_MESSAGE_REACTIONS,
+  },
+  guildMemberAdd: { t: 'GUILD_MEMBER_ADD', guild: GUILD_MEMBERS, direct: GUILD_MEMBERS },
+  guildMemberRemove: { t: 'GUILD_MEMBER_REMOVE', guild: GUILD_MEMBERS, direct: GUILD_MEMBERS },
+  interactionCreate: { t: 'INTERACTION_CREATE', guild: 0, direct: 0 },
+}
+const EVENT_FOR_DISPATCH = new Map(
+  Object.entries(WORKFLOW_EVENTS).map(([name, kind]) => [kind.t, { name, ...kind }]),
+)
 /** Bots listen for these by habit. A workflow never logs in or connects, so they never fire. */
 const SILENT_EVENTS = new Set(['ready', 'clientReady', 'error', 'warn', 'debug'])
 
@@ -46,6 +71,7 @@ const INTENTS: ReadonlyArray<readonly [string, number]> = [
   ['GuildMessagePolls', 1 << 24],
   ['DirectMessagePolls', 1 << 25],
 ]
+const KNOWN_INTENTS = INTENTS.reduce((all, [, bit]) => all | bit, 0)
 export const intentNames = (intents: number) =>
   INTENTS.filter(([, bit]) => (intents & bit) !== 0).map(([name]) => name)
 
@@ -160,6 +186,38 @@ const refuseAll = async () =>
 interface Enabled {
   readonly revision: WorkflowRevision
   readonly modules: Promise<ReadonlyArray<ScriptModule>>
+  /** Aborted once the revision stops running: its queued runs never start, running ones end. */
+  readonly stop: AbortController
+}
+
+/** Identifies a revision across a delete and a republish under the same name. */
+const revisionKey = ({ name, revision, publishedAt }: WorkflowRevision) =>
+  `${name}:${revision}:${publishedAt.getTime()}`
+
+/** Who a workflow's Discord calls run as, for the REST client's request context. */
+const WORKFLOW_PRINCIPAL: Principal = { id: 'workflow', kind: 'discord-bot', scopes: new Set() }
+
+/**
+ * What a revision may see of an event: nothing outside its own intents, and in a guild, no
+ * message content without MessageContent unless the message mentions the bot, as Discord does.
+ */
+const visibleTo = (revision: WorkflowRevision, kind: WorkflowEventKind, event: WorkflowEvent) => {
+  const { d } = event.dispatch
+  const inGuild = d.guild_id !== undefined
+  const needed = inGuild ? kind.guild : kind.direct
+  if ((revision.intents & needed) !== needed) return undefined
+  const isMessage = kind.t === 'MESSAGE_CREATE' || kind.t === 'MESSAGE_UPDATE'
+  const mentioned = ((d.mentions ?? []) as ReadonlyArray<{ id?: unknown }>).some(
+    (user) => user.id === event.botId,
+  )
+  if (!isMessage || !inGuild || mentioned || (revision.intents & MESSAGE_CONTENT) !== 0) {
+    return event.dispatch
+  }
+  const { poll: _, ...rest } = d
+  return {
+    t: kind.t,
+    d: { ...rest, content: '', embeds: [], attachments: [], components: [] },
+  }
 }
 
 export const makeWorkflowHost = ({
@@ -174,6 +232,8 @@ export const makeWorkflowHost = ({
   const enabled = new Map<string, Promise<ReadonlyArray<Enabled>>>()
   /** Routing for one bot runs in event order, so its guilds' queues fill in event order. */
   const routing = new Map<string, Promise<void>>()
+  /** Refreshes for one bot run in order, so the last change decides what the bot host holds. */
+  const refreshing = new Map<string, Promise<void>>()
   /**
    * One REST client per bot, so its workflows share its rate limits, and the bot's user, which
    * its isolates report as `client.user`. A resumed session brings no READY to read it from.
@@ -191,11 +251,13 @@ export const makeWorkflowHost = ({
   const enabledFor = (botId: string) => {
     let list = enabled.get(botId)
     if (list === undefined) {
-      list = storage
-        .enabledRevisions(botId)
-        .then((revisions) =>
-          revisions.map((revision) => ({ revision, modules: prepareScript(revision.source) })),
-        )
+      list = storage.enabledRevisions(botId).then((revisions) =>
+        revisions.map((revision) => ({
+          revision,
+          modules: prepareScript(revision.source),
+          stop: new AbortController(),
+        })),
+      )
       enabled.set(botId, list)
       // A failed read is retried on the next event.
       list.catch(() => enabled.delete(botId))
@@ -203,16 +265,31 @@ export const makeWorkflowHost = ({
     return list
   }
 
-  /** Point the bot host and the dispatcher at the bot's enabled revisions after a change. */
-  const refresh = async (botId: string) => {
-    enabled.delete(botId)
-    const revisions = await enabledFor(botId)
-    await bots.hold(
+  /**
+   * Point the bot host and the dispatcher at the bot's enabled revisions after a change, and stop
+   * every run of a revision that no longer runs.
+   */
+  const refresh = (botId: string) => {
+    const done = (refreshing.get(botId) ?? Promise.resolve()).then(async () => {
+      const previous = (await enabled.get(botId)?.catch(() => undefined)) ?? []
+      enabled.delete(botId)
+      const revisions = await enabledFor(botId)
+      const running = new Set(revisions.map(({ revision }) => revisionKey(revision)))
+      for (const { revision, stop } of previous) {
+        if (!running.has(revisionKey(revision))) stop.abort()
+      }
+      await bots.hold(
+        botId,
+        revisions.length === 0
+          ? undefined
+          : revisions.reduce((all, { revision }) => all | revision.intents, 0),
+      )
+    })
+    refreshing.set(
       botId,
-      revisions.length === 0
-        ? undefined
-        : revisions.reduce((all, { revision }) => all | revision.intents, 0),
+      done.catch(() => {}),
     )
+    return done
   }
 
   const restFor = (botId: string, token: string) => {
@@ -236,59 +313,98 @@ export const makeWorkflowHost = ({
     return entry
   }
 
-  const run = async (event: WorkflowEvent, workflow: Enabled) => {
-    const { botId, token, dispatch } = event
+  /** Queue one workflow's run of one event. Enqueues before returning, so callers keep order. */
+  const run = (
+    event: WorkflowEvent,
+    dispatch: GatewayEvent,
+    workflow: Enabled,
+    botUser: unknown,
+    modules: ReadonlyArray<ScriptModule>,
+    client: Promise<DiscordRest['Service']>,
+  ) => {
+    const { botId } = event
+    const { d } = dispatch
     const { name, revision, grants } = workflow.revision
     const label = `Workflow ${name} (revision ${revision}) of bot ${botId}`
-    const { client, user } = restFor(botId, token)
-    const interaction =
-      dispatch.t === 'INTERACTION_CREATE'
-        ? {
-            id: String(dispatch.d.id),
-            applicationId: String(dispatch.d.application_id),
-            token: String(dispatch.d.token),
+    const isInteraction = dispatch.t === 'INTERACTION_CREATE'
+    return isolates
+      .run({
+        // A guild's events, and a direct message channel's, run in order. Interactions skip the
+        // queue: Discord needs an answer within three seconds, whatever else the guild is doing.
+        queue: isInteraction
+          ? `${botId}:interaction:${String(d.id)}`
+          : `${botId}:${String(d.guild_id ?? `direct:${String(d.channel_id)}`)}`,
+        botUser,
+        modules,
+        timeoutMs: EVENT_TIMEOUT_MS,
+        input: { event: dispatch },
+        signal: workflow.stop.signal,
+        broker: makeBroker({
+          operations,
+          grants,
+          discord: (call, signal) =>
+            Effect.flatMap(
+              Effect.promise(() => client),
+              (c) =>
+                c.request(call).pipe(
+                  // DiscordRest aborts its HTTP request with the request context's signal.
+                  Effect.provideService(McpRequestContext, {
+                    requestId: `${label}: ${dispatch.t}`,
+                    signal,
+                    progressToken: undefined,
+                    notify: undefined,
+                    principal: WORKFLOW_PRINCIPAL,
+                  }),
+                ),
+            ),
+          ...(isInteraction
+            ? {
+                interaction: {
+                  id: String(d.id),
+                  applicationId: String(d.application_id),
+                  token: String(d.token),
+                },
+              }
+            : {}),
+          updatePresence: async (presence) => bots.updatePresence(botId, presence),
+          // The URL can hold an interaction token, so only the reason is logged.
+          onDenied: ({ method, reason }) => log(`${label}: refused ${method}: ${reason}`),
+        }),
+      })
+      .then(
+        (outcome) => {
+          if (outcome.outcome !== 'completed') {
+            log(`${label} failed on ${dispatch.t}: ${failure(outcome)}`)
           }
-        : undefined
-    const outcome = await isolates.run({
-      queue: `${botId}:${String(dispatch.d.guild_id ?? 'direct')}`,
-      botUser: await user,
-      modules: await workflow.modules,
-      timeoutMs: EVENT_TIMEOUT_MS,
-      input: { event: dispatch },
-      broker: makeBroker({
-        operations,
-        grants,
-        discord: (call) =>
-          Effect.flatMap(
-            Effect.promise(() => client),
-            (c) => c.request(call),
-          ),
-        ...(interaction === undefined ? {} : { interaction }),
-        updatePresence: async (presence) => bots.updatePresence(botId, presence),
-        // The URL can hold an interaction token, so only the reason is logged.
-        onDenied: ({ method, reason }) => log(`${label}: refused ${method}: ${reason}`),
-      }),
-    })
-    if (outcome.outcome !== 'completed') {
-      log(`${label} failed on ${dispatch.t}: ${failure(outcome)}`)
-    }
+        },
+        (error: unknown) => {
+          // Disabled or deleted while queued or running.
+          if (!workflow.stop.signal.aborted) log(`${label} did not run: ${String(error)}`)
+        },
+      )
   }
 
   const route = async (event: WorkflowEvent) => {
-    const { t, d } = event.dispatch
-    const name = EVENT_FOR_DISPATCH.get(t)
-    if (name === undefined) return
+    const kind = EVENT_FOR_DISPATCH.get(event.dispatch.t)
+    if (kind === undefined) return
     // Answering its own messages would loop.
-    const author = d.author as { id?: unknown } | undefined
-    if (t === 'MESSAGE_CREATE' && author?.id === event.botId) return
-    for (const workflow of await enabledFor(event.botId)) {
-      if (!workflow.revision.events.includes(name)) continue
-      void run(event, workflow).catch((error: unknown) =>
-        log(
-          `Workflow ${workflow.revision.name} of bot ${event.botId} did not run: ${String(error)}`,
-        ),
-      )
-    }
+    const author = event.dispatch.d.author as { id?: unknown } | undefined
+    if (kind.t === 'MESSAGE_CREATE' && author?.id === event.botId) return
+    const matching = (await enabledFor(event.botId)).flatMap((workflow) => {
+      if (!workflow.revision.events.includes(kind.name)) return []
+      const dispatch = visibleTo(workflow.revision, kind, event)
+      return dispatch === undefined ? [] : [{ workflow, dispatch }]
+    })
+    if (matching.length === 0) return
+    const { client, user } = restFor(event.botId, event.token)
+    const [botUser, modules] = await Promise.all([
+      user,
+      Promise.all(matching.map(({ workflow }) => workflow.modules)),
+    ])
+    // Enqueued together, in order, so every workflow sees a guild's events in the order they came.
+    matching.forEach(({ workflow, dispatch }, index) => {
+      void run(event, dispatch, workflow, botUser, modules[index] ?? [], client)
+    })
   }
 
   const probe = async (caller: WorkflowCaller, modules: ReadonlyArray<ScriptModule>) => {
@@ -328,6 +444,13 @@ export const makeWorkflowHost = ({
         throw invalid(
           `Workflows can't listen for ${unsupported.join(', ')} yet.`,
           `source: listen for ${Object.keys(WORKFLOW_EVENTS).join(', ')}.`,
+        )
+      }
+      const unknownIntents = declared.intents & ~KNOWN_INTENTS
+      if (unknownIntents !== 0) {
+        throw invalid(
+          `The client declares intent bits Discord does not define: ${unknownIntents}.`,
+          'source: use GatewayIntentBits names in the Client options.',
         )
       }
       const events = declared.events.filter((event) => event in WORKFLOW_EVENTS)
@@ -395,7 +518,11 @@ export const makeWorkflowHost = ({
           `Turn on ${refused.join(' and ')} under Bot → Privileged Gateway Intents in the Discord Developer Portal, then enable the workflow again.`,
         )
       }
-      await storage.setEnabledRevision(caller.botId, name, revision.revision, caller.actorId)
+      if (
+        !(await storage.setEnabledRevision(caller.botId, name, revision.revision, caller.actorId))
+      ) {
+        throw invalid(`No workflow is named ${name}.`)
+      }
       await refresh(caller.botId)
       return revision
     },
