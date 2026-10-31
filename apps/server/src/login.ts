@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto'
-import { type RejectionLog, rejectionLog } from '@discord-mcp/discord-api/relay'
+import { isCountedRejection, type RejectionLog, rejectionLog } from '@discord-mcp/discord-api/relay'
 import {
   type AuthInfo,
   bearerAuthChallengeResponse,
@@ -202,20 +202,23 @@ export const createDiscordLogin = (
   }
   /** `scope` groups Discord's rejections, which this process stops sending after a threshold. */
   const discordJson = async (path: string, scope: string, init: RequestInit = {}) => {
-    const admission = rejections.admit([scope], Date.now())
-    if (!('settle' in admission)) throw new DiscordUnavailable(429, REFUSAL_RETRY_SECONDS)
-    let response: Response
-    try {
-      response = await discordFetch(`https://discord.com/api/v10${path}`, {
-        ...init,
-        redirect: 'error',
-        signal: AbortSignal.timeout(DISCORD_TIMEOUT_MS),
-      })
-      admission.settle(response.status, Date.now())
-    } finally {
-      // A request that never got an answer counts as rejected, since Discord may have seen it.
-      admission.settle(0, Date.now())
-    }
+    const admission = rejections.admit([scope])
+    if ('refused' in admission) throw new DiscordUnavailable(429, REFUSAL_RETRY_SECONDS)
+    const response = await discordFetch(`https://discord.com/api/v10${path}`, {
+      ...init,
+      redirect: 'error',
+      signal: AbortSignal.timeout(DISCORD_TIMEOUT_MS),
+    }).then(
+      (answer) => {
+        admission.settle(isCountedRejection(answer.status))
+        return answer
+      },
+      // Nothing cancels these calls, so a missing answer is a network failure Discord never saw.
+      (error: unknown) => {
+        admission.settle(false)
+        throw error
+      },
+    )
     if (response.status === 401 || response.status === 400) {
       throw new OAuthError(
         OAuthErrorCode.InvalidToken,

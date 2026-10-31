@@ -1,121 +1,65 @@
-import { Clock, Effect } from 'effect'
 import { describe, expect, it } from 'vitest'
 import { mapDiscordError } from '../src/errors.ts'
-import { isCountedRejection, RateGuard, rateGuardScope } from '../src/rate-guard.ts'
+import { isCountedRejection, rateGuardScope, rejectionLog } from '../src/rate-guard.ts'
 
-const config = { threshold: 3, processThreshold: 5, windowMs: 60_000 }
+const config = { threshold: 3, processThreshold: 5, maxInFlight: 4, windowMs: 60_000 }
 const scope = rateGuardScope('bot', 'guild')
 
-let now = 1_700_000_000_000
-const fakeClock: Clock.Clock = {
-  currentTimeMillisUnsafe: () => now,
-  currentTimeMillis: Effect.sync(() => now),
-  currentTimeNanosUnsafe: () => BigInt(now) * 1_000_000n,
-  currentTimeNanos: Effect.sync(() => BigInt(now) * 1_000_000n),
-  sleep: () => Effect.void,
+/** A log on a hand-wound clock, and a call in `scope` that Discord answers. */
+const guard = () => {
+  const clock = { now: 1_700_000_000_000 }
+  const log = rejectionLog(config, () => clock.now)
+  const call = (target: string, rejected: boolean) => {
+    const admission = log.admit([target])
+    if ('refused' in admission) return admission.refused
+    admission.settle(rejected)
+  }
+  return { clock, log, call }
 }
 
-const run = <A, E>(effect: Effect.Effect<A, E, RateGuard>) =>
-  Effect.runPromise(Effect.provide(effect, RateGuard.layer(config)) as Effect.Effect<A, E>)
-
-/** Send one call in `scope` that Discord answers with `status`. */
-const call = (scope: string, status: number) =>
-  Effect.flatMap(RateGuard, (guard) =>
-    Effect.flatMap(guard.admit([scope]), (settle) => settle(status)),
-  )
-
-describe('RateGuard', () => {
-  it('permits calls below the threshold', async () => {
-    const count = await run(
-      Effect.gen(function* () {
-        yield* call(scope, 403)
-        yield* call(scope, 403)
-        yield* call(scope, 200)
-        return yield* Effect.flatMap(RateGuard, (guard) => guard.failureCount(scope))
-      }),
-    )
-    expect(count).toBe(2)
+describe('rejectionLog', () => {
+  it('permits calls below the threshold', () => {
+    const { log, call } = guard()
+    call(scope, true)
+    call(scope, true)
+    expect(call(scope, false)).toBeUndefined()
+    expect(log.failureCount(scope)).toBe(2)
   })
 
-  it('trips at the threshold and refuses to send', async () => {
-    const exit = await Effect.runPromiseExit(
-      Effect.provide(
-        Effect.gen(function* () {
-          for (let i = 0; i < 3; i++) yield* call(scope, 403)
-          yield* call(scope, 200)
-        }),
-        RateGuard.layer(config),
-      ),
-    )
-
-    expect(exit._tag).toBe('Failure')
+  it('trips at the threshold and refuses to send', () => {
+    const { call } = guard()
+    for (let i = 0; i < 3; i++) call(scope, true)
+    expect(call(scope, false)?._tag).toBe('RateGuardTrippedError')
   })
 
-  it('counts calls still awaiting Discord, so a parallel burst cannot pass the threshold', async () => {
-    const exit = await run(
-      Effect.gen(function* () {
-        const guard = yield* RateGuard
-        for (let i = 0; i < 3; i++) yield* guard.admit([scope])
-        return yield* Effect.exit(guard.admit([scope]))
-      }),
-    )
-    expect(exit._tag).toBe('Failure')
+  it('caps calls awaiting Discord, so a parallel burst cannot outrun the count', () => {
+    const { log } = guard()
+    for (let i = 0; i < 4; i++) log.admit([rateGuardScope(`bot-${i}`, 'guild')])
+    expect('refused' in log.admit([scope])).toBe(true)
   })
 
-  it('counts a call that never answered, since a cancelled request may still reach Discord', async () => {
-    const count = await run(
-      Effect.gen(function* () {
-        yield* call(scope, 0)
-        return yield* Effect.flatMap(RateGuard, (guard) => guard.failureCount(scope))
-      }),
-    )
-    expect(count).toBe(1)
+  it('counts each credential and family separately, so one bad call site trips alone', () => {
+    const { log, call } = guard()
+    for (let i = 0; i < 3; i++) call(rateGuardScope('bot', 'guild'), true)
+    // A different family must still be allowed through.
+    expect(call(rateGuardScope('bot', 'channel'), false)).toBeUndefined()
+    expect(call(rateGuardScope('oauth2', 'guild'), false)).toBeUndefined()
+    expect(log.failureCount(rateGuardScope('bot', 'channel'))).toBe(0)
   })
 
-  it('counts each credential and family separately, so one bad call site trips alone', async () => {
-    const counts = await run(
-      Effect.gen(function* () {
-        for (let i = 0; i < 3; i++) yield* call(rateGuardScope('bot', 'guild'), 403)
-        // A different family must still be allowed through.
-        yield* call(rateGuardScope('bot', 'channel'), 200)
-        yield* call(rateGuardScope('oauth2', 'guild'), 200)
-        return yield* Effect.flatMap(RateGuard, (guard) =>
-          guard.failureCount(rateGuardScope('bot', 'channel')),
-        )
-      }),
-    )
-    expect(counts).toBe(0)
+  it('trips for every scope once the process total reaches its own threshold', () => {
+    const { call } = guard()
+    for (let i = 0; i < 5; i++) call(rateGuardScope(`bot-${i}`, 'guild'), true)
+    expect(call(rateGuardScope('fresh', 'guild'), false)?._tag).toBe('RateGuardTrippedError')
   })
 
-  it('trips for every scope once the process total reaches its own threshold', async () => {
-    const exit = await Effect.runPromiseExit(
-      Effect.provide(
-        Effect.gen(function* () {
-          for (let i = 0; i < 5; i++) yield* call(rateGuardScope(`bot-${i}`, 'guild'), 401)
-          yield* call(rateGuardScope('fresh', 'guild'), 200)
-        }),
-        RateGuard.layer(config),
-      ),
-    )
-    expect(exit._tag).toBe('Failure')
-  })
-
-  it('forgets rejections once they leave the window', async () => {
-    // v4 core ships no TestClock, and the guard reads time through the Clock reference, so a
-    // hand-wound clock is both sufficient and faster than actually waiting out a 60s window.
-    const count = await Effect.runPromise(
-      Effect.provide(
-        Effect.gen(function* () {
-          for (let i = 0; i < 3; i++) yield* call(scope, 403)
-          now += 2 * 60_000
-          // The breaker is rolling, not latching: a quiet period restores service.
-          yield* call(scope, 200)
-          return yield* Effect.flatMap(RateGuard, (guard) => guard.failureCount(scope))
-        }),
-        RateGuard.layer(config),
-      ).pipe(Effect.provideService(Clock.Clock, fakeClock)),
-    )
-    expect(count).toBe(0)
+  it('forgets rejections once they leave the window', () => {
+    const { clock, log, call } = guard()
+    for (let i = 0; i < 3; i++) call(scope, true)
+    clock.now += 2 * 60_000
+    // The breaker is rolling, not latching: a quiet period restores service.
+    expect(call(scope, false)).toBeUndefined()
+    expect(log.failureCount(scope)).toBe(0)
   })
 })
 

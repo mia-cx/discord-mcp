@@ -61,8 +61,9 @@ Only spent login-code hashes remain in memory for one minute; run one server
 process. Restarting cancels unfinished logins but preserves issued credentials.
 The process also counts Discord's 401, 403, and 429 responses for ten minutes.
 Cloudflare bans an IP after 10,000 of them, so the relay stops calling Discord
-after 25 for one bot, person, or sign-in step in an operation family, or 1,000
-in total. Calls still awaiting Discord count until they answer.
+after 1,000 in total and keeps at most 100 calls in flight. Agents are told to
+stop sooner, after 25 for one bot, person, or sign-in step in an operation
+family. Cancelled calls count; network failures that never reached Discord do not.
 
 The executable serves MCP revision `2026-07-28` without an initialization handshake
 or sessions. Older MCP clients can use the SDK's stateless compatibility path.

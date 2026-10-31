@@ -231,12 +231,28 @@ describe('Discord login for the relay', () => {
     const { flow, cookie } = await beginLogin(relay)
     const callback = new URL('https://relay.test/auth/discord/callback')
     callback.search = new URLSearchParams({ state: flow, iss: 'https://discord.com', code: 'x' })
-    // In parallel: calls still awaiting Discord must count, or a burst passes the threshold.
-    const replays = await Promise.all(
-      Array.from({ length: 40 }, () => relay.fetch(new Request(callback, { headers: { cookie } }))),
-    )
-    for (const replayed of replays) expect(replayed.status).toBe(429)
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const replayed = await relay.fetch(new Request(callback, { headers: { cookie } }))
+      expect(replayed.status).toBe(429)
+    }
     expect(oauth.calls).toHaveLength(25)
+  })
+
+  it('does not count network failures that never reached Discord', async () => {
+    const oauth = discordOAuth()
+    let offline = true
+    const network: typeof fetch = (input, init) =>
+      offline ? Promise.reject(new TypeError('fetch failed')) : oauth.fetch(input, init)
+    const relay = createRelay(config, rest, network)
+    const { flow, cookie } = await beginLogin(relay)
+    const callback = new URL('https://relay.test/auth/discord/callback')
+    callback.search = new URLSearchParams({ state: flow, iss: 'https://discord.com', code: 'x' })
+    for (let attempt = 0; attempt < 30; attempt++) {
+      await relay.fetch(new Request(callback, { headers: { cookie } }))
+    }
+    offline = false
+    await relay.fetch(new Request(callback, { headers: { cookie } }))
+    expect(oauth.calls.map((call) => call.path)).toContain('/api/v10/oauth2/token')
   })
 
   it('rejects malformed allowlist configuration instead of starting with unrestricted access', () => {

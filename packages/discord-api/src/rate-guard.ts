@@ -1,25 +1,31 @@
 import { RateGuardTrippedError } from '@discord-mcp/core'
-import { Context, Effect, Layer } from 'effect'
+import { Context, Layer } from 'effect'
 
 /**
- * Cloudflare bans the source IP after 10,000 401/403/429 responses in 10 minutes. The default
- * threshold here is three orders of magnitude below that, because the failure mode is not gradual
- * drift — it is an agent in a tight retry loop, which reaches thousands in minutes.
+ * Cloudflare bans the source IP after 10,000 401/403/429 responses in 10 minutes. The per-scope
+ * threshold is three orders of magnitude below that, because the usual failure is an agent in a
+ * tight retry loop, and tripping tells it to stop and diagnose instead.
  */
 export const DEFAULT_FAILURE_THRESHOLD = 25
-/** Every caller in one process shares its IP, so their rejections together stay an order below. */
+/**
+ * The ban guard proper. Every caller shares the IP, so the process stops after 1,000 rejections and
+ * never has more than 100 calls awaiting Discord: at most 1,100 can land in one window.
+ */
 export const DEFAULT_PROCESS_THRESHOLD = 1_000
+export const DEFAULT_MAX_IN_FLIGHT = 100
 export const DEFAULT_WINDOW_MS = 10 * 60 * 1000
 
 export interface RateGuardConfig {
   readonly threshold: number
   readonly processThreshold: number
+  readonly maxInFlight: number
   readonly windowMs: number
 }
 
 export const defaultRateGuardConfig: RateGuardConfig = {
   threshold: DEFAULT_FAILURE_THRESHOLD,
   processThreshold: DEFAULT_PROCESS_THRESHOLD,
+  maxInFlight: DEFAULT_MAX_IN_FLIGHT,
   windowMs: DEFAULT_WINDOW_MS,
 }
 
@@ -34,58 +40,77 @@ const PROCESS_SCOPE = 'process'
 export const isCountedRejection = (status: number): boolean =>
   status === 401 || status === 403 || status === 429
 
-/** A refused call names the scope over threshold; an admitted one is settled with its status. */
+/** A refused call carries the error to return; an admitted one must be settled exactly once. */
 export type Admission =
-  | { readonly refused: { readonly scope: string; readonly count: number } }
-  | { readonly settle: (status: number, now: number) => void }
+  | { readonly refused: RateGuardTrippedError }
+  | { readonly settle: (rejected: boolean) => void }
 
 /**
- * Timestamps of counted rejections in a rolling window. Create one per process and hand it to every
- * `RateGuard.layer` and to the login routes: Cloudflare counts every request from the IP together.
+ * Discord's rejections in a rolling window, and the calls still awaiting it. Create one per process
+ * and hand it to every `RateGuard.layer` and to the login routes: Cloudflare counts the IP as one.
  */
-export const rejectionLog = (config: RateGuardConfig = defaultRateGuardConfig) => {
+export const rejectionLog = (
+  config: RateGuardConfig = defaultRateGuardConfig,
+  now: () => number = Date.now,
+) => {
   const rejections = new Map<string, ReadonlyArray<number>>()
-  const pending = new Map<string, number>()
-  const live = (scope: string, now: number) => {
-    const kept = (rejections.get(scope) ?? []).filter((t) => t > now - config.windowMs)
+  let inFlight = 0
+  const live = (scope: string) => {
+    const kept = (rejections.get(scope) ?? []).filter((t) => t > now() - config.windowMs)
     if (kept.length === 0) rejections.delete(scope)
     else rejections.set(scope, kept)
     return kept.length
   }
-  const adjust = (scopes: ReadonlyArray<string>, delta: number) => {
-    for (const scope of scopes) {
-      const next = (pending.get(scope) ?? 0) + delta
-      if (next === 0) pending.delete(scope)
-      else pending.set(scope, next)
-    }
-  }
+  const refuse = (scope: string, count: number, message: string): Admission => ({
+    refused: new RateGuardTrippedError({
+      message: `Blocked before sending: ${message}`,
+      scope,
+      failures: count,
+      windowMs: config.windowMs,
+    }),
+  })
   return {
-    count: live,
+    failureCount: live,
     /**
-     * Admit one Discord call counted in every scope and the process. Until it settles it counts as a
-     * rejection, so concurrent calls cannot all pass a threshold that only finished calls reach.
+     * Admit one Discord call counted in `scopes` and the process. Settle it when Discord answers,
+     * not when the caller stops waiting, so the in-flight cap bounds calls Discord can still reject.
      */
-    admit: (scopes: ReadonlyArray<string>, now: number): Admission => {
-      const all = [...scopes, PROCESS_SCOPE]
-      for (const scope of all) {
-        const count = live(scope, now) + (pending.get(scope) ?? 0)
-        const limit = scope === PROCESS_SCOPE ? config.processThreshold : config.threshold
-        if (count >= limit) return { refused: { scope, count } }
+    admit: (scopes: ReadonlyArray<string>): Admission => {
+      const minutes = Math.round(config.windowMs / 60_000)
+      for (const scope of scopes) {
+        const count = live(scope)
+        if (count >= config.threshold) {
+          return refuse(
+            scope,
+            count,
+            `${count} rejected Discord responses for ${scope} within the last ${minutes} minutes.`,
+          )
+        }
       }
-      adjust(all, 1)
+      const total = live(PROCESS_SCOPE)
+      if (total >= config.processThreshold) {
+        return refuse(
+          PROCESS_SCOPE,
+          total,
+          `${total} rejected Discord responses for this relay within the last ${minutes} minutes.`,
+        )
+      }
+      if (inFlight >= config.maxInFlight) {
+        return refuse(PROCESS_SCOPE, total, `${inFlight} Discord calls are already in flight.`)
+      }
+      inFlight += 1
       let open = true
       return {
-        // Settling twice is a no-op, so callers can settle again on every exit path. Status 0 means
-        // no answer reached us, yet Discord may still have rejected the call, so it counts too:
-        // otherwise a client could cancel each request after it is sent and never be counted.
-        settle: (status, at) => {
+        settle: (rejected) => {
           if (!open) return
           open = false
-          adjust(all, -1)
-          if (status !== 0 && !isCountedRejection(status)) return
+          inFlight -= 1
+          if (!rejected) return
           // Pruning every scope keeps the map bounded by the live rejections the thresholds allow.
-          for (const known of [...rejections.keys()]) live(known, at)
-          for (const scope of all) rejections.set(scope, [...(rejections.get(scope) ?? []), at])
+          for (const known of [...rejections.keys()]) live(known)
+          for (const scope of [...scopes, PROCESS_SCOPE]) {
+            rejections.set(scope, [...(rejections.get(scope) ?? []), now()])
+          }
         },
       }
     },
@@ -101,46 +126,10 @@ export type RejectionLog = ReturnType<typeof rejectionLog>
  * than retry. It does not reset on success: a loop that alternates between a working call and a
  * failing one still walks toward the ban.
  */
-export class RateGuard extends Context.Service<
-  RateGuard,
-  {
-    /**
-     * Admit one call in `scopes`, or fail with `RateGuardTrippedError` when a scope or the process
-     * is over threshold. Settle the admitted call with Discord's status; 0 means no response, which
-     * counts as a rejection.
-     */
-    readonly admit: (
-      scopes: ReadonlyArray<string>,
-    ) => Effect.Effect<(status: number) => Effect.Effect<void>, RateGuardTrippedError>
-    readonly failureCount: (scope: string) => Effect.Effect<number>
-  }
->()('discord-api/RateGuard') {
+export class RateGuard extends Context.Service<RateGuard, RejectionLog>()('discord-api/RateGuard') {
   /** Pass a shared `log` to count across runtimes, such as one per HTTP request. */
   static readonly layer = (
     config: RateGuardConfig = defaultRateGuardConfig,
     log: RejectionLog = rejectionLog(config),
-  ) => {
-    const now = Effect.clockWith((clock) => clock.currentTimeMillis)
-    return Layer.succeed(RateGuard)({
-      failureCount: (scope) => Effect.map(now, (time) => log.count(scope, time)),
-      admit: (scopes) =>
-        Effect.flatMap(now, (time) => {
-          const admission = log.admit(scopes, time)
-          if ('settle' in admission) {
-            return Effect.succeed((status: number) =>
-              Effect.map(now, (at) => admission.settle(status, at)),
-            )
-          }
-          const { scope, count } = admission.refused
-          return Effect.fail(
-            new RateGuardTrippedError({
-              message: `Blocked before sending: ${count} rejected or pending Discord responses for ${scope} within the last ${Math.round(config.windowMs / 60_000)} minutes.`,
-              scope,
-              failures: count,
-              windowMs: config.windowMs,
-            }),
-          )
-        }),
-    })
-  }
+  ) => Layer.succeed(RateGuard)(log)
 }
