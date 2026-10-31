@@ -16,8 +16,11 @@ export interface Denial {
 export interface BrokerOptions {
   readonly operations: ReadonlyArray<OperationEntry>
   readonly grants: ScriptGrants
-  /** Replays an authorized Discord call with the real token. */
-  readonly discord: (call: DiscordRequest) => Effect.Effect<unknown, DiscordRestError>
+  /** Replays an authorized Discord call with the real token, aborting it when `signal` does. */
+  readonly discord: (
+    call: DiscordRequest,
+    signal: AbortSignal,
+  ) => Effect.Effect<unknown, DiscordRestError>
   /** Outbound HTTP to granted hosts. Defaults to the public internet only. */
   readonly egress?: (request: Request) => Promise<Response>
   readonly onDenied: (denial: Denial) => void
@@ -131,14 +134,17 @@ export const makeBroker = (options: BrokerOptions): Broker => {
     if ('refusal' in body) return refuse(request, body.refusal)
     return Effect.runPromise(
       options
-        .discord({
-          method: operation.method,
-          route,
-          operationFamily: operation.family,
-          ...(url.search === '' ? {} : { query: url.searchParams }),
-          ...(body.body === undefined ? {} : { body: body.body }),
-          ...(reason.reason === undefined ? {} : { auditLogReason: reason.reason }),
-        })
+        .discord(
+          {
+            method: operation.method,
+            route,
+            operationFamily: operation.family,
+            ...(url.search === '' ? {} : { query: url.searchParams }),
+            ...(body.body === undefined ? {} : { body: body.body }),
+            ...(reason.reason === undefined ? {} : { auditLogReason: reason.reason }),
+          },
+          request.signal,
+        )
         .pipe(
           Effect.map(replyFor),
           Effect.catch((error) => Effect.succeed(failureFor(error))),

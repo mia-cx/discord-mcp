@@ -1,4 +1,4 @@
-import { defineTool, ValidationError } from '@discord-mcp/core'
+import { defineTool, McpRequestContext, ValidationError } from '@discord-mcp/core'
 import { DiscordRest } from '@discord-mcp/discord-api/relay'
 import { OperationCatalog } from '@mia-cx/discord-catalog'
 import { Context, Effect, Schema } from 'effect'
@@ -91,6 +91,7 @@ export const scriptRun = defineTool({
       const catalog = yield* OperationCatalog
       const rest = yield* DiscordRest
       const runner = yield* ScriptRunner
+      const context = yield* McpRequestContext
       const bot = (yield* rest.request({
         method: 'GET',
         route: '/users/@me',
@@ -101,7 +102,9 @@ export const scriptRun = defineTool({
       const broker = makeBroker({
         operations: catalog.all,
         grants,
-        discord: rest.request,
+        // DiscordRest takes its abort signal from the request context; the script's is narrower.
+        discord: (call, signal) =>
+          rest.request(call).pipe(Effect.provideService(McpRequestContext, { ...context, signal })),
         onDenied: (denial) => {
           if (denied.length < DENIALS_REPORTED) denied.push(denial)
         },
