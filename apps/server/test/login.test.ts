@@ -240,7 +240,7 @@ describe('Discord login for the relay', () => {
     ).toThrow('DISCORD_OAUTH_ALLOWED_USER_IDS')
   })
 
-  it('binds single-use authorization codes to PKCE, client, redirect, resource and the current process', async () => {
+  it('binds authorization codes to PKCE, client, redirect and resource, single-use across replicas', async () => {
     const oauth = discordOAuth()
     const relay = createRelay(config, execute, oauth.fetch)
     const started = await beginLogin(relay)
@@ -254,9 +254,10 @@ describe('Discord login for the relay', () => {
       { code: started.clientId },
     ])
       expect((await redeem(relay, { ...params, ...overrides })).status).toBe(400)
-    const restarted = createRelay(config, execute, oauth.fetch)
-    expect((await redeem(restarted, params)).status).toBe(400)
-    expect((await redeem(relay, params)).status).toBe(200)
+    // Another replica, or this one after a restart, redeems the code; the first replica then
+    // refuses it, because Discord rejects the refresh token the code already spent.
+    const replica = createRelay(config, execute, oauth.fetch)
+    expect((await redeem(replica, params)).status).toBe(200)
     const replayed = await redeem(relay, params)
     expect(replayed.status).toBe(400)
     expect(await replayed.text()).not.toContain('private-')

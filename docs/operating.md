@@ -62,8 +62,8 @@ OAuth identity does not prove bot ownership. Bot-token possession grants authori
 No bot credential, authentication result, or Discord response is cached.
 A reset bot token or revoked Discord login stops working on its next request.
 Preserve the relay's OAuth client settings and encryption key outside the container.
-Changing the key invalidates all issued credentials. Unfinished logins must restart
-after a server restart; completed logins remain valid.
+Changing the key invalidates all issued credentials. A server restart keeps both completed
+logins and logins in progress.
 
 ## Developer-Team allowlist
 

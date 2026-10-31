@@ -136,9 +136,12 @@ it('serialises concurrent bridge refreshes into one valid login and refreshes on
     )
     return JSON.parse((await lines.next()).value ?? '')
   }
-  const refreshes = () =>
+  const discordRefreshes = () =>
     oauth.calls.filter((call) => String(call.init?.body).includes('grant_type=refresh_token'))
       .length
+  // Signing in already redeemed one refresh; count only the bridges' own.
+  const atSignIn = discordRefreshes()
+  const refreshes = () => discordRefreshes() - atSignIn
   try {
     // A parse-error reply shows each bridge is running, so the refreshes below overlap.
     for (const { child, lines } of bridges) {

@@ -56,8 +56,9 @@ registration expires, and lapses after 30 days unused.
 Refresh revokes every copy of the previous login, so each machine needs its own
 sign-in. The stdio bridge refreshes a day before expiry and after a rejected
 access credential, and bridges sharing one login file take turns through a lock.
-Only spent login-code hashes remain in memory for one minute; run one server
-process. Restarting cancels unfinished logins but preserves issued credentials.
+Authorization codes also enclose Discord's refresh token, and redeeming one
+rotates it, so Discord rejects a replayed code. No login state lives in memory:
+any replica can finish any login, and restarts preserve logins in progress.
 
 The executable serves MCP revision `2026-07-28` without an initialization handshake
 or sessions. Older MCP clients can use the SDK's stateless compatibility path.
@@ -273,9 +274,8 @@ list. Centrals can update in any order. Each bot host resumes the stored session
 it owns when it starts, so a bot that moved comes back online on its new host. Keep bot hosts off the public network: the hop from central is plain HTTP and
 carries bot tokens.
 
-A login must finish on the central replica that started it, because each replica tracks its
-own login flows and spent authorization codes. Route `/authorize`, `/auth/discord/callback`,
-and `/token` to one replica. Refreshes and MCP requests work on any replica.
+Logins, refreshes, and MCP requests all work on any central replica, so no sticky routing is
+needed.
 
 For agent-operated clients, use the [curl example](./docs/operating.md#curl).
 For a developer-Team-derived access list, follow
