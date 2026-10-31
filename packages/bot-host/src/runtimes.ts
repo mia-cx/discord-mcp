@@ -60,6 +60,7 @@ const LIFECYCLE = 'lifecycle:'
 const HOST_LEASE = 'host:'
 const SHARD_LEASE = 'shard:'
 const shardLease = (botId: string, shardId: number) => `${SHARD_LEASE}${botId}:${shardId}`
+const botOfShardLease = (name: string) => name.slice(SHARD_LEASE.length, name.lastIndexOf(':'))
 const REST_LEASE = 'bot:'
 const restLease = (botId: string) => `${REST_LEASE}${botId}`
 
@@ -666,8 +667,8 @@ export const createBotRuntimes = ({
     ).flat()
     if (claimed.length === 0) return
     // Read sessions again: a host that just handed a shard over saved it before releasing, and
-    // this host may be saving one it stopped.
-    await sessionWrites()
+    // this host may be saving one it stopped. Only those bots': another bot's write may be slow.
+    await Promise.all(claimed.map(({ botId }) => writes.get(botId)))
     const fresh = new Map((await vault.loadOnline()).map((bot) => [bot.botId, bot]))
     for (const { name, botId, shardId } of claimed) {
       const bot = fresh.get(botId)
@@ -709,10 +710,12 @@ export const createBotRuntimes = ({
    * bot's lease, so its schedules run here without an agent call.
    */
   const tidyLeases = async (online: ReadonlyMap<string, OnlineVaultBot>) => {
-    const idle = leases.names().filter((name) => name.startsWith(SHARD_LEASE) && !running.has(name))
-    // A shard stopped between passes may still be saving the session its next host starts from.
-    if (idle.length > 0) await sessionWrites()
-    for (const name of idle) await leases.release(name)
+    for (const name of leases.names()) {
+      if (!name.startsWith(SHARD_LEASE) || running.has(name)) continue
+      // A shard stopped between passes may still be saving the session its next host starts from.
+      await writes.get(botOfShardLease(name))
+      await leases.release(name)
+    }
     for (const botId of online.keys()) {
       if (owns(botId) && !leases.holds(restLease(botId))) await leases.claim(restLease(botId))
     }

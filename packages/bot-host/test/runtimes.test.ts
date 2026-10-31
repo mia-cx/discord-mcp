@@ -16,6 +16,7 @@ import { createTokenVault } from '../src/vault.ts'
 /** `GUILDS` and `GUILD_VOICE_STATES`, which every bot identifies with for voice. */
 const VOICE_INTENTS = 129
 const BOT_ID = '345678901234567890'
+const OTHER_BOT_ID = '456789012345678901'
 const KEY = Buffer.alloc(32, 1)
 const HOUR = 60 * 60 * 1000
 /** Discord's five seconds between Identifies in a bucket, plus a second kept in hand. */
@@ -963,6 +964,48 @@ it('takes a bot offline once for a shard Discord closed, even if that pass fails
   await vi.waitFor(() => expect(identified(gateway)).toEqual(['0/1', '1/2']))
   expect((await storage.loadBot(BOT_ID))?.online).toMatchObject({ shardCount: 2 })
 
+  await bots.close()
+  await gateway.close()
+  await storage.close()
+})
+
+it('starts a bot’s shards while another bot’s session write is slow', async () => {
+  const storage = await inMemoryStorage()
+  const gateway = await fakeGateway(100 * HOUR)
+  const clock = manualClock()
+  const vault = createTokenVault(KEY, storage)
+  let slow: Promise<void> | undefined
+  let waiting = 0
+  const bots = startHost(storage, clock, gateway.discordFetch(), {
+    vault: {
+      ...vault,
+      storeSession: async (botId, ...rest) => {
+        if (botId === BOT_ID && slow !== undefined) {
+          waiting += 1
+          await slow
+        }
+        return vault.storeSession(botId, ...rest)
+      },
+    },
+  })
+  await bots.use(BOT_ID, 'private-token-a')
+  await vi.waitFor(async () => expect(await storedSequences(storage)).toEqual({ 0: 1 }))
+  let answer = () => {}
+  slow = new Promise((resolve) => {
+    answer = resolve
+  })
+  gateway.connections[0]?.send({ op: 0, t: 'MESSAGE_CREATE', s: 2, d: {} })
+  await vi.waitFor(() => expect(waiting).toBe(1))
+
+  await bots.use(OTHER_BOT_ID, 'private-token-other')
+  await vi.waitFor(() =>
+    expect(gateway.connections[1]?.received[0]).toMatchObject({
+      op: 2,
+      d: { token: 'private-token-other' },
+    }),
+  )
+
+  answer()
   await bots.close()
   await gateway.close()
   await storage.close()
