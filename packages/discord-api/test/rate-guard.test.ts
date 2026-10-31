@@ -131,6 +131,49 @@ describe('a shared rate limiter', () => {
     expect(guildReads).toBe(2)
     expect(unrelated._tag).toBe('Success')
   })
+
+  it("trips on 429s Discord itself sends, such as a sublimit's", async () => {
+    // A sublimit answers 429 while the bucket still reports requests remaining.
+    let renames = 0
+    const discord: typeof fetch = async () => {
+      renames += 1
+      return Response.json(
+        { message: 'You are being rate limited.', retry_after: 600, global: false },
+        {
+          status: 429,
+          headers: {
+            'retry-after': '600',
+            'x-ratelimit-limit': '5',
+            'x-ratelimit-remaining': '4',
+            'x-ratelimit-reset-after': '1',
+            'x-ratelimit-scope': 'user',
+          },
+        },
+      )
+    }
+    const limiter = createRateLimiter(
+      { timeoutMs: 1000, retries: 0, maxRateLimitWaitMs: 0 },
+      discord,
+    )
+    const rename = () =>
+      Effect.runPromiseExit(
+        Effect.flatMap(DiscordRest, (rest) =>
+          rest.request({
+            method: 'PATCH',
+            route: '/channels/1',
+            body: {},
+            operationFamily: 'channel',
+          }),
+        ).pipe(Effect.provide(DiscordRest.shared(Redacted.make('token'), limiter))),
+      )
+
+    let last = await rename()
+    for (let attempt = 0; attempt < DEFAULT_FAILURE_THRESHOLD; attempt++) last = await rename()
+    limiter.close()
+
+    expect(renames).toBe(DEFAULT_FAILURE_THRESHOLD)
+    expect(String(last)).toContain('RateGuardTripped')
+  })
 })
 
 describe('isCountedRejection', () => {

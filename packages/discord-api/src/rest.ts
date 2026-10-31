@@ -1,5 +1,6 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { countIfAvailable, type RateGuardTrippedError, requestSignal } from '@discord-mcp/core'
-import { REST, type RequestData, type RouteLike } from '@discordjs/rest'
+import { REST, RESTEvents, type RequestData, type RouteLike } from '@discordjs/rest'
 import { Config, Context, Effect, Layer, Redacted } from 'effect'
 import { type MappedDiscordError, mapDiscordError } from './errors.ts'
 import { isCountedRejection, RateGuard, rateGuardScope } from './rate-guard.ts'
@@ -70,6 +71,12 @@ const readError = (
   }
 }
 
+/**
+ * Marks the request in progress once Discord itself answers 429. `@discordjs/rest` raises the same
+ * `RateLimitError` when it refuses a request locally, which never reaches Discord or Cloudflare.
+ */
+const answered429 = new AsyncLocalStorage<{ value: boolean }>()
+
 const restClient = (config: Omit<RestConfig, 'token'>, makeRequest?: typeof fetch) =>
   new REST({
     version: '10',
@@ -82,6 +89,11 @@ const restClient = (config: Omit<RestConfig, 'token'>, makeRequest?: typeof fetc
     ...(makeRequest === undefined
       ? {}
       : { makeRequest: (url: string, init: unknown) => makeRequest(url, init as RequestInit) }),
+  }).on(RESTEvents.Response, (_request, response) => {
+    // Shared-scope 429s are Discord's own resource limits and do not count toward the ban.
+    if (response.status !== 429 || response.headers.get('x-ratelimit-scope') === 'shared') return
+    const seen = answered429.getStore()
+    if (seen !== undefined) seen.value = true
   })
 
 /**
@@ -172,21 +184,23 @@ const perform = (
         headers: { authorization: `Bot ${Redacted.value(token)}` },
       }
 
+      const seen429 = { value: false }
       const result = yield* Effect.tryPromise({
-        try: () => {
-          switch (req.method) {
-            case 'GET':
-              return rest.get(req.route, options)
-            case 'POST':
-              return rest.post(req.route, options)
-            case 'PUT':
-              return rest.put(req.route, options)
-            case 'PATCH':
-              return rest.patch(req.route, options)
-            case 'DELETE':
-              return rest.delete(req.route, options)
-          }
-        },
+        try: () =>
+          answered429.run(seen429, () => {
+            switch (req.method) {
+              case 'GET':
+                return rest.get(req.route, options)
+              case 'POST':
+                return rest.post(req.route, options)
+              case 'PUT':
+                return rest.put(req.route, options)
+              case 'PATCH':
+                return rest.patch(req.route, options)
+              case 'DELETE':
+                return rest.delete(req.route, options)
+            }
+          }),
         catch: (cause) => cause,
       }).pipe(
         Effect.catch((cause) =>
@@ -194,11 +208,9 @@ const perform = (
             const { status, body, retryAfterMs, global } = readError(cause)
             yield* countIfAvailable('discord.request.failed')
             if (retryAfterMs !== undefined) yield* countIfAvailable('discord.rate_limit_wait')
-            // 400s are free against Cloudflare's budget; only 401/403/429 are counted. A
-            // `retryAfterMs` means @discordjs/rest refused the request itself, mostly before
-            // sending it; either way its bucket now knows the reset and refuses repeats, so
-            // counting those would trip the guard on a burst Discord never saw.
-            if (isCountedRejection(status) && retryAfterMs === undefined) {
+            // 400s are free against Cloudflare's budget; only 401/403/429 are counted, and a
+            // rate limit only when Discord answered it rather than the client refusing locally.
+            if (retryAfterMs === undefined ? isCountedRejection(status) : seen429.value) {
               yield* guard.recordRejection(scope)
             }
             return yield* Effect.fail(
