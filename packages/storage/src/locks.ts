@@ -19,12 +19,25 @@ export interface AdvisoryLocks {
  * them at all. `connect` opens the session and calls `onLost` when it ends, which releases every
  * lock it held; the next `lock` opens a new one.
  *
- * Postgres counts repeated locks by one session, so each key is taken at most once.
+ * Postgres counts repeated locks by one session, so each key is taken at most once. A statement
+ * that fails, such as one past its timeout, may still have taken or released its lock, so its
+ * session ends too.
  */
 export const advisoryLocks = (
   connect: (onLost: () => void) => Promise<LockSession>,
 ): AdvisoryLocks => {
-  let current: { readonly session: Promise<LockSession>; readonly held: Set<string> } | undefined
+  type Opened = { readonly session: Promise<LockSession>; readonly held: Set<string> }
+  let current: Opened | undefined
+  const query = async (opened: Opened, text: string, key: string) => {
+    const session = await opened.session
+    try {
+      return await session.query(text, [key])
+    } catch (error) {
+      if (current === opened) current = undefined
+      await session.close().catch(() => {})
+      throw error
+    }
+  }
   const open = () => {
     if (current !== undefined) return current
     const opened = {
@@ -41,21 +54,20 @@ export const advisoryLocks = (
   }
   return {
     lock: async (key) => {
-      const { session, held } = open()
-      if (held.has(key)) return true
-      const [row] = await (await session).query(
+      const opened = open()
+      if (opened.held.has(key)) return true
+      const [row] = await query(
+        opened,
         'select pg_try_advisory_lock(hashtextextended($1, 0)) as locked',
-        [key],
+        key,
       )
-      if (row?.locked === true) held.add(key)
-      return held.has(key)
+      if (row?.locked === true) opened.held.add(key)
+      return opened.held.has(key)
     },
     unlock: async (key) => {
       const opened = current
       if (opened === undefined || !opened.held.delete(key)) return
-      await (await opened.session).query('select pg_advisory_unlock(hashtextextended($1, 0))', [
-        key,
-      ])
+      await query(opened, 'select pg_advisory_unlock(hashtextextended($1, 0))', key)
     },
     close: async () => {
       const opened = current
