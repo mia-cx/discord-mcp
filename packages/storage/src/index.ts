@@ -251,6 +251,8 @@ const KEEPALIVE_PROBES = 3
 
 /** How long a lost listening connection waits before reconnecting. */
 const RELISTEN_MS = 1_000
+/** How often the listening connection proves it is alive; a dead one is noticed within this plus the query timeout. */
+const LISTEN_HEARTBEAT_MS = 15_000
 
 /**
  * Listen on its own connection, since a pooled one goes back to other queries. A connection that
@@ -267,10 +269,13 @@ const listenOn =
       const client = new Client({
         connectionString: url,
         connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
+        query_timeout: CONNECT_TIMEOUT_MS,
       })
       current = client
       let lost = false
+      let heartbeat: ReturnType<typeof setInterval> | undefined
       const reopen = (error: Error) => {
+        clearInterval(heartbeat)
         if (lost || stopped) return
         lost = true
         onLost(error)
@@ -286,7 +291,13 @@ const listenOn =
         .connect()
         .then(() => client.query(`listen "${channel}"`))
         .then(() => {
-          if (!lost && !stopped) listening()
+          if (lost || stopped) return
+          // A connection dropped without a FIN or RST reports nothing, so ask it something.
+          heartbeat = setInterval(
+            () => void client.query('select 1').catch(reopen),
+            LISTEN_HEARTBEAT_MS,
+          )
+          listening()
         }, reopen)
     }
     open()

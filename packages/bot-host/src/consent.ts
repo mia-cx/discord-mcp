@@ -88,8 +88,8 @@ export const createConsent = ({
   log,
   changed,
 }: ConsentOptions): Consent => {
-  /** Each person's clicks, chained so an undo never lands before the opt-out it undoes. */
-  const clicks = new Map<string, Promise<void>>()
+  /** Each person's opt-out writes, chained so an undo never lands before the opt-out it undoes. */
+  const clicks = new Map<string, Promise<unknown>>()
 
   /** An interaction's callback or follow-up, which its token authorizes. */
   const call = async (method: string, path: string, body: unknown) => {
@@ -101,36 +101,22 @@ export const createConsent = ({
     if (!response.ok) throw new Error(`Discord answered ${response.status}`)
   }
 
-  /** Record the click, then edit the acknowledged reply to say what happened. */
-  const record = async (
-    botId: string,
-    click: Click,
-    id: ButtonId,
-    guildId: string,
-    userId: string,
-    acknowledged: Promise<void>,
-  ) => {
+  /** Record the click. Resolves to the reply that says what happened. */
+  const record = async (botId: string, id: ButtonId, guildId: string, userId: string) => {
     const { optedOut, scope: kind } = Buttons[id]
     const scope: VoiceOptOutScope = kind === 'all' ? { everywhere: true } : { botId, guildId }
-    let reply: { readonly content: string; readonly components: ReadonlyArray<unknown> }
     try {
       await storage.setVoiceOptOut(scope, userId, optedOut)
       changed({ scope, userId, optedOut })
-      reply = {
+      return {
         content: Copy[id],
         components: optedOut ? [row(kind === 'all' ? 'undo:all' : 'undo:bot')] : [],
       }
     } catch (cause) {
       log(`Recording a voice opt-out for bot ${botId} failed: ${String(cause)}`)
       // A failed undo keeps its button; a failed opt-out leaves the notice's buttons to retry.
-      reply = { content: Copy.failed, components: optedOut ? [] : [row(id)] }
+      return { content: Copy.failed, components: optedOut ? [] : [row(id)] }
     }
-    await acknowledged
-    await call(
-      'PATCH',
-      `/webhooks/${click.application_id}/${click.token}/messages/@original`,
-      reply,
-    )
   }
 
   return {
@@ -143,10 +129,13 @@ export const createConsent = ({
       if (!application?.ok) {
         return `The bot couldn't check how Discord delivers its button clicks${application === undefined ? '' : ` (HTTP ${application.status})`}, so it only sends audio. Join again to retry.`
       }
-      const { interactions_endpoint_url } = (await application.json()) as {
-        readonly interactions_endpoint_url?: string | null
+      const body = (await application.json().catch(() => undefined)) as
+        | { readonly interactions_endpoint_url?: string | null }
+        | undefined
+      if (body === undefined) {
+        return "The bot couldn't check how Discord delivers its button clicks, so it only sends audio. Join again to retry."
       }
-      if (interactions_endpoint_url) {
+      if (body.interactions_endpoint_url) {
         return "The bot's application has an Interactions Endpoint URL, so Discord sends clicks on the notice's opt-out buttons there and nobody could opt out. It only sends audio; remove the URL in the Developer Portal to receive."
       }
       const response = await discordFetch(`${apiUrl}/channels/${channelId}/messages`, {
@@ -183,17 +172,26 @@ export const createConsent = ({
           ? { type: DEFERRED_REPLY, data: { flags: EPHEMERAL } }
           : { type: DEFERRED_UPDATE },
       )
-      // Awaited by `record`, which still saves a click whose acknowledgement failed.
-      acknowledged.catch(() => {})
-      const next = (clicks.get(userId) ?? Promise.resolve())
-        .then(() => record(botId, click, id as ButtonId, guildId, userId, acknowledged))
+      // Only the writes take turns: a slow reply never holds up the next click's opt-out.
+      const stored = (clicks.get(userId) ?? Promise.resolve()).then(() =>
+        record(botId, id as ButtonId, guildId, userId),
+      )
+      clicks.set(userId, stored)
+      void stored.then(() => {
+        if (clicks.get(userId) === stored) clicks.delete(userId)
+      })
+      // A click whose acknowledgement failed is still saved; only its reply is lost.
+      Promise.all([stored, acknowledged])
+        .then(([reply]) =>
+          call(
+            'PATCH',
+            `/webhooks/${click.application_id}/${click.token}/messages/@original`,
+            reply,
+          ),
+        )
         .catch((cause) =>
           log(`Answering a voice opt-out for bot ${botId} failed: ${String(cause)}`),
         )
-      clicks.set(userId, next)
-      void next.then(() => {
-        if (clicks.get(userId) === next) clicks.delete(userId)
-      })
       return true
     },
   }

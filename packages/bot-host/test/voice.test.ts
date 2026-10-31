@@ -50,13 +50,20 @@ const start = async ({
   )
   const clock = manualClock()
   const vault = createTokenVault(Buffer.alloc(32, 1), storage)
-  // The opt-out feed from Postgres, which a test can cut and restore.
+  // The opt-out feed from Postgres, which a test can cut and restore, and opt-out lookups, which
+  // it can hold.
   let feed: OptOutWatcher | undefined
   let cut = false
+  let held: Promise<void> | undefined
+  let release = () => {}
   const bots = createBotRuntimes({
     vault,
     storage: {
       ...storage,
+      voiceOptedOut: async (...lookup) => {
+        await held
+        return storage.voiceOptedOut(...lookup)
+      },
       watchVoiceOptOuts: (watcher) => {
         feed = watcher
         return storage.watchVoiceOptOuts({
@@ -86,7 +93,18 @@ const start = async ({
       feed?.live()
     },
   }
-  return { bots, storage, vault, voice, voiceServer, gateway, clock, outage }
+  const lookups = {
+    hold: () => {
+      held = new Promise((resolve) => {
+        release = resolve
+      })
+    },
+    release: () => {
+      held = undefined
+      release()
+    },
+  }
+  return { bots, storage, vault, voice, voiceServer, gateway, clock, outage, lookups }
 }
 
 /** An agent's WebSocket and the server side of it, which the bot host takes over. */
@@ -667,6 +685,80 @@ describe('receiving voice', () => {
     await vi.waitFor(() => expect(heard.events.slice(4)).toEqual([{ type: 'join', user_id: BOB }]))
     await settle()
     expect(heard.events.slice(4)).toEqual([{ type: 'join', user_id: BOB }])
+  })
+
+  it('asks afresh when receiving resumes, never relaying on an answer from before', async () => {
+    const { voice, voiceServer, storage, outage, lookups } = await start()
+    await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID, true)
+    await daveReady(voiceServer)
+    const first = await agentSocket()
+    voice.attach(GUILD_ID, first.socket, { codec: 'opus' })
+    const firstHeard = listen(first.agent)
+    await vi.waitFor(() => expect(firstHeard.events).toEqual([{ type: 'join', user_id: ALICE }]))
+
+    // Only sending, the bot misses Alice's opt-out through another host during an outage.
+    expect(await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID)).toEqual({ receiving: false })
+    outage.start()
+    await storage.setVoiceOptOut({ everywhere: true }, ALICE, true)
+    outage.end()
+
+    // Receiving again, a new socket arrives before storage answers.
+    lookups.hold()
+    expect(await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID, true)).toEqual({ receiving: true })
+    const second = await agentSocket()
+    const heard = listen(second.agent)
+    voice.attach(GUILD_ID, second.socket, { codec: 'opus' })
+    await voiceServer.speak(ALICE, speech(2, 0xa0))
+    await settle()
+    lookups.release()
+    await settle()
+    expect(heard.events).toEqual([])
+    expect(heard.audio).toEqual([])
+  })
+
+  it("stores a person's next opt-out while Discord still holds the first one's reply", async () => {
+    let releaseReplies = () => {}
+    const replies = new Promise<void>((resolve) => {
+      releaseReplies = resolve
+    })
+    const { gateway, storage } = await start({
+      through: (discordFetch) => async (input, init) => {
+        if (init?.method === 'PATCH') await replies
+        return discordFetch(input, init)
+      },
+    })
+    await vi.waitFor(() => expect(gateway.connections[0]?.received[0]).toMatchObject({ op: 2 }))
+
+    click(gateway, ALICE, 'opt-out:bot')
+    await vi.waitFor(async () =>
+      expect(await storage.voiceOptedOut(BOT_ID, GUILD_ID, ALICE)).toBe(true),
+    )
+    click(gateway, ALICE, 'opt-out:all')
+    await vi.waitFor(async () =>
+      expect(await storage.voiceOptedOut(BOT_ID, '234567890123456780', ALICE)).toBe(true),
+    )
+    releaseReplies()
+    await vi.waitFor(() =>
+      expect(gateway.rest.filter(({ method }) => method === 'PATCH')).toHaveLength(2),
+    )
+  })
+
+  it("posts the notice on a later join after Discord's answer about the application broke off", async () => {
+    let broken = true
+    const { voice } = await start({
+      through: (discordFetch) => async (input, init) => {
+        if (broken && new URL(String(input)).pathname.endsWith('/applications/@me')) {
+          broken = false
+          return new Response('{"interactions_endpoint', { status: 200 })
+        }
+        return discordFetch(input, init)
+      },
+    })
+    expect(await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID, true)).toEqual({
+      receiving: false,
+      reason: expect.stringContaining("couldn't check"),
+    })
+    expect(await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID, true)).toEqual({ receiving: true })
   })
 
   it("applies another bot host's opt-out and undo at once", async () => {

@@ -412,11 +412,18 @@ export const createVoice = ({ botId, shardOf, send, consent, clock, log }: Voice
     }
   }
 
-  /** Look up a person's opt-out; until it answers, they keep their last answer. */
+  /**
+   * Look up a person's opt-out; until it answers, they keep their last answer. A session that
+   * only sends forgets the answer instead, so receiving again always asks afresh.
+   */
   const check = (session: Session, userId: string) => {
     const person = session.people.get(userId)
-    if (person === undefined || session.receiving === undefined) return
+    if (person === undefined) return
     const asked = ++person.checks
+    if (session.receiving === undefined) {
+      person.allowed = undefined
+      return
+    }
     consent
       .optedOut(session.guildId, userId)
       .then(
@@ -475,8 +482,10 @@ export const createVoice = ({ botId, shardOf, send, consent, clock, log }: Voice
       session.noticing = { channelId, posted: consent.notice(channelId) }
     }
     const noticing = session.noticing
-    const refused = await noticing.posted
-    if (session.noticing === noticing) session.noticing = undefined
+    // Settled either way, so a later join posts anew rather than reusing a failure.
+    const refused = await noticing.posted.finally(() => {
+      if (session.noticing === noticing) session.noticing = undefined
+    })
     if (refused !== undefined) return { receiving: false, reason: refused }
     if (sessions.get(session.guildId) !== session) throw new Error(LEFT.reason)
     // Moved, or a later join asked to only send, while the notice was posted.
@@ -503,7 +512,11 @@ export const createVoice = ({ botId, shardOf, send, consent, clock, log }: Voice
     if (channelId !== null) {
       session.connection.rejoin({ channelId, selfDeaf: true, selfMute: false })
     }
-    for (const userId of session.people.keys()) sync(session, userId)
+    for (const userId of session.people.keys()) {
+      // Forgets their answers, which no one keeps current while the bot only sends.
+      check(session, userId)
+      sync(session, userId)
+    }
     return { receiving: false }
   }
 
