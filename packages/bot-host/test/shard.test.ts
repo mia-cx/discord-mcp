@@ -3,6 +3,8 @@ import { nextIdentifyAt, startShard } from '../src/shard.ts'
 import { DEFAULT_HEARTBEAT_INTERVAL_MS, fakeGateway, manualClock } from '../src/testing.ts'
 
 const TOKEN = 'private-bot-token'
+/** `GUILDS` and `GUILD_VOICE_STATES`. */
+const VOICE_INTENTS = 129
 const INTERVAL = DEFAULT_HEARTBEAT_INTERVAL_MS
 const cleanup: Array<() => unknown> = []
 afterEach(async () => {
@@ -19,7 +21,9 @@ const start = async (saved?: { sessionId: string; sequence: number }) => {
     token: TOKEN,
     gatewayUrl: gateway.url,
     clock,
-    ...(saved && { session: { ...saved, resumeGatewayUrl: `${gateway.url}/resume` } }),
+    ...(saved && {
+      session: { ...saved, resumeGatewayUrl: `${gateway.url}/resume`, intents: VOICE_INTENTS },
+    }),
     onSession,
     onReady: () => {},
     onFatal,
@@ -43,7 +47,7 @@ describe('the shard supervisor', () => {
     const connection = gateway.connections[0]
     expect(connection?.received[0]).toMatchObject({
       op: 2,
-      d: { token: TOKEN, intents: 129, presence: { status: 'online', afk: false } },
+      d: { token: TOKEN, intents: VOICE_INTENTS, presence: { status: 'online', afk: false } },
     })
 
     // The first beat is jittered: random() is 0.5, so half an interval.
@@ -81,6 +85,7 @@ describe('the shard supervisor', () => {
         sessionId: 'fake-session',
         resumeGatewayUrl: gateway.url,
         sequence: 3,
+        intents: VOICE_INTENTS,
       }),
     )
 
@@ -92,6 +97,28 @@ describe('the shard supervisor', () => {
       expect(gateway.connections[2]?.received[0]).toMatchObject({ op: 6, d: { seq: 3 } }),
     )
     await identified(gateway, 1)
+  })
+
+  it('identifies afresh instead of resuming a session saved with other intents', async () => {
+    const gateway = await fakeGateway()
+    const shard = startShard({
+      token: TOKEN,
+      gatewayUrl: gateway.url,
+      clock: manualClock(),
+      // Saved before voice, when the shard identified with no intents.
+      session: { sessionId: 'no-voice', resumeGatewayUrl: gateway.url, sequence: 7, intents: 0 },
+      onSession: () => {},
+      onReady: () => {},
+      onFatal: () => {},
+      onIdentifyBudgetSpent: () => {},
+    })
+    cleanup.push(gateway.close, shard.stop)
+    await vi.waitFor(() =>
+      expect(gateway.connections[0]?.received[0]).toMatchObject({
+        op: 2,
+        d: { intents: VOICE_INTENTS },
+      }),
+    )
   })
 
   it('identifies afresh, within Identify limits, when Discord rejects a saved session', async () => {
@@ -155,7 +182,7 @@ describe('the shard supervisor', () => {
       token: TOKEN,
       gatewayUrl: gateway.url,
       clock,
-      session: { sessionId: 'saved', resumeGatewayUrl, sequence: 7 },
+      session: { sessionId: 'saved', resumeGatewayUrl, sequence: 7, intents: VOICE_INTENTS },
       onSession: () => {},
       onReady: () => {},
       onFatal: () => {},
@@ -184,7 +211,12 @@ describe('the shard supervisor', () => {
       const gateway = await fakeGateway()
       const target = await fakeGateway()
       const clock = manualClock()
-      const session = { sessionId: 'saved', resumeGatewayUrl: target.url, sequence: 7 }
+      const session = {
+        sessionId: 'saved',
+        resumeGatewayUrl: target.url,
+        sequence: 7,
+        intents: VOICE_INTENTS,
+      }
       const onSession = vi.fn()
       const shard = startShard({
         token: TOKEN,
@@ -251,7 +283,7 @@ describe('the shard supervisor', () => {
       token: TOKEN,
       gatewayUrl: 'wss://gateway.discord.gg',
       clock: manualClock(),
-      session: { sessionId: 'saved', resumeGatewayUrl, sequence: 7 },
+      session: { sessionId: 'saved', resumeGatewayUrl, sequence: 7, intents: VOICE_INTENTS },
       onSession: () => {},
       onReady: () => {},
       onFatal: () => {},

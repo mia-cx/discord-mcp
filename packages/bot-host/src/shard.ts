@@ -65,6 +65,8 @@ export interface ShardSession {
   readonly resumeGatewayUrl: string
   /** The last dispatch's sequence number; Discord replays every dispatch after it. */
   readonly sequence: number
+  /** The intents it was identified with. A resumed session delivers only those events. */
+  readonly intents: number
 }
 
 export interface ShardOptions {
@@ -117,7 +119,9 @@ export const startShard = ({
   onDrop,
 }: ShardOptions): Shard => {
   let socket: WebSocket | undefined
-  let session = saved
+  // A session identified with other intents, or saved before sessions recorded them, would
+  // resume without the events these intents need, so it identifies afresh.
+  let session = saved?.intents === INTENTS ? saved : undefined
   /** A connection to this session's resume URL closed before Hello. */
   let resumeUrlFailed = false
   /** The current connection got Hello. */
@@ -186,6 +190,7 @@ export const startShard = ({
         sessionId: ready.session_id,
         resumeGatewayUrl: ready.resume_gateway_url,
         sequence,
+        intents: INTENTS,
       }
       resumeUrlFailed = false
     } else if (session !== undefined) {
