@@ -42,6 +42,8 @@ const loadRuntime = () => {
     readFile(runtimeFile('entry.js'), 'utf8'),
     build({
       entryPoints: [runtimeFile('shim.js')],
+      // Keeps esbuild's source comments relative to runtime/, whatever the relay's cwd.
+      absWorkingDir: runtimeFile(''),
       bundle: true,
       write: false,
       format: 'cjs',

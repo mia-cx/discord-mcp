@@ -34,3 +34,6 @@ export class Client extends real.Client {
     return PLACEHOLDER_TOKEN
   }
 }
+
+/** For `import Discord from 'discord.js'`, which Node also allows. */
+export default { ...real, Client }

@@ -72,19 +72,24 @@ describe('the isolate host', () => {
     })
   })
 
-  it('gives a dynamic import of discord.js its named exports', async () => {
+  it('serves discord.js to default and dynamic imports alike', async () => {
     const run = await makeIsolateHost().run(
       await execution(
         '1',
-        `export default async () => {
+        `import Discord from 'discord.js'
+        export default async ({ client }) => {
           const { EmbedBuilder } = await import('discord.js')
-          return new EmbedBuilder().setTitle('dynamic').toJSON()
+          return [new EmbedBuilder().setTitle('dynamic').toJSON(), client instanceof Discord.Client]
         }`,
         5000,
       ),
     )
 
-    expect(run).toEqual({ outcome: 'completed', result: { title: 'dynamic' }, logs: [] })
+    expect(run).toEqual({
+      outcome: 'completed',
+      result: [{ title: 'dynamic' }, true],
+      logs: [],
+    })
   })
 
   it('returns a large result with multi-byte characters intact', async () => {
