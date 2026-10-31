@@ -43,6 +43,13 @@
       "when": 1793469643073,
       "tag": "0005_schedules",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1793471087937,
+      "tag": "0006_voice_opt_outs",
+      "breakpoints": true
     }
   ]
 }

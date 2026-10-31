@@ -83,6 +83,11 @@ export interface WorkflowRunQuery {
   readonly limit: number
 }
 
+/** Where a voice opt-out applies: one bot in one server, or every bot everywhere. */
+export type VoiceOptOutScope =
+  | { readonly botId: string; readonly guildId: string }
+  | { readonly everywhere: true }
+
 export interface PublishWorkflow {
   readonly botId: string
   readonly name: string
@@ -190,6 +195,14 @@ export interface Storage {
   ) => Promise<ReadonlyArray<RecordedWorkflowRun>>
   /** Delete runs that finished before `before`. Resolves to how many were deleted. */
   readonly pruneWorkflowRuns: (before: Date) => Promise<number>
+  /** Opt a person out of voice relay, or back in, in `scope`. Repeating either changes nothing. */
+  readonly setVoiceOptOut: (
+    scope: VoiceOptOutScope,
+    userId: string,
+    optedOut: boolean,
+  ) => Promise<void>
+  /** Whether a person opted out of relay by this bot in this server, or by every bot. */
+  readonly voiceOptedOut: (botId: string, guildId: string, userId: string) => Promise<boolean>
   readonly close: () => Promise<void>
 }
 

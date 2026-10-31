@@ -29,6 +29,8 @@ const {
   workflowChanges: changes,
   workflowKv: kv,
   workflowRuns: runs,
+  voiceOptOuts,
+  voiceGlobalOptOuts,
 } = schema
 
 const revisionColumns = {
@@ -393,6 +395,48 @@ export const createStorage = (
       .where(lt(runs.finishedAt, before))
       .returning({ id: runs.id })
     return deleted.length
+  },
+
+  setVoiceOptOut: async (scope, userId, optedOut) => {
+    if ('everywhere' in scope) {
+      await (optedOut
+        ? db.insert(voiceGlobalOptOuts).values({ userId }).onConflictDoNothing()
+        : db.delete(voiceGlobalOptOuts).where(eq(voiceGlobalOptOuts.userId, userId)))
+      return
+    }
+    const { botId, guildId } = scope
+    await (optedOut
+      ? db.insert(voiceOptOuts).values({ botId, guildId, userId }).onConflictDoNothing()
+      : db
+          .delete(voiceOptOuts)
+          .where(
+            and(
+              eq(voiceOptOuts.botId, botId),
+              eq(voiceOptOuts.guildId, guildId),
+              eq(voiceOptOuts.userId, userId),
+            ),
+          ))
+  },
+
+  voiceOptedOut: async (botId, guildId, userId) => {
+    const found = await db
+      .select({ userId: voiceGlobalOptOuts.userId })
+      .from(voiceGlobalOptOuts)
+      .where(eq(voiceGlobalOptOuts.userId, userId))
+      .unionAll(
+        db
+          .select({ userId: voiceOptOuts.userId })
+          .from(voiceOptOuts)
+          .where(
+            and(
+              eq(voiceOptOuts.botId, botId),
+              eq(voiceOptOuts.guildId, guildId),
+              eq(voiceOptOuts.userId, userId),
+            ),
+          ),
+      )
+      .limit(1)
+    return found.length > 0
   },
 
   close: async () => {
