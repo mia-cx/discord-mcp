@@ -60,7 +60,18 @@ export const fakeGateway = async (
       received: [],
       closeCode: undefined,
       acknowledge: true,
-      send: (payload) => socket.send(JSON.stringify(payload)),
+      send: (payload) => {
+        // A voice state the test sends, such as the bot being moved, is where Discord has it.
+        if (payload.t === 'VOICE_STATE_UPDATE') {
+          const { guild_id, channel_id, user_id } = payload.d as {
+            guild_id: string
+            channel_id: string | null
+            user_id: string
+          }
+          if (user_id === voice?.botId) voiceChannels.set(guild_id, channel_id)
+        }
+        socket.send(JSON.stringify(payload))
+      },
       close: (code) => socket.close(code),
     }
     connections.push(connection)
@@ -82,14 +93,13 @@ export const fakeGateway = async (
           guild_id: string
           channel_id: string | null
         }
+        const moved = voiceChannels.get(guild_id) !== channel_id
         connection.send({
           op: 0,
           t: 'VOICE_STATE_UPDATE',
           s: ++sequence,
           d: { guild_id, channel_id, user_id: voice.botId, session_id: 'fake-voice-session' },
         })
-        const moved = voiceChannels.get(guild_id) !== channel_id
-        voiceChannels.set(guild_id, channel_id)
         if (channel_id !== null && moved) {
           connection.send({
             op: 0,

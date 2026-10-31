@@ -464,6 +464,34 @@ describe('receiving voice', () => {
       expect(state).toMatchObject({ d: { self_deaf: true } })
   })
 
+  it('stops relaying when the bot is moved to a channel without the notice', async () => {
+    const { voice, voiceServer, gateway } = await start()
+    await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID, true)
+    await daveReady(voiceServer)
+    const { agent, socket } = await agentSocket()
+    const heard = listen(agent)
+    voice.attach(GUILD_ID, socket, { codec: 'opus' })
+    await vi.waitFor(() => expect(heard.events).toEqual([{ type: 'join', user_id: ALICE }]))
+
+    // A moderator drags the bot into another channel.
+    const elsewhere = '345678901234567891'
+    gateway.connections[0]?.send({
+      op: 0,
+      t: 'VOICE_STATE_UPDATE',
+      s: 999,
+      d: { guild_id: GUILD_ID, channel_id: elsewhere, user_id: BOT_ID, session_id: 'moved' },
+    })
+    await vi.waitFor(() => expect(heard.events.at(-1)).toEqual({ type: 'leave', user_id: ALICE }))
+    await vi.waitFor(() =>
+      expect(voiceStates(gateway).at(-1)).toMatchObject({
+        d: { channel_id: elsewhere, self_deaf: true },
+      }),
+    )
+    await voiceServer.speak(ALICE, speech(3, 0xa0))
+    await settle()
+    expect(heard.audio).toEqual([])
+  })
+
   it('drops a speaker who opts out of this bot at once, never tells workflows, and undoes it', async () => {
     const onDispatch = vi.fn()
     const { voice, voiceServer, gateway, storage } = await start({ onDispatch })
