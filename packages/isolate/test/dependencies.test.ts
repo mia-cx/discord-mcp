@@ -1,4 +1,7 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { inMemoryStorage } from '@discord-mcp/storage/testing'
 import { OperationCatalog } from '@mia-cx/discord-catalog'
 import { Effect } from 'effect'
@@ -27,6 +30,10 @@ elsewhere.on('request', ({ url = '' }) => {
   if (url.endsWith('.tgz')) elsewhereHits.push(url)
 })
 const elsewherePort = (elsewhere.address() as { port: number }).port
+
+/** A file on the relay that no package may bundle. */
+const secret = join(await mkdtemp(join(tmpdir(), 'textile-secret-')), 'secret.json')
+await writeFile(secret, '{"token":"relay-secret"}')
 
 const registry = await fixtureRegistry([
   {
@@ -58,10 +65,16 @@ const registry = await fixtureRegistry([
     dependencies: { evil: `http://127.0.0.1:${elsewherePort}/evil.tgz` },
     files: { 'index.js': 'module.exports = 1' },
   },
+  {
+    name: 'snoop',
+    version: '1.0.0',
+    files: { 'index.js': `module.exports = require(${JSON.stringify(secret)})` },
+  },
 ])
 afterAll(async () => {
   await registry.close()
   elsewhere.close()
+  await rm(dirname(secret), { recursive: true, force: true })
 })
 
 const catalog = await Effect.runPromise(Effect.provide(OperationCatalog, OperationCatalog.layer))
@@ -102,12 +115,18 @@ client.on('messageCreate', (message) => message.channel.send(greet(message.conte
 `
 
 describe('publishing a workflow with npm dependencies', () => {
-  it('installs them, records every version, and runs them on events', async () => {
+  it('installs them, records every version, and runs them on events with discord.js’s own collections', async () => {
     const { storage, host, calls } = await setup()
 
     const revision = await host.publish(caller, {
       name: 'greeter',
-      source: GREETER,
+      // A package importing @discordjs/collection gets the copy discord.js uses.
+      source: `
+        import { Collection } from '@discordjs/collection'
+        ${GREETER.replace(
+          'greet(message.content)',
+          "greet(message.content) + ' ' + (client.guilds.cache instanceof Collection)",
+        )}`,
       grants,
       dependencies: { greet: '1.0.0' },
     })
@@ -141,7 +160,7 @@ describe('publishing a workflow with npm dependencies', () => {
       () =>
         expect(calls).toContainEqual({
           route: `/channels/${CHANNEL}/messages`,
-          body: expect.objectContaining({ content: 'HELLO MIA!' }),
+          body: expect.objectContaining({ content: 'HELLO MIA! true' }),
         }),
       { timeout: 15_000 },
     )
@@ -213,6 +232,13 @@ describe('publishing a workflow with npm dependencies', () => {
       GREETER,
       'The workflow did not build.',
       /"greet".*list it in dependencies/,
+    ],
+    [
+      'a package bundling a file from outside its dependencies',
+      { dependencies: { snoop: '1.0.0' } },
+      GREETER.replace("'greet'", "'snoop'"),
+      "A dependency can't run in a workflow.",
+      /resolves outside the workflow's dependencies/,
     ],
     [
       'a dependency fetched from outside the registry',
