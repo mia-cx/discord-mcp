@@ -75,6 +75,7 @@ Both paths require OAuth and bot credentials on every HTTP request.
 | `discord_api_admin` | Change bot/application settings and commands. |
 | `discord_guild_get` | Read a guild with a compact, typed result. |
 | `discord_permissions_explain` | Diagnose effective guild/channel permissions. |
+| `discord_script_run` | Run one-off discord.js code as the bot, checked against its grants. |
 
 The catalog covers the vendored specification's 242 operations. The relay exposes
 bot-authenticated, non-credential operations. OAuth-only endpoints and operations
@@ -82,13 +83,46 @@ requiring separate credentials are unavailable. Use search and describe to find
 the supported operation and its input schema.
 
 Arguments are validated locally before execution. Destructive and admin calls act
-directly under the supplied bot's Discord permissions; there are no server-side
-grants or preview-token sessions. This relay does not receive voice audio or run
-agent conversations.
+directly under the supplied bot's Discord permissions, with no preview-token
+sessions; only [scripts](#scripts) carry server-side grants. This relay does not
+receive voice audio or run agent conversations.
 
 Calls currently accept JSON payloads. Multipart file upload is not implemented.
 Discord rate limits and API errors are returned to the caller; the HTTP relay
 disables automatic retries and rate-limit waits.
+
+## Scripts
+
+`discord_script_run` batches many Discord calls into one tool call. The source is a
+module whose default export receives a discord.js `Client`:
+
+```ts
+import { EmbedBuilder } from 'discord.js'
+
+export default async ({ client }) => {
+  const channel = await client.channels.fetch('123456789012345678')
+  for (const title of ['One', 'Two', 'Three']) {
+    await channel.send({ embeds: [new EmbedBuilder().setTitle(title)] })
+  }
+  return 'sent'
+}
+```
+
+Pass `grants` with the call: `operations` lists catalog operation IDs, `families`
+grants a family's read and write operations, and `hosts` lists hostnames the script
+may `fetch()`. Destructive and admin operations must be named in `operations`. A
+refused call fails inside the script with HTTP 403 and is listed in the result's `denied`.
+
+Each script runs once in a fresh [workerd](https://github.com/cloudflare/workerd)
+process with no Gateway connection and no bot token. Every request it makes, whatever
+its URL, reaches a broker in the relay. The broker matches Discord calls to catalog
+operations, checks the grants, and replays them with the request's bot token.
+Outbound HTTP reaches public addresses only. One bot's scripts run one at a time.
+A script is killed after `timeoutSeconds` (30 by default, 120 at most).
+
+The HTTP relay offers the tool only when `DISCORD_OAUTH_ALLOWED_USER_IDS` is set.
+Local stdio always offers it. workerd ships as an npm dependency for glibc Linux,
+macOS, and Windows.
 
 ## Permission metadata
 
