@@ -18,6 +18,12 @@ const NORMAL_CLOSURE = 1000
 const RECONNECT_CLOSURE = 4000
 /** Discord allows one Identify per five seconds for a bot without large-bot sharding. */
 const IDENTIFY_INTERVAL_MS = 5_000
+const DAY_MS = 24 * 60 * 60 * 1000
+/**
+ * Discord resets a bot's token after 1,000 Identifies in 24 hours. Half of that leaves room for
+ * the bot's other clients; a healthy shard identifies a few times a day.
+ */
+const DAILY_IDENTIFY_BUDGET = 500
 const BACKOFF_BASE_MS = 1_000
 const MAX_BACKOFF_MS = 60_000
 /** Discord asks for a random 1–5 second wait before identifying after an invalid session. */
@@ -31,6 +37,16 @@ interface Payload {
   readonly t?: string | null
 }
 
+/**
+ * The earliest time a shard may identify again, given its Identify times from the last 24 hours,
+ * oldest first.
+ */
+export const nextIdentifyAt = (identifiedAt: ReadonlyArray<number>, now: number): number => {
+  const [oldest] = identifiedAt
+  if (oldest !== undefined && identifiedAt.length >= DAILY_IDENTIFY_BUDGET) return oldest + DAY_MS
+  return Math.max(now, (identifiedAt.at(-1) ?? Number.NEGATIVE_INFINITY) + IDENTIFY_INTERVAL_MS)
+}
+
 export interface ShardOptions {
   readonly token: string
   readonly gatewayUrl: string
@@ -38,6 +54,8 @@ export interface ShardOptions {
   readonly onReady: () => void
   /** Discord rejected the session for good; the shard has stopped. */
   readonly onFatal: (code: number) => void
+  /** The daily Identify budget is spent; the shard reconnects after `waitMs`. */
+  readonly onIdentifyBudgetSpent: (waitMs: number) => void
 }
 
 export interface Shard {
@@ -49,12 +67,19 @@ export interface Shard {
  * One Gateway shard that identifies with an online presence, heartbeats, and reconnects with a
  * fresh identify after any drop. Shard 0 of 1, no intents, no resume.
  */
-export const startShard = ({ token, gatewayUrl, clock, onReady, onFatal }: ShardOptions): Shard => {
+export const startShard = ({
+  token,
+  gatewayUrl,
+  clock,
+  onReady,
+  onFatal,
+  onIdentifyBudgetSpent,
+}: ShardOptions): Shard => {
   let socket: WebSocket | undefined
   let sequence: number | null = null
   let acknowledged = true
   let attempts = 0
-  let lastIdentifyAt = Number.NEGATIVE_INFINITY
+  const identifiedAt: number[] = []
   // The heartbeat runs only while connected and the reconnect wait only while not, so one timer.
   let cancelTimer = () => {}
 
@@ -67,10 +92,13 @@ export const startShard = ({ token, gatewayUrl, clock, onReady, onFatal }: Shard
     current?.close(code)
   }
 
-  // Connecting no sooner than the Identify interval keeps the Identify after Hello within it.
+  // Every connection identifies right after Hello, so Identify limits gate connecting.
   const connectAfter = (ms: number) => {
-    const wait = Math.max(ms, lastIdentifyAt + IDENTIFY_INTERVAL_MS - clock.now())
-    cancelTimer = clock.schedule(connect, wait)
+    const now = clock.now()
+    while (identifiedAt[0] !== undefined && identifiedAt[0] <= now - DAY_MS) identifiedAt.shift()
+    const limitWait = nextIdentifyAt(identifiedAt, now) - now
+    if (identifiedAt.length >= DAILY_IDENTIFY_BUDGET) onIdentifyBudgetSpent(limitWait)
+    cancelTimer = clock.schedule(connect, Math.max(ms, limitWait))
   }
 
   const reconnect = () => {
@@ -94,7 +122,7 @@ export const startShard = ({ token, gatewayUrl, clock, onReady, onFatal }: Shard
         const { heartbeat_interval: interval } = payload.d as { heartbeat_interval: number }
         cancelTimer()
         cancelTimer = clock.schedule(() => heartbeat(interval), interval * clock.random())
-        lastIdentifyAt = clock.now()
+        identifiedAt.push(clock.now())
         send({
           op: Op.Identify,
           d: {

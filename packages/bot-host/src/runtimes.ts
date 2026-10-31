@@ -68,6 +68,10 @@ export const createBotRuntimes = ({
       gatewayUrl,
       clock,
       onReady: () => log(`Bot ${botId} is online.`),
+      onIdentifyBudgetSpent: (waitMs) =>
+        log(
+          `Bot ${botId} is offline: it spent its daily Gateway Identify budget. Reconnecting in ${Math.ceil(waitMs / 60_000)} minutes.`,
+        ),
       onFatal: (code) => {
         log(`Bot ${botId} is offline: Discord closed its Gateway session with code ${code}.`)
         stop(botId, runtime)

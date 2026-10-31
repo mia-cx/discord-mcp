@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { startShard } from '../src/shard.ts'
+import { nextIdentifyAt, startShard } from '../src/shard.ts'
 import { DEFAULT_HEARTBEAT_INTERVAL_MS, fakeGateway, manualClock } from '../src/testing.ts'
 
 const TOKEN = 'private-bot-token'
@@ -19,6 +19,7 @@ const start = async () => {
     clock,
     onReady: () => {},
     onFatal,
+    onIdentifyBudgetSpent: () => {},
   })
   cleanup.push(gateway.close, shard.stop)
   return { gateway, clock, onFatal, shard }
@@ -92,5 +93,21 @@ describe('the shard supervisor', () => {
 
     shard.stop()
     await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(1000))
+  })
+
+  it.each([
+    { case: 'a first Identify goes now', identifiedAt: [], next: 100_000 },
+    {
+      case: 'a recent Identify holds the next for five seconds',
+      identifiedAt: [98_000],
+      next: 103_000,
+    },
+    {
+      case: 'a spent daily budget waits for the oldest Identify to age out',
+      identifiedAt: Array.from({ length: 500 }, (_, i) => i * 100),
+      next: 24 * 60 * 60 * 1000,
+    },
+  ])('schedules Identifies within Discord limits: $case', ({ identifiedAt, next }) => {
+    expect(nextIdentifyAt(identifiedAt, 100_000)).toBe(next)
   })
 })
