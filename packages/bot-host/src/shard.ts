@@ -51,6 +51,14 @@ export const nextIdentifyAt = (identifiedAt: ReadonlyArray<number>, now: number)
   return Math.max(now, latest + IDENTIFY_INTERVAL_MS, budgetReopens)
 }
 
+/** What a shard needs to resume its Gateway session, possibly from another process. */
+export interface ShardSession {
+  readonly sessionId: string
+  readonly resumeGatewayUrl: string
+  /** The last dispatch's sequence number; Discord replays every dispatch after it. */
+  readonly sequence: number
+}
+
 export interface ShardOptions {
   readonly token: string
   readonly gatewayUrl: string
