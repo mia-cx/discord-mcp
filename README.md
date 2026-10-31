@@ -81,7 +81,8 @@ Both paths require OAuth and bot credentials on every HTTP request.
 | `discord_workflow_list` | List the bot's workflows, what each runs with, and who changed them. |
 | `discord_workflow_enable` | Run a workflow revision on the bot's events and show its grants. |
 | `discord_workflow_disable` | Stop running a workflow. |
-| `discord_workflow_delete` | Delete a workflow and its revisions. |
+| `discord_workflow_delete` | Delete a workflow, its revisions, its state, and its logs. |
+| `discord_workflow_logs` | Read the bot's recent workflow runs: outcomes, errors, and console output. |
 | `discord_voice_join` | Join a voice channel to play audio there. [Bot hosting](#bot-hosting) only. |
 | `discord_voice_leave` | Leave a server's voice channel. Bot hosting only. |
 
@@ -169,6 +170,27 @@ may receive partial objects. Each workflow receives only the events its own inte
 A guild's events run in order; interactions run at once. The bot's own messages are not delivered. Grants work as for scripts. A
 workflow may also answer the interaction it is handling (`reply`, `deferReply`, `editReply`,
 `followUp`) with the `interaction` and `webhook` families, and set the bot's presence.
+
+A workflow keeps state between events in its own key-value store:
+
+```ts
+import { kv } from 'textile'
+
+const count = ((await kv.get('count')) ?? 0) + 1
+await kv.set('count', count)
+```
+
+Values are anything JSON can hold. State belongs to the workflow, not a revision: it lasts
+across events, revisions, and restarts, and goes when the workflow is deleted. A workflow's
+keys and values take at most 1 MiB together, and a key at most 512 bytes; a `set` past
+either throws and stores nothing. Writes from different guilds' events can interleave, and
+the last one wins.
+
+`discord_workflow_logs` shows the bot's recent runs, newest first: each run's event,
+outcome, error, and console output, filtered by workflow or to failures only. A run keeps up
+to 16,384 characters of output; one that timed out or crashed keeps none. Bot and interaction tokens in
+logs and errors read `[redacted]`. Runs stay readable for 7 days, up to the newest 1,000 per
+workflow. Bot hosts delete expired runs at startup, and at most hourly while workflows run.
 
 Anyone with relay access and the bot's token manages its workflows. Every publish, enable,
 disable, and delete is recorded with the acting human's Discord user ID, and
