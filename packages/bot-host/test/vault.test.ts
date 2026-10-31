@@ -1,5 +1,6 @@
 import { inMemoryStorage } from '@discord-mcp/storage/testing'
 import { expect, it } from 'vitest'
+import type { ShardSession } from '../src/shard.ts'
 import { createTokenVault } from '../src/vault.ts'
 
 it('stores bot tokens that only the vault key can read', async () => {
@@ -35,6 +36,7 @@ it('stores shard sessions that only the vault key can read, alongside their toke
     sessionId: 'private-session-id',
     resumeGatewayUrl: 'wss://resume.discord.test',
     sequence: 42,
+    shardCount: 3,
   }
 
   await vault.store('111111111111111111', 'private-bot-token')
@@ -50,5 +52,22 @@ it('stores shard sessions that only the vault key can read, alongside their toke
 
   await vault.clearSession('111111111111111111', 0)
   expect(await vault.loadSessions()).toEqual([])
+  await storage.close()
+})
+
+it('reads a session stored before bots sharded as shard 0 of 1', async () => {
+  const storage = await inMemoryStorage()
+  const vault = createTokenVault(Buffer.alloc(32, 1), storage)
+  // The shape #45 sealed, with no shard count.
+  const unsharded: Omit<ShardSession, 'shardCount'> = {
+    sessionId: 'old',
+    resumeGatewayUrl: 'wss://resume.discord.test',
+    sequence: 9,
+  }
+
+  await vault.store('111111111111111111', 'private-bot-token')
+  await vault.storeSession('111111111111111111', 0, unsharded as ShardSession)
+
+  expect((await vault.loadSessions())[0]?.session).toEqual({ ...unsharded, shardCount: 1 })
   await storage.close()
 })
