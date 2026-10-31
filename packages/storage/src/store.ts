@@ -1,7 +1,8 @@
 import { fileURLToPath } from 'node:url'
-import { and, desc, eq, isNotNull, sql } from 'drizzle-orm'
+import { and, desc, eq, isNotNull, isNull, sql } from 'drizzle-orm'
 import type { PgDatabase, PgQueryResultHKT } from 'drizzle-orm/pg-core'
 import type { Storage, WorkflowChange, WorkflowRevision } from './index.ts'
+import type { AdvisoryLocks } from './locks.ts'
 import * as schema from './schema.ts'
 
 /** Drizzle wraps driver errors in "Failed query"; the driver's own message says what went wrong. */
@@ -23,6 +24,7 @@ const revisionColumns = {
   grants: revisions.grants,
   events: revisions.events,
   intents: revisions.intents,
+  schedules: revisions.schedules,
   publishedBy: revisions.publishedBy,
   publishedAt: revisions.publishedAt,
 }
@@ -33,7 +35,14 @@ const record = (
   change: Pick<WorkflowChange, 'workflowName' | 'action' | 'revision' | 'actorId'>,
 ) => db.insert(changes).values({ botId, ...change })
 
-export const createStorage = (db: Db, close: () => Promise<void>): Storage => ({
+/** Advisory lock names, so other locks can never collide with the scheduler's. */
+const scheduleLock = (botId: string) => `textile-schedules:${botId}`
+
+export const createStorage = (
+  db: Db,
+  locks: AdvisoryLocks,
+  close: () => Promise<void>,
+): Storage => ({
   storeSealedToken: async (botId, sealedToken) => {
     try {
       await db
@@ -151,7 +160,7 @@ export const createStorage = (db: Db, close: () => Promise<void>): Storage => ({
       const workflow = and(eq(workflows.botId, botId), eq(workflows.name, name))
       const [updated] = await tx
         .update(workflows)
-        .set({ enabledRevision: revision, updatedAt: sql`now()` })
+        .set({ enabledRevision: revision, scheduleCursor: null, updatedAt: sql`now()` })
         .where(
           revision === null
             ? workflow
@@ -209,5 +218,52 @@ export const createStorage = (db: Db, close: () => Promise<void>): Storage => ({
       .orderBy(desc(changes.id))
       .limit(limit),
 
-  close,
+  scheduledWorkflows: (botId) =>
+    db
+      .select({
+        botId: workflows.botId,
+        name: workflows.name,
+        revision: revisions.revision,
+        schedules: revisions.schedules,
+        cursor: workflows.scheduleCursor,
+      })
+      .from(revisions)
+      .innerJoin(
+        workflows,
+        and(
+          eq(workflows.id, revisions.workflowId),
+          eq(workflows.enabledRevision, revisions.revision),
+        ),
+      )
+      .where(
+        and(
+          sql`jsonb_array_length(${revisions.schedules}) > 0`,
+          botId === undefined ? undefined : eq(workflows.botId, botId),
+        ),
+      )
+      .orderBy(workflows.botId, workflows.name),
+
+  advanceScheduleCursor: async ({ botId, name, revision }, from, to) => {
+    const [advanced] = await db
+      .update(workflows)
+      .set({ scheduleCursor: to })
+      .where(
+        and(
+          eq(workflows.botId, botId),
+          eq(workflows.name, name),
+          eq(workflows.enabledRevision, revision),
+          from === null ? isNull(workflows.scheduleCursor) : eq(workflows.scheduleCursor, from),
+        ),
+      )
+      .returning({ id: workflows.id })
+    return advanced !== undefined
+  },
+
+  lockSchedules: (botId) => locks.lock(scheduleLock(botId)),
+  unlockSchedules: (botId) => locks.unlock(scheduleLock(botId)),
+
+  close: async () => {
+    await locks.close()
+    await close()
+  },
 })

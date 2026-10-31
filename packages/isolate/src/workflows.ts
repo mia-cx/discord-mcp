@@ -528,6 +528,7 @@ export const makeWorkflowHost = ({
         grants,
         events,
         intents: declared.intents,
+        schedules: [],
         actorId: caller.actorId,
       })
     },

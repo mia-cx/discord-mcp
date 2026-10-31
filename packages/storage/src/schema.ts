@@ -47,6 +47,11 @@ export const workflows = pgTable(
     latestRevision: integer('latest_revision').notNull(),
     /** The revision the dispatcher runs, or null while disabled. */
     enabledRevision: integer('enabled_revision'),
+    /**
+     * The instant the enabled revision's schedules have fired up to. Null until the scheduler first
+     * sees the revision, so enabling one never fires ticks from before.
+     */
+    scheduleCursor: timestamp('schedule_cursor', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -66,6 +71,8 @@ export const workflowRevisions = pgTable(
     events: jsonb('events').$type<ReadonlyArray<string>>().notNull(),
     /** The Gateway intents its clients declare, as a bitfield. */
     intents: integer('intents').notNull(),
+    /** The cron expressions its clients declare, in UTC. */
+    schedules: jsonb('schedules').$type<ReadonlyArray<string>>().notNull().default([]),
     publishedBy: text('published_by').notNull(),
     publishedAt: timestamp('published_at', { withTimezone: true }).notNull().defaultNow(),
   },

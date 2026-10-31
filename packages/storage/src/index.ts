@@ -1,6 +1,7 @@
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
-import { Pool } from 'pg'
+import { Client, Pool } from 'pg'
+import { advisoryLocks } from './locks.ts'
 import * as schema from './schema.ts'
 import { createStorage, migrationsFolder, rootMessage } from './store.ts'
 
@@ -22,6 +23,8 @@ export interface WorkflowRevision {
   readonly events: ReadonlyArray<string>
   /** The Gateway intents its clients declare, as a bitfield. */
   readonly intents: number
+  /** The cron expressions its clients declare, in UTC. */
+  readonly schedules: ReadonlyArray<string>
   /** The Discord user ID of the human who published it. */
   readonly publishedBy: string
   readonly publishedAt: Date
@@ -49,7 +52,18 @@ export interface PublishWorkflow {
   readonly grants: WorkflowGrants
   readonly events: ReadonlyArray<string>
   readonly intents: number
+  readonly schedules: ReadonlyArray<string>
   readonly actorId: string
+}
+
+/** An enabled workflow revision that runs on schedules, and how far they have fired. */
+export interface ScheduledWorkflow {
+  readonly botId: string
+  readonly name: string
+  readonly revision: number
+  readonly schedules: ReadonlyArray<string>
+  /** Every tick up to this instant has fired; null until the scheduler first sees the revision. */
+  readonly cursor: Date | null
 }
 
 /**
@@ -78,7 +92,10 @@ export interface Storage {
     name: string,
     revision?: number,
   ) => Promise<WorkflowRevision | undefined>
-  /** Run `revision`, or nothing when null. False when the workflow or revision does not exist. */
+  /**
+   * Run `revision`, or nothing when null, and restart its schedules from the next tick. False when
+   * the workflow or revision does not exist.
+   */
   readonly setEnabledRevision: (
     botId: string,
     name: string,
@@ -91,6 +108,24 @@ export interface Storage {
   readonly enabledRevisions: (botId?: string) => Promise<ReadonlyArray<WorkflowRevision>>
   /** A bot's most recent workflow changes, newest first, deleted workflows included. */
   readonly workflowChanges: (botId: string, limit: number) => Promise<ReadonlyArray<WorkflowChange>>
+  /** Every enabled revision with schedules, for one bot or for all of them. */
+  readonly scheduledWorkflows: (botId?: string) => Promise<ReadonlyArray<ScheduledWorkflow>>
+  /**
+   * Move a scheduled workflow's cursor from `from` to `to`. False, changing nothing, when its
+   * cursor is no longer `from` or another revision runs: someone else fired those ticks.
+   */
+  readonly advanceScheduleCursor: (
+    workflow: Pick<ScheduledWorkflow, 'botId' | 'name' | 'revision'>,
+    from: Date | null,
+    to: Date,
+  ) => Promise<boolean>
+  /**
+   * Take the Postgres session advisory lock that lets one process fire a bot's schedules. True
+   * while this process holds it, until `unlockSchedules`, `close`, or a lost connection releases
+   * it. Lock one bot at a time.
+   */
+  readonly lockSchedules: (botId: string) => Promise<boolean>
+  readonly unlockSchedules: (botId: string) => Promise<void>
   readonly close: () => Promise<void>
 }
 
@@ -107,17 +142,19 @@ const QUERY_TIMEOUT_MS = 30_000
 /**
  * Connect to Postgres and apply pending migrations before anything reads or writes.
  * `onError` hears connection failures outside a query, such as Postgres restarting; the pool
- * replaces the lost connection on next use.
+ * replaces the lost connection on next use. `url` must reach the primary directly, not through a
+ * transaction pooler, which can't hold the scheduler's session locks.
  */
 export const connectStorage = async (
   url: string,
   onError: (error: Error) => void,
 ): Promise<Storage> => {
-  const pool = new Pool({
+  const options = {
     connectionString: url,
     connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
     query_timeout: QUERY_TIMEOUT_MS,
-  })
+  }
+  const pool = new Pool(options)
   pool.on('error', onError)
   const db = drizzle(pool, { schema })
   try {
@@ -128,5 +165,19 @@ export const connectStorage = async (
       cause,
     })
   }
-  return createStorage(db, () => pool.end())
+  const locks = advisoryLocks(async (onLost) => {
+    // Keepalives notice a dead connection, whose locks Postgres has released, within minutes.
+    const client = new Client({ ...options, keepAlive: true })
+    client.on('error', (error) => {
+      onError(error)
+      onLost()
+    })
+    client.on('end', onLost)
+    await client.connect()
+    return {
+      query: async (text, values) => (await client.query(text, [...values])).rows,
+      close: () => client.end(),
+    }
+  })
+  return createStorage(db, locks, () => pool.end())
 }
