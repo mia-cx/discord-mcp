@@ -15,6 +15,13 @@
       "when": 1793427414593,
       "tag": "0001_shard_sessions",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1793430990868,
+      "tag": "0002_workflows",
+      "breakpoints": true
     }
   ]
 }
