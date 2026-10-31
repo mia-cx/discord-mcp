@@ -387,8 +387,8 @@ the channel; receiving always posts one first.
 ##### Receiving
 
 With `receive: true`, the bot joins deafened and posts a notice in the voice channel's chat, which
-needs Send Messages there. Its buttons let anyone opt out: of this bot in this server, or of every
-bot Textile hosts. Each reply is visible only to the person who clicked, and offers an undo. Once
+needs Send Messages there. Its buttons let anyone opt out: **Opt out here** of this bot in this
+server, or **Opt out of all Textile bots** of every bot Textile hosts. Each reply is visible only to the person who clicked, and offers an undo. Once
 the notice is up the bot undeafens, and the socket sends:
 
 - A binary message per packet: the speaker's user ID as 8 bytes, big-endian, then one packet in

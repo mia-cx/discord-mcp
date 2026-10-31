@@ -14,7 +14,7 @@ const DEFERRED_UPDATE = 6
 
 /** The notice's two buttons, and the undo that follows each. */
 const Buttons = {
-  'opt-out:bot': { label: 'Opt out of this bot', optedOut: true, scope: 'bot' },
+  'opt-out:bot': { label: 'Opt out here', optedOut: true, scope: 'bot' },
   'opt-out:all': { label: 'Opt out of all Textile bots', optedOut: true, scope: 'all' },
   'undo:bot': { label: 'Undo', optedOut: false, scope: 'bot' },
   'undo:all': { label: 'Undo', optedOut: false, scope: 'all' },

@@ -394,8 +394,14 @@ describe('receiving voice', () => {
           components: [
             expect.objectContaining({
               components: [
-                expect.objectContaining({ custom_id: 'textile:voice:opt-out:bot' }),
-                expect.objectContaining({ custom_id: 'textile:voice:opt-out:all' }),
+                expect.objectContaining({
+                  label: 'Opt out here',
+                  custom_id: 'textile:voice:opt-out:bot',
+                }),
+                expect.objectContaining({
+                  label: 'Opt out of all Textile bots',
+                  custom_id: 'textile:voice:opt-out:all',
+                }),
               ],
             }),
           ],
