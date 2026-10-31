@@ -36,9 +36,12 @@ const addFormats = (ajvFormats as unknown as { readonly default: (instance: Ajv2
 
 const ajv = new Ajv2020({ allErrors: true, strict: false, validateFormats: true })
 addFormats(ajv)
+// The catalog builds a fresh schema object per call and Ajv caches by identity, so compile once
+// per operation instead.
+const validators = new Map<string, ReturnType<typeof ajv.compile>>()
 
 /**
- * The five operations Discord's own spec marks OAuth2-only.
+ * The six operations that reject a bot token.
  *
  * They are refused *only* under a bot profile — an OAuth2 profile can call them — so the message
  * must say which profile to use rather than implying the operation is unavailable.
@@ -115,8 +118,15 @@ export const validateQueryParams = (
       )
     }
   }
+  // Nulls, whether alone or in a list, mean "not supplied" and are never sent.
+  const values = (key: string) => [query[key]].flat().filter((v) => v != null)
   for (const required of op.requiredQuery) {
-    if (query[required] === undefined) issues.push(`query.${required}: required but not supplied.`)
+    if (values(required).length === 0) issues.push(`query.${required}: required but not supplied.`)
+  }
+  for (const key of Object.keys(query)) {
+    if (values(key).some((v) => typeof v === 'object')) {
+      issues.push(`query.${key}: must be a string, number, boolean, or a list of them.`)
+    }
   }
 
   if (issues.length > 0) {
@@ -126,11 +136,7 @@ export const validateQueryParams = (
   }
 
   const params = new URLSearchParams()
-  for (const [key, value] of Object.entries(query)) {
-    if (value === undefined || value === null) continue
-    if (Array.isArray(value)) for (const v of value) params.append(key, String(v))
-    else params.set(key, String(value))
-  }
+  for (const key of Object.keys(query)) for (const v of values(key)) params.append(key, String(v))
   return Effect.succeed(params)
 }
 
@@ -169,7 +175,8 @@ export const validateBody = (
 
   return Effect.try({
     try: () => {
-      const validate = ajv.compile(schema)
+      const validate = validators.get(op.operationId) ?? ajv.compile(schema)
+      validators.set(op.operationId, validate)
       if (validate(body)) return
       throw (validate.errors ?? []).map(
         (e: { instancePath: string; message?: string }) =>

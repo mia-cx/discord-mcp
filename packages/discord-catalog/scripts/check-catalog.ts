@@ -111,13 +111,15 @@ for (const op of operations) {
   }
 }
 
-// --- the five bot-incompatible operations are recorded as such -------------------------------
+// --- the six bot-incompatible operations are recorded as such --------------------------------
 const OAUTH_ONLY = [
   'get_current_user_application_entitlements',
   'get_application_user_role_connection',
   'update_application_user_role_connection',
   'delete_application_user_role_connection',
   'get_my_guild_member',
+  // The spec lists BotToken here; Discord rejects it, so overrides.json corrects the entry.
+  'set_guild_application_command_permissions',
 ]
 for (const id of OAUTH_ONLY) {
   const op = byId.get(id)
@@ -135,7 +137,7 @@ const unexpectedlyOauthOnly = operations.filter(
 for (const op of unexpectedlyOauthOnly) {
   fail(
     'bot-incompatible',
-    `${op.operationId} rejects a bot token but is not in the expected set of five. The pin changed; re-derive the list.`,
+    `${op.operationId} rejects a bot token but is not in the expected set of six. The pin changed; re-derive the list.`,
   )
 }
 

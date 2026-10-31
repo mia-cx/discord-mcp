@@ -83,31 +83,15 @@ describe('McpInput conformance', () => {
     )
   })
 
-  it('advertises additionalProperties:false that nothing on the MCP path enforces', async () => {
-    // Worth stating plainly, because it shapes how schemas must be written.
-    //
-    // `toStandardJSONSchemaV1` emits `additionalProperties: false`, but Effect decodes leniently by
-    // default and MCP's `~standard.validate` is lenient too. Worse, MCP validates *before* the
-    // handler runs and passes the validated value on, so excess keys are already gone by the time
-    // our decode sees the arguments — `onExcessProperty: 'error'` in the registry cannot fire for
-    // them on this path (it still guards direct handler calls from workflows and tests).
-    //
-    // The consequence: a field that must be *rejected* has to be declared, not omitted. See
-    // `forbiddenUnderV2` in discord-presentations, where content/embeds/stickerIds/poll are
-    // declared as `Never` so their presence is a decode failure that names them, instead of being
-    // silently stripped and losing the author's intent.
+  it('enforces the additionalProperties:false it advertises on the MCP path', async () => {
+    // MCP validates before the handler runs and passes the validated value on, so a lenient
+    // `~standard.validate` would strip a misspelled argument before the registry's strict decode.
     const schema = Schema.Struct({ a: Schema.String })
     const excess = { a: 'x', unexpectd: 1 }
 
     expect(toMcpInputJsonSchema(schema).additionalProperties).toBe(false)
-    expect((await McpInput(schema)['~standard'].validate(excess)).issues).toBeUndefined()
-
-    const lenient = await Effect.runPromiseExit(Schema.decodeUnknownEffect(schema)(excess))
-    const strict = await Effect.runPromiseExit(
-      Schema.decodeUnknownEffect(schema, { onExcessProperty: 'error', errors: 'all' })(excess),
-    )
-    expect(lenient._tag).toBe('Success')
-    expect(strict._tag).toBe('Failure')
+    const { issues } = await McpInput(schema)['~standard'].validate(excess)
+    expect(issues?.map((issue) => issue.path)).toEqual([['unexpectd']])
   })
 
   it('is idempotent, so registering a shared schema twice is safe', () => {

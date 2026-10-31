@@ -1,5 +1,11 @@
 import { createHash, randomBytes } from 'node:crypto'
 import {
+  isCountedRejection,
+  mayHaveReachedDiscord,
+  type RejectionLog,
+  rejectionLog,
+} from '@discord-mcp/discord-api/relay'
+import {
   type AuthInfo,
   bearerAuthChallengeResponse,
   OAuthError,
@@ -18,6 +24,8 @@ const CLIENT_SECONDS = 30 * 24 * 3600
 const REFRESH_SECONDS = 30 * 24 * 3600
 const MAX_CODES = 10_000
 const BODY_LIMIT = 16_384
+const DISCORD_TIMEOUT_MS = 15_000
+const REFUSAL_RETRY_SECONDS = '60'
 const CONSENT_STYLES =
   'body{font:1rem/1.5 system-ui;max-width:60ch;margin:2rem auto;padding:0 1rem;color:#111;background:#fff}form{display:flex;flex-wrap:wrap;gap:.75rem}button{font:inherit;min-height:44px;padding:.5rem 1rem}'
 const CONSENT_STYLE_HASH = createHash('sha256').update(CONSENT_STYLES).digest('base64')
@@ -123,10 +131,12 @@ const readBody = async (request: Request) => {
  * Only spent authorization-code hashes live in memory, until their one-minute expiry.
  * Refresh envelopes enclose Discord's rotating refresh token, so Discord rejects any replay.
  * `discordFetch` is the external network seam, shared by login and per-request revocation checks.
+ * `rejections` is the process's shared count of Discord's 401/403/429 responses.
  */
 export const createDiscordLogin = (
   config: LoginConfig,
   discordFetch: typeof fetch = fetch,
+  rejections: RejectionLog = rejectionLog(),
 ): {
   authorize: (request: Request) => Promise<AuthInfo | Response>
   fetch: (request: Request) => Promise<Response | undefined>
@@ -195,12 +205,35 @@ export const createDiscordLogin = (
       ?.slice(cookieName.length + 1)
     if (nonce === undefined || nonce !== claims.nonce) throw new Error('Wrong browser state')
   }
-  const discordJson = async (path: string, init: RequestInit = {}) => {
+  /** `scope` groups Discord's rejections, which this process stops sending after a threshold. */
+  const discordJson = async (path: string, scope: string, init: RequestInit = {}) => {
+    const admission = rejections.admit([scope])
+    if ('refused' in admission) {
+      // A full in-flight cap clears in moments; a tripped threshold takes its window.
+      const { refused } = admission
+      throw new DiscordUnavailable(
+        429,
+        refused._tag === 'DiscordRateLimitError'
+          ? String(Math.ceil(refused.retryAfterMs / 1000))
+          : REFUSAL_RETRY_SECONDS,
+      )
+    }
     const response = await discordFetch(`https://discord.com/api/v10${path}`, {
       ...init,
       redirect: 'error',
-      signal: AbortSignal.timeout(15_000),
-    })
+      signal: AbortSignal.timeout(DISCORD_TIMEOUT_MS),
+    }).then(
+      (answer) => {
+        admission.settle(isCountedRejection(answer.status))
+        return answer
+      },
+      // A timed-out call may have reached Discord, so it counts; a refused connection stays free.
+      // Neither reads as a rejected grant, or a refresh would report a live login as expired.
+      (error: unknown) => {
+        admission.settle(mayHaveReachedDiscord(error))
+        throw new DiscordUnavailable(502, '1')
+      },
+    )
     if (response.status === 401 || response.status === 400) {
       throw new OAuthError(
         OAuthErrorCode.InvalidToken,
@@ -214,11 +247,14 @@ export const createDiscordLogin = (
           ? (response.headers.get('retry-after') ?? '1')
           : '1',
       )
-    return response.json() as Promise<unknown>
+    // A connection that drops while the body streams is a network failure too, not a rejection.
+    return response.json().catch(() => {
+      throw new DiscordUnavailable(502, '1')
+    }) as Promise<unknown>
   }
   const identity = async (token: string, subject?: string) => {
     const auth = Schema.decodeUnknownSync(Authorization)(
-      await discordJson('/oauth2/@me', {
+      await discordJson('/oauth2/@me', `login/${subject ?? 'new'}`, {
         headers: { authorization: `Bearer ${token}` },
       }),
     )
@@ -233,13 +269,16 @@ export const createDiscordLogin = (
     )
       throw new OAuthError(OAuthErrorCode.InvalidToken, 'Invalid Discord authorization.')
     if (allowedUsers !== undefined && !allowedUsers.has(auth.user.id)) {
-      throw new DiscordAccessDenied('Your Discord account is not allowed to use this relay.')
+      throw new DiscordAccessDenied(
+        'Your Discord account is not on this relay’s allowlist. Ask the operator for access.',
+      )
     }
     return auth.user.id
   }
-  const exchange = async (parameters: Record<string, string>) => {
+  /** `subject` keeps a refresh out of the scope that anonymous sign-ins share. */
+  const exchange = async (parameters: Record<string, string>, subject = 'new') => {
     const tokens = Schema.decodeUnknownSync(TokenResponse)(
-      await discordJson('/oauth2/token', {
+      await discordJson('/oauth2/token', `login/token/${subject}`, {
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
@@ -456,6 +495,7 @@ export const createDiscordLogin = (
       } catch (error) {
         if (!(error instanceof DiscordAccessDenied)) throw error
         destination.searchParams.set('error', 'access_denied')
+        destination.searchParams.set('error_description', error.message)
       }
     }
     destination.searchParams.set('state', String(flow.state))
@@ -495,11 +535,13 @@ export const createDiscordLogin = (
       const grant = await open('refresh', text(params.get('refresh_token')))
       if (grant.clientId !== clientId || !['mcp', null].includes(params.get('scope')))
         throw new Error('Wrong refresh binding')
-      const tokens = await exchange({
-        grant_type: 'refresh_token',
-        refresh_token: text(grant.discordRefresh),
-      })
-      return issue(tokens, clientId, await identity(tokens.access_token, text(grant.sub)))
+      const tokens = await exchange(
+        { grant_type: 'refresh_token', refresh_token: text(grant.discordRefresh) },
+        text(grant.sub),
+      )
+      // Discord has revoked the old refresh token, so nothing may fail between here and the reply.
+      // Discord issued these to the sealed subject; every MCP request rechecks it and the allowlist.
+      return issue(tokens, clientId, text(grant.sub))
     }
 
     return json(400, { error: 'unsupported_grant_type' })

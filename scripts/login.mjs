@@ -6,6 +6,7 @@ import { createServer } from 'node:http'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { parseArgs } from 'node:util'
+import { locked } from './lock.mjs'
 
 // Dependency-free OAuth client. Bot tokens never enter the login flow or its output file.
 const { values, positionals } = parseArgs({
@@ -54,9 +55,16 @@ const post = async (path, body, type = 'application/x-www-form-urlencoded') => {
 }
 const store = async (credentials, replace = false) => {
   await mkdir(dirname(output), { recursive: true, mode: 0o700 })
-  const target = replace ? `${output}.${random()}.tmp` : output
-  await writeFile(target, `${JSON.stringify(credentials, null, 2)}\n`, { mode: 0o600, flag: 'wx' })
-  if (replace) await rename(target, output)
+  const write = async () => {
+    const target = replace ? `${output}.${random()}.tmp` : output
+    await writeFile(target, `${JSON.stringify(credentials, null, 2)}\n`, {
+      mode: 0o600,
+      flag: 'wx',
+    })
+    if (replace) await rename(target, output)
+  }
+  // Running bridges refresh under this lock; one that overlaps it after a crash keeps this login.
+  await (replace ? locked(output, write) : write())
   process.stderr.write(`Login saved to ${output} (owner-only permissions).\n`)
 }
 
@@ -94,8 +102,12 @@ const store = async (credentials, replace = false) => {
       return
     }
     if (url.searchParams.has('error')) {
-      response.writeHead(400).end('Login cancelled. Run the login command to try again.')
-      fail(new Error('Discord login cancelled.'))
+      // The relay describes an allowlist denial; a bare error means the login was cancelled.
+      const reason =
+        url.searchParams.get('error_description') ??
+        'Login cancelled. Run the login command to try again.'
+      response.writeHead(400).end(reason)
+      fail(new Error(reason))
       return
     }
     const code = url.searchParams.get('code')

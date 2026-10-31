@@ -58,7 +58,7 @@ interface RawOperation {
   security?: ReadonlyArray<Record<string, unknown>>
   requestBody?: {
     required?: boolean
-    content: Record<string, { schema?: { $ref?: string } }>
+    content: Record<string, { schema?: { $ref?: string } & Record<string, unknown> }>
   }
   responses?: Record<string, { content?: Record<string, { schema?: { $ref?: string } }> }>
 }
@@ -115,17 +115,34 @@ const closureOf = (roots: ReadonlyArray<string>, schemas: Record<string, unknown
   return [...seen].sort()
 }
 
-/** Rewrite `#/components/schemas/X` to `#/$defs/X` so the map is a self-contained JSON Schema. */
-const rewriteRefs = (node: unknown): unknown => {
-  if (Array.isArray(node)) return node.map(rewriteRefs)
+/** Request fields holding a permission bitfield, which Discord sends and accepts as a string. */
+const BITFIELD_FIELDS = new Set(['allow', 'deny', 'permissions', 'default_member_permissions'])
+
+/**
+ * Rewrite `#/components/schemas/X` to `#/$defs/X` so the map is a self-contained JSON Schema, and
+ * correct two spec errors that would reject valid bodies: an empty `enum`, which no validator
+ * compiles, and permission bitfields typed only as integers.
+ */
+const rewriteRefs = (node: unknown, field?: string): unknown => {
+  if (Array.isArray(node)) return node.map((item) => rewriteRefs(item))
   if (node === null || typeof node !== 'object') return node
 
   const out: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    if (key === 'enum' && Array.isArray(value) && value.length === 0) continue
     out[key] =
       key === '$ref' && typeof value === 'string' && value.startsWith('#/components/schemas/')
         ? `#/$defs/${value.slice('#/components/schemas/'.length)}`
-        : rewriteRefs(value)
+        : key === 'properties' && value !== null && typeof value === 'object'
+          ? Object.fromEntries(
+              Object.entries(value).map(([name, schema]) => [name, rewriteRefs(schema, name)]),
+            )
+          : rewriteRefs(value)
+  }
+  const types = [out.type].flat()
+  if (BITFIELD_FIELDS.has(field ?? '') && types.includes('integer') && !types.includes('string')) {
+    out.type = [...types, 'string']
+    out.pattern = '^[0-9]+$'
   }
   return out
 }
@@ -172,6 +189,9 @@ const schemaRefs = (op: RawOperation) => {
   const bodyRef = contentTypes
     .map((ct) => refName(bodyContent[ct]?.schema?.$ref))
     .find((n): n is string => n !== undefined)
+  // A JSON body declared inline rather than by reference still has a schema to validate against.
+  const jsonBody = bodyContent['application/json']?.schema
+  const inlineBody = bodyRef === undefined && jsonBody?.$ref === undefined ? jsonBody : undefined
 
   const okResponse =
     op.responses?.['200'] ?? op.responses?.['201'] ?? op.responses?.['204'] ?? undefined
@@ -179,6 +199,7 @@ const schemaRefs = (op: RawOperation) => {
   return {
     contentTypes,
     bodyRef,
+    inlineBody,
     responseRef: refName(Object.values(okResponse?.content ?? {})[0]?.schema?.$ref),
   }
 }
@@ -187,6 +208,7 @@ const schemaRefs = (op: RawOperation) => {
 const detailOf = (
   op: RawOperation,
   merged: ReadonlyArray<RawParameter>,
+  inlineBody: Record<string, unknown> | undefined,
 ): OperationDetail | undefined => {
   const querySchemas: Record<string, unknown> = {}
   const paramDescriptions: Record<string, string> = {}
@@ -196,6 +218,7 @@ const detailOf = (
   }
   const empty =
     op.description === undefined &&
+    inlineBody === undefined &&
     Object.keys(querySchemas).length === 0 &&
     Object.keys(paramDescriptions).length === 0
 
@@ -203,6 +226,9 @@ const detailOf = (
     ? undefined
     : {
         ...(op.description === undefined ? {} : { description: op.description }),
+        ...(inlineBody === undefined
+          ? {}
+          : { bodySchema: rewriteRefs(inlineBody) as Record<string, unknown> }),
         querySchemas,
         paramDescriptions,
       }
@@ -331,12 +357,14 @@ const buildOperation = (
     path,
     method,
   )
-  const { contentTypes, bodyRef, responseRef } = schemaRefs(op)
+  const { contentTypes, bodyRef, inlineBody, responseRef } = schemaRefs(op)
 
-  const detail = detailOf(op, merged)
+  const detail = detailOf(op, merged, inlineBody)
   if (detail !== undefined) ctx.details[op.operationId] = detail
 
-  const roots = [bodyRef, responseRef].filter((n): n is string => n !== undefined)
+  const inlineRefs = new Set<string>()
+  collectRefs(inlineBody, inlineRefs)
+  const roots = [bodyRef, responseRef, ...inlineRefs].filter((n): n is string => n !== undefined)
   if (roots.length > 0) ctx.closures[op.operationId] = closureOf(roots, ctx.spec.components.schemas)
 
   const override = ctx.overrides[op.operationId]

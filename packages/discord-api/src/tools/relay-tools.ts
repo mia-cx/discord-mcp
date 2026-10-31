@@ -55,25 +55,28 @@ const search = defineTool({
     cursor?: string
   }) =>
     Effect.map(OperationCatalog, (catalog) => {
-      const { family, ...filters } = args
-      const page = catalog.search({
-        ...filters,
-        auth: 'bot',
-        limit: args.limit ?? 20,
-        ...(family === undefined ? {} : { family: family as OperationEntry['family'] }),
-      })
+      const { family, cursor, limit = 20, ...filters } = args
+      // Filter before paging, so every page is full and the cursor counts callable operations.
+      const hits = catalog
+        .search({
+          ...filters,
+          auth: 'bot',
+          limit: Number.MAX_SAFE_INTEGER,
+          ...(family === undefined ? {} : { family: family as OperationEntry['family'] }),
+        })
+        .hits.filter(({ operation }) => callable(operation))
+      const start = Number.parseInt(cursor ?? '0', 10) || 0
+      const next = start + limit
       return {
-        results: page.hits
-          .filter(({ operation }) => callable(operation))
-          .map(({ operation }) => ({
-            operationId: operation.operationId,
-            method: operation.method,
-            path: operation.path,
-            family: operation.family,
-            risk: operation.risk,
-            permissions: requiredPermissions(operation.operationId),
-          })),
-        ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+        results: hits.slice(start, next).map(({ operation }) => ({
+          operationId: operation.operationId,
+          method: operation.method,
+          path: operation.path,
+          family: operation.family,
+          risk: operation.risk,
+          permissions: requiredPermissions(operation.operationId),
+        })),
+        ...(next < hits.length ? { nextCursor: String(next) } : {}),
       }
     }),
 })
@@ -153,7 +156,7 @@ const dispatcher = (risk: Exclude<RiskClass, 'credential'>) =>
         yield* validateBody(operation, args.body, yield* catalog.bodySchema(operation.operationId))
 
         const rest = yield* DiscordRest
-        return yield* rest.request({
+        const result = yield* rest.request({
           method: operation.method,
           route: buildRoute(operation, path),
           operationFamily: operation.family,
@@ -161,6 +164,10 @@ const dispatcher = (risk: Exclude<RiskClass, 'credential'>) =>
           ...(args.body === undefined ? {} : { body: args.body }),
           ...(args.auditLogReason === undefined ? {} : { auditLogReason: args.auditLogReason }),
         })
+        // @discordjs/rest returns non-JSON responses as raw bytes: widget images, and the empty
+        // body of a 204.
+        if (!(result instanceof ArrayBuffer)) return result
+        return result.byteLength === 0 ? {} : { base64: Buffer.from(result).toString('base64') }
       }),
   })
 

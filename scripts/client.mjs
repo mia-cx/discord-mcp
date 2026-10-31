@@ -1,19 +1,50 @@
 #!/usr/bin/env node
 import { randomBytes } from 'node:crypto'
-import { readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { setTimeout as delay } from 'node:timers/promises'
+import { locked } from './lock.mjs'
 
 // A private, per-user stdio connection to the hosted relay. No credentials in agent configs.
 const directory = process.env.DISCORD_MCP_CONFIG_DIR ?? join(homedir(), '.config', 'discord-mcp')
 const loginFile = join(directory, 'login.json')
 const REFRESH_EARLY_SECONDS = 24 * 3600
-// A refresh request times out after 15 seconds, so an older lock belongs to a crashed bridge.
-const LOCK_STALE_MS = 30_000
+// Longer than the relay's 15-second Discord call, so the bridge never abandons a rotation.
+const REFRESH_TIMEOUT_MS = 30_000
+const OVERLAP_POLL_MS = 250
+const UNSEEN_OVERLAP_WAIT_MS = 2_000
+const LOOPBACK = ['127.0.0.1', 'localhost', '[::1]']
+// A 2026-07-28 request names its own protocol version here; older clients negotiate it once.
+const VERSION_META_KEY = 'io.modelcontextprotocol/protocolVersion'
+const NAME_FIELDS = {
+  'tools/call': 'name',
+  'prompts/get': 'name',
+  'resources/read': 'uri',
+  'tasks/get': 'taskId',
+  'tasks/update': 'taskId',
+  'tasks/cancel': 'taskId',
+}
 const controllers = new Map()
 let protocol = '2025-06-18'
+
+/** The standard MCP headers the relay checks against a message's body. */
+const mcpHeaders = (message) => {
+  const version = message.params?._meta?.[VERSION_META_KEY]
+  const name = message.params?.[NAME_FIELDS[message.method]]
+  return {
+    'mcp-protocol-version': typeof version === 'string' ? version : protocol,
+    ...(typeof message.method === 'string' ? { 'mcp-method': message.method } : {}),
+    ...(typeof name !== 'string'
+      ? {}
+      : {
+          'mcp-name': /^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$/.test(name)
+            ? name
+            : `=?base64?${Buffer.from(name).toString('base64')}?=`,
+        }),
+  }
+}
 
 const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`)
 const failure = (id, message) => send({ jsonrpc: '2.0', id, error: { code: -32000, message } })
@@ -32,7 +63,7 @@ const credentials = async () => {
       resource.username ||
       resource.password ||
       (resource.protocol !== 'https:' &&
-        !(resource.protocol === 'http:' && resource.hostname === '127.0.0.1'))
+        !(resource.protocol === 'http:' && LOOPBACK.includes(resource.hostname)))
     ) {
       throw new Error('Invalid credentials')
     }
@@ -42,38 +73,19 @@ const credentials = async () => {
   }
 }
 
-/** Run `task` while holding a lock file shared by every bridge using this login. */
-const locked = async (task) => {
-  const lock = `${loginFile}.lock`
-  for (;;) {
-    try {
-      await writeFile(lock, String(process.pid), { flag: 'wx', mode: 0o600 })
-      break
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error
-      const age = await stat(lock).then(
-        (lockStat) => Date.now() - lockStat.mtimeMs,
-        () => 0,
-      )
-      if (age > LOCK_STALE_MS) await rm(lock, { force: true })
-      else await delay(50)
-    }
-  }
-  try {
-    return await task()
-  } finally {
-    await rm(lock, { force: true })
-  }
-}
-
 /**
  * Replace `stale` with a rotated login. A refresh revokes the previous tokens, so bridges
- * take turns: whoever finds login.json already rotated uses that result instead.
+ * take turns: whoever finds login.json already rotated, or replaced, uses that login instead.
  */
 const refresh = (stale) =>
-  locked(async () => {
+  locked(loginFile, async (overlapped) => {
     const current = await readLogin()
     if (current.refresh_token !== stale.refresh_token) return current
+    /** The login another writer saved over `current` meanwhile, if any. */
+    const replaced = async () => {
+      const latest = await readLogin()
+      return latest.refresh_token === current.refresh_token ? undefined : latest
+    }
     const response = await fetch(new URL('/token', current.resource), {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -84,15 +96,21 @@ const refresh = (stale) =>
         resource: current.resource,
       }),
       redirect: 'error',
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
     })
     if (!response.ok) {
       const error = await response.json().catch(() => undefined)
       if (error?.error !== 'invalid_grant')
         throw new Error(`Discord login refresh failed (HTTP ${response.status}).`)
-      // A sign-in with --replace does not take the lock and may have rotated the file meanwhile.
-      const latest = await readLogin()
-      if (latest.refresh_token !== current.refresh_token) return latest
+      // A bridge that overlapped this one after a crash may have won the rotation; wait for it to
+      // save before calling the login expired. Wait the whole refresh timeout when this holder
+      // knows of an overlap, and briefly otherwise, since a third bridge can hide one from it.
+      const wait = (await overlapped()) ? REFRESH_TIMEOUT_MS : UNSEEN_OVERLAP_WAIT_MS
+      for (let waited = 0; waited < wait; waited += OVERLAP_POLL_MS) {
+        const latest = await replaced()
+        if (latest) return latest
+        await delay(OVERLAP_POLL_MS)
+      }
       throw new Error('Discord login expired. Run the login helper again.')
     }
     const tokens = await response.json()
@@ -111,6 +129,13 @@ const refresh = (stale) =>
     }
     const temporary = `${loginFile}.${randomBytes(16).toString('hex')}.tmp`
     await writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600, flag: 'wx' })
+    // An overlapping `login.mjs --replace` may have saved a new login meanwhile; it wins. Checking
+    // right before the rename leaves only that one step for it to land in.
+    const latest = await replaced()
+    if (latest) {
+      await rm(temporary, { force: true })
+      return latest
+    }
     await rename(temporary, loginFile)
     return next
   })
@@ -133,7 +158,7 @@ const forward = async (message) => {
           'x-discord-bot-token': bot,
           accept: 'application/json, text/event-stream',
           'content-type': 'application/json',
-          'mcp-protocol-version': protocol,
+          ...mcpHeaders(message),
         },
         body: JSON.stringify(message),
         redirect: 'error',

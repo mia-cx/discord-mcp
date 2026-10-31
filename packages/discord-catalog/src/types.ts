@@ -172,10 +172,6 @@ export const unpackOperation = (p: PackedOperation): OperationEntry => ({
   ...(p[17] === 0 ? {} : { override: p[17] }),
 })
 
-/** Discord's documentation is organised by resource, which maps onto our families. */
-export const docsUrlFor = (op: OperationEntry): string =>
-  `https://docs.discord.com/developers/docs/resources/${op.family}`
-
 /**
  * The lazily loaded tier: every component schema with `$ref` rewritten to `#/$defs/`, plus a
  * per-operation transitive closure expressed as name lists.
@@ -193,6 +189,8 @@ export interface SchemaMap {
 
 export interface OperationDetail {
   readonly description?: string
+  /** A JSON request body the spec declares inline rather than as a named component schema. */
+  readonly bodySchema?: Record<string, unknown>
   /** Query parameter JSON Schemas, keyed by parameter name. */
   readonly querySchemas: Record<string, unknown>
   readonly paramDescriptions: Record<string, string>

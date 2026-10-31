@@ -1,8 +1,22 @@
-import { countIfAvailable, type RateGuardTrippedError, requestSignal } from '@discord-mcp/core'
-import { REST, type RequestData, type RouteLike } from '@discordjs/rest'
+import { createHash } from 'node:crypto'
+import {
+  countIfAvailable,
+  DiscordRateLimitError,
+  RateGuardTrippedError,
+  requestSignal,
+} from '@discord-mcp/core'
+import { DefaultRestOptions, REST, type RequestData, type RouteLike } from '@discordjs/rest'
 import { Config, Context, Effect, Layer, Redacted } from 'effect'
 import { type MappedDiscordError, mapDiscordError } from './errors.ts'
-import { isCountedRejection, RateGuard, rateGuardScope } from './rate-guard.ts'
+import {
+  isCountedRejection,
+  mayHaveReachedDiscord,
+  RateGuard,
+  rateGuardScope,
+} from './rate-guard.ts'
+
+/** An attempt Discord may have answered unseen. Unlike the error it wraps, the client never retries it. */
+class UnansweredError extends Error {}
 
 /**
  * Everything a Discord request can fail with: a mapped Discord response, or the circuit breaker
@@ -30,6 +44,8 @@ export interface RestConfig {
    * blocking a tool call for minutes, because an MCP client is waiting on a response.
    */
   readonly maxRateLimitWaitMs: number
+  /** The signed-in human behind an HTTP request, counted apart so new tokens cannot evade it. */
+  readonly caller?: string
 }
 
 export const restConfig = Config.all({
@@ -55,12 +71,12 @@ const readError = (
   cause: unknown,
 ): { status: number; body: unknown; retryAfterMs?: number; global?: boolean } => {
   const e = (cause ?? {}) as HttpErrorLike
-  // A RateLimitError from @discordjs/rest carries retryAfter in seconds and no HTTP status.
+  // A RateLimitError from @discordjs/rest carries retryAfter in milliseconds and no HTTP status.
   if (typeof e.retryAfter === 'number') {
     return {
       status: 429,
       body: { message: e.message ?? 'Rate limited.' },
-      retryAfterMs: Math.round(e.retryAfter * 1000),
+      retryAfterMs: Math.round(e.retryAfter),
       ...(e.global === undefined ? {} : { global: e.global }),
     }
   }
@@ -90,6 +106,9 @@ export class DiscordRest extends Context.Service<
         // The guard is resolved once, at layer construction: callers name operations, they do not
         // carry the circuit breaker around.
         const guard = yield* RateGuard
+        // One HTTP relay serves many bots, so each token's rejections are counted apart.
+        const credential = `bot:${createHash('sha256').update(Redacted.value(config.token)).digest('base64url').slice(0, 12)}`
+        const rejectedCalls = new WeakSet<AbortSignal>()
 
         const rest = yield* Effect.acquireRelease(
           Effect.sync(() => {
@@ -100,55 +119,106 @@ export class DiscordRest extends Context.Service<
               // Absorb short waits inside the client; fail fast on long ones so a tool call
               // returns an actionable rate-limit error instead of hanging.
               rejectOnRateLimit: (info) => info.timeToReset > config.maxRateLimitWaitMs,
+              // The client re-sends an attempt that timed out or lost its connection, though
+              // Discord may have answered it. Renamed, the error ends the call and counts once.
+              makeRequest: (url, init) =>
+                DefaultRestOptions.makeRequest(url, init).catch((error: unknown) => {
+                  throw mayHaveReachedDiscord(error)
+                    ? new UnansweredError("Discord's answer never arrived.", { cause: error })
+                    : error
+                }),
             })
             client.setToken(Redacted.value(config.token))
+            // Only answers Discord actually sent count: @discordjs/rest also throws a rate-limit
+            // error before sending when it knows a bucket is empty. Each call's signal names it.
+            client.on('response', (request, response) => {
+              const signal = request.data.signal
+              if (!signal || !isCountedRejection(response.status)) return
+              rejectedCalls.add(signal)
+              // The client re-sends a 429 Discord sent until one succeeds, and each counts toward
+              // the ban. It emits synchronously, so throwing here ends the call and the agent waits.
+              if (response.status === 429)
+                throw mapDiscordError(429, undefined, {
+                  retryAfterMs: (Number(response.headers.get('retry-after')) || 1) * 1000,
+                  global: response.headers.has('x-ratelimit-global'),
+                })
+            })
             return client
           }),
-          // The token is process-lifetime; there is no socket to close, but clearing it keeps the
-          // credential out of a heap snapshot taken after shutdown.
-          (client) => Effect.sync(() => client.setToken('')),
+          // The client's sweep intervals would otherwise keep it alive after release, and the HTTP
+          // relay builds one per request. Clearing the token keeps it out of later heap snapshots.
+          (client) =>
+            Effect.sync(() => {
+              client.clearHashSweeper()
+              client.clearHandlerSweeper()
+              client.setToken('')
+            }),
         )
+
+        const send = (method: DiscordRequest['method'], route: RouteLike, options: RequestData) => {
+          switch (method) {
+            case 'GET':
+              return rest.get(route, options)
+            case 'POST':
+              return rest.post(route, options)
+            case 'PUT':
+              return rest.put(route, options)
+            case 'PATCH':
+              return rest.patch(route, options)
+            case 'DELETE':
+              return rest.delete(route, options)
+          }
+        }
 
         const request = (req: DiscordRequest) =>
           Effect.gen(function* () {
-            const scope = rateGuardScope('bot', req.operationFamily)
-            yield* guard.check(scope)
+            const scopes = [
+              credential,
+              ...(config.caller === undefined ? [] : [`human:${config.caller}`]),
+            ].map((subject) => rateGuardScope(subject, req.operationFamily))
 
             // The caller's cancellation signal, when there is a caller. Passing it to
             // @discordjs/rest aborts the in-flight HTTP request rather than abandoning it.
             const signal = yield* requestSignal
+            // A signal of this call's own, following the caller's, identifies its responses.
+            const tracked = AbortSignal.any(signal === undefined ? [] : [signal])
 
             const options: RequestData = {
               ...(req.query === undefined ? {} : { query: req.query }),
               ...(req.body === undefined ? {} : { body: req.body }),
               ...(req.auditLogReason === undefined ? {} : { reason: req.auditLogReason }),
-              ...(signal === undefined ? {} : { signal }),
+              signal: tracked,
             }
 
             const result = yield* Effect.tryPromise({
+              // Admission and sending share one synchronous step, so no interruption falls between
+              // them, and the promise settles the slot whether or not anyone still awaits it.
               try: () => {
-                switch (req.method) {
-                  case 'GET':
-                    return rest.get(req.route, options)
-                  case 'POST':
-                    return rest.post(req.route, options)
-                  case 'PUT':
-                    return rest.put(req.route, options)
-                  case 'PATCH':
-                    return rest.patch(req.route, options)
-                  case 'DELETE':
-                    return rest.delete(req.route, options)
-                }
+                const admission = guard.admit(scopes)
+                if ('refused' in admission) throw admission.refused
+                const sent = send(req.method, req.route, options)
+                sent.then(
+                  () => admission.settle(false),
+                  (error) =>
+                    admission.settle(
+                      rejectedCalls.has(tracked) || error instanceof UnansweredError,
+                    ),
+                )
+                return sent
               },
               catch: (cause) => cause,
             }).pipe(
               Effect.catch((cause) =>
                 Effect.gen(function* () {
+                  if (
+                    cause instanceof RateGuardTrippedError ||
+                    cause instanceof DiscordRateLimitError
+                  ) {
+                    return yield* Effect.fail(cause)
+                  }
                   const { status, body, retryAfterMs, global } = readError(cause)
                   yield* countIfAvailable('discord.request.failed')
                   if (retryAfterMs !== undefined) yield* countIfAvailable('discord.rate_limit_wait')
-                  // 400s are free against Cloudflare's budget; only 401/403/429 are counted.
-                  if (isCountedRejection(status)) yield* guard.recordRejection(scope)
                   return yield* Effect.fail(
                     mapDiscordError(status, body, {
                       ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
