@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url'
-import { and, desc, eq, isNotNull, sql } from 'drizzle-orm'
+import { and, desc, eq, gt, gte, inArray, isNotNull, lt, ne, or, sql } from 'drizzle-orm'
 import type { PgDatabase, PgQueryResultHKT } from 'drizzle-orm/pg-core'
 import type { Storage, WorkflowChange, WorkflowRevision } from './index.ts'
 import * as schema from './schema.ts'
@@ -13,9 +13,16 @@ export const migrationsFolder = fileURLToPath(new URL('../drizzle', import.meta.
 
 type Db = PgDatabase<PgQueryResultHKT, typeof schema>
 
-const { workflows, workflowRevisions: revisions, workflowChanges: changes } = schema
+const {
+  workflows,
+  workflowRevisions: revisions,
+  workflowChanges: changes,
+  workflowKv: kv,
+  workflowRuns: runs,
+} = schema
 
 const revisionColumns = {
+  workflowId: workflows.id,
   botId: workflows.botId,
   name: workflows.name,
   revision: revisions.revision,
@@ -111,6 +118,7 @@ export const createStorage = (db: Db, close: () => Promise<void>): Storage => ({
         actorId,
       })
       return {
+        workflowId: workflow.id,
         botId,
         name,
         revision: workflow.revision,
@@ -208,6 +216,97 @@ export const createStorage = (db: Db, close: () => Promise<void>): Storage => ({
       .where(eq(changes.botId, botId))
       .orderBy(desc(changes.id))
       .limit(limit),
+
+  loadWorkflowValue: async (workflowId, key) => {
+    const [row] = await db
+      .select({ value: kv.value })
+      .from(kv)
+      .where(and(eq(kv.workflowId, workflowId), eq(kv.key, key)))
+    return row?.value
+  },
+
+  storeWorkflowValue: (workflowId, key, value, limitBytes) =>
+    db.transaction(async (tx) => {
+      // Locking the workflow's row makes its writes take turns, so each sees the others' bytes.
+      const [workflow] = await tx
+        .select({ id: workflows.id })
+        .from(workflows)
+        .where(eq(workflows.id, workflowId))
+        .for('update')
+      if (workflow === undefined) throw new Error(`Workflow ${workflowId} no longer exists.`)
+      const [others] = await tx
+        .select({
+          bytes: sql<string>`coalesce(sum(octet_length(${kv.key}) + octet_length(${kv.value})), 0)`,
+        })
+        .from(kv)
+        .where(and(eq(kv.workflowId, workflowId), ne(kv.key, key)))
+      const bytes = Number(others?.bytes ?? 0) + Buffer.byteLength(key) + Buffer.byteLength(value)
+      if (bytes > limitBytes) return { stored: false, bytes }
+      await tx
+        .insert(kv)
+        .values({ workflowId, key, value })
+        .onConflictDoUpdate({
+          target: [kv.workflowId, kv.key],
+          set: { value, updatedAt: sql`now()` },
+        })
+      return { stored: true, bytes }
+    }),
+
+  deleteWorkflowValue: async (workflowId, key) => {
+    await db.delete(kv).where(and(eq(kv.workflowId, workflowId), eq(kv.key, key)))
+  },
+
+  recordWorkflowRun: async (run) => {
+    await db.insert(runs).values(run)
+  },
+
+  workflowRuns: (botId, { name, failed, since, limit }) =>
+    db
+      .select({
+        id: runs.id,
+        workflowName: workflows.name,
+        revision: runs.revision,
+        event: runs.event,
+        outcome: runs.outcome,
+        error: runs.error,
+        logs: runs.logs,
+        receivedAt: runs.receivedAt,
+        finishedAt: runs.finishedAt,
+      })
+      .from(runs)
+      .innerJoin(workflows, eq(workflows.id, runs.workflowId))
+      .where(
+        and(
+          eq(workflows.botId, botId),
+          name === undefined ? undefined : eq(workflows.name, name),
+          failed ? ne(runs.outcome, 'completed') : undefined,
+          gte(runs.finishedAt, since),
+        ),
+      )
+      .orderBy(desc(runs.id))
+      .limit(limit),
+
+  pruneWorkflowRuns: async (before, keep) => {
+    const ranked = db
+      .select({
+        id: runs.id,
+        rank: sql<number>`row_number() over (partition by ${runs.workflowId} order by ${runs.id} desc)`.as(
+          'rank',
+        ),
+      })
+      .from(runs)
+      .as('ranked')
+    const deleted = await db
+      .delete(runs)
+      .where(
+        or(
+          lt(runs.finishedAt, before),
+          inArray(runs.id, db.select({ id: ranked.id }).from(ranked).where(gt(ranked.rank, keep))),
+        ),
+      )
+      .returning({ id: runs.id })
+    return deleted.length
+  },
 
   close,
 })
