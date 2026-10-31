@@ -1,6 +1,7 @@
 // The isolate's main module. One request runs the agent's code once and reports what happened:
-// a script's default export, a workflow's listeners for one Gateway event or schedule tick, or a
-// probe of which events, intents, and schedules a workflow's clients declare.
+// a script's default export, a workflow's listeners for one Gateway event or schedule tick, its
+// fetch handler for one HTTP request, or a probe of which events, intents, and schedules a
+// workflow's clients declare and whether it has a fetch handler.
 // `discord.js` and `script.js` are CommonJS modules beside this one; importing them yields
 // `module.exports`.
 import { format } from 'node:util'
@@ -95,6 +96,37 @@ const deliver = async (event, user) => {
   await settle()
 }
 
+/** A workflow's `fetch` handler, from `export default { fetch(request) { ... } }`. */
+const routeHandler = (script) => (typeof script?.fetch === 'function' ? script : undefined)
+
+/**
+ * Answer one inbound HTTP request with the workflow's fetch handler. Bodies cross the process
+ * boundary in base64, so signature checks see the exact bytes the caller sent.
+ */
+const respond = async (script, request, user) => {
+  const handler = routeHandler(script)
+  if (handler === undefined) throw new TypeError('The workflow has no fetch handler.')
+  for (const client of textile.clients) client.user = new ClientUser(client, user)
+  const bodyless = request.method === 'GET' || request.method === 'HEAD' || request.body === ''
+  const response = await handler.fetch(
+    new Request(request.url, {
+      method: request.method,
+      headers: request.headers,
+      ...(bodyless ? {} : { body: Uint8Array.fromBase64(request.body) }),
+    }),
+  )
+  if (!(response instanceof Response)) {
+    throw new TypeError('The fetch handler must return a Response.')
+  }
+  const body = new Uint8Array(await response.arrayBuffer())
+  await settle()
+  return {
+    status: response.status,
+    contentType: response.headers.get('content-type'),
+    body: body.toBase64(),
+  }
+}
+
 /** Hand one schedule tick to each client that declared its cron. */
 const fire = async ({ cron, scheduledAt }, user) => {
   for (const client of workflowClients()) {
@@ -126,8 +158,10 @@ const schedulesOf = (client) => {
   return schedules
 }
 
-const probe = () => {
-  const clients = workflowClients()
+const probe = (script) => {
+  const route = routeHandler(script) !== undefined
+  // A workflow that only answers its route needs no client.
+  const clients = route ? textile.clients : workflowClients()
   return {
     schedules: [...new Set(clients.flatMap(schedulesOf))],
     events: [
@@ -140,12 +174,13 @@ const probe = () => {
       ),
     ],
     intents: clients.reduce((all, client) => all | client.options.intents.bitfield, 0),
+    route,
   }
 }
 
 export default {
   async fetch(request) {
-    const { user, event, tick, probe: probing } = await request.json()
+    const { user, event, tick, probe: probing, request: inbound } = await request.json()
     const logs = captureConsole()
     try {
       // Loaded here, not at the top, so a failing import is the agent's error, not workerd's.
@@ -153,7 +188,8 @@ export default {
       let result
       if (event !== undefined) result = await deliver(event, user)
       else if (tick !== undefined) result = await fire(tick, user)
-      else if (probing) result = probe()
+      else if (inbound !== undefined) result = await respond(script, inbound, user)
+      else if (probing) result = probe(script)
       else {
         if (typeof script !== 'function') {
           throw new TypeError(

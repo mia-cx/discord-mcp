@@ -1,3 +1,6 @@
+import { once } from 'node:events'
+import { createServer, request as httpRequest } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { type BotRuntimes, createBotRuntimes, createTokenVault } from '@discord-mcp/bot-host'
 import { fakeGateway, manualClock } from '@discord-mcp/bot-host/testing'
 import { DiscordRest, OperationCatalog } from '@discord-mcp/discord-api'
@@ -7,6 +10,7 @@ import { inMemoryStorage } from '@discord-mcp/storage/testing'
 import { Effect, Layer, Redacted } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createBotLimiters, createRelay } from '../src/relay.ts'
+import { nodeListener } from '../src/routes.ts'
 import { botToken, config, discordOAuth, executor, login } from './login-fixture.ts'
 
 const BOT = { id: '345678901234567890', username: 'textile', discriminator: '0', bot: true }
@@ -215,6 +219,7 @@ const platform = async (shards = 1) => {
       workflows,
     }),
     oauth.fetch,
+    { route: workflows.serve },
   )
   cleanup.push(
     () => storage.close(),
@@ -280,7 +285,7 @@ const platform = async (shards = 1) => {
     })
   }
 
-  return { agent, calls, clock, discord, gateway, identifiedWith, log, pass }
+  return { agent, calls, clock, discord, gateway, identifiedWith, log, pass, relay, workflows }
 }
 
 describe('workflows', () => {
@@ -457,6 +462,146 @@ describe('workflows', () => {
         ),
       { timeout: 20_000 },
     )
+  }, 30_000)
+})
+
+describe('workflow routes', () => {
+  /** Posts what a webhook sends, counts deliveries, and echoes what it saw of the request. */
+  const WEBHOOK = `
+import { Client } from 'discord.js'
+import { kv } from 'textile'
+const client = new Client({ intents: [] })
+
+export default {
+  async fetch(request) {
+    const { text } = await request.json()
+    await client.rest.post('/channels/${CHANNEL}/messages', { body: { content: text } })
+    const deliveries = ((await kv.get('deliveries')) ?? 0) + 1
+    await kv.set('deliveries', deliveries)
+    console.log('delivery', deliveries)
+    return Response.json(
+      { url: request.url, cookie: request.headers.get('cookie'), deliveries },
+      { headers: { 'set-cookie': 'relay-session=forged' } },
+    )
+  },
+}
+`
+
+  it('answer external requests until the workflow is disabled or deleted', async () => {
+    const { agent, calls, relay } = await platform()
+    const asA = await agent(HUMAN_A)
+    const post = (path = '', init: RequestInit = {}) =>
+      relay.fetch(
+        new Request(`https://relay.test/workflows/${BOT.id}/hook${path}`, {
+          method: 'POST',
+          body: JSON.stringify({ text: 'deployed' }),
+          ...init,
+        }),
+      )
+
+    await asA('discord_workflow_publish', {
+      name: 'hook',
+      source: WEBHOOK,
+      grants: { families: ['message'] },
+    })
+    expect((await post()).status).toBe(404)
+
+    const enabled = await asA('discord_workflow_enable', { name: 'hook' })
+    expect(enabled.structuredContent.data).toMatchObject({
+      events: [],
+      route: `/workflows/${BOT.id}/hook`,
+      enabled: true,
+    })
+
+    const answered = await post('/github?delivery=1', {
+      headers: { cookie: 'relay-session=private' },
+    })
+    expect(answered.status).toBe(200)
+    expect(await answered.json()).toEqual({
+      url: `https://relay.test/workflows/${BOT.id}/hook/github?delivery=1`,
+      cookie: null,
+      deliveries: 1,
+    })
+    expect(answered.headers.get('set-cookie')).toBeNull()
+    expect(answered.headers.get('content-security-policy')).toBe('sandbox')
+    expect(calls).toContainEqual({
+      token: TOKEN,
+      method: 'POST',
+      route: `/channels/${CHANNEL}/messages`,
+      body: expect.objectContaining({ content: 'deployed' }),
+    })
+
+    expect((await post('', { body: 'x'.repeat(1024 * 1024 + 1) })).status).toBe(413)
+
+    await asA('discord_workflow_disable', { name: 'hook' })
+    expect((await post()).status).toBe(404)
+    await asA('discord_workflow_enable', { name: 'hook' })
+    // KV state outlasts the run, and each run is in the workflow's logs.
+    expect(await (await post()).json()).toMatchObject({ deliveries: 2 })
+    await vi.waitFor(async () => {
+      const { runs } = (await asA('discord_workflow_logs', { name: 'hook' })).structuredContent
+        .data as { runs: ReadonlyArray<unknown> }
+      expect(runs).toEqual([
+        expect.objectContaining({ event: 'HTTP POST', outcome: 'completed', logs: ['delivery 2'] }),
+        expect.objectContaining({ event: 'HTTP POST', outcome: 'completed', logs: ['delivery 1'] }),
+      ])
+    })
+    await asA('discord_workflow_delete', { name: 'hook' })
+    expect((await post()).status).toBe(404)
+  }, 30_000)
+
+  it('keep binary bodies exact over HTTP, and stop a run once its caller gives up', async () => {
+    const { agent, relay, workflows } = await platform()
+    const asA = await agent(HUMAN_A)
+    await asA('discord_workflow_publish', {
+      name: 'echo',
+      source: `export default {
+        async fetch(request) {
+          if (request.headers.has('x-spin')) for (;;) {}
+          return new Response(await request.arrayBuffer())
+        },
+      }`,
+      grants: {},
+    })
+    await asA('discord_workflow_enable', { name: 'echo' })
+    const server = createServer(nodeListener(relay)).listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    cleanup.push(() => server.close())
+    const { port } = server.address() as AddressInfo
+    // Not valid UTF-8, so a text round trip would change it.
+    const bytes = Buffer.from([0xff, 0x00, 0xfe, 0x7b])
+    /** POST `bytes` with the request target and Host sent exactly as given. */
+    const post = (path: string, host: string) =>
+      new Promise<Buffer>((resolve, reject) => {
+        const request = httpRequest(
+          { host: '127.0.0.1', port, path, method: 'POST', setHost: false, headers: { host } },
+          (response) => {
+            const chunks: Buffer[] = []
+            response.on('data', (chunk: Buffer) => chunks.push(chunk))
+            response.on('end', () => resolve(Buffer.concat(chunks)))
+          },
+        )
+        request.on('error', reject)
+        request.end(bytes)
+      })
+    const route = `/workflows/${BOT.id}/echo`
+
+    // Including targets the handler's URL parser rewrites into the route.
+    expect(await post(route, 'relay.test')).toEqual(bytes)
+    expect(await post(`/x/..${route}`, 'relay.test')).toEqual(bytes)
+    expect(await post(`/%2e${route}`, 'relay.test')).toEqual(bytes)
+    expect(await post('/?x', `relay.test${route}?`)).toEqual(bytes)
+    const url = `https://relay.test${route}`
+
+    const started = Date.now()
+    const abandoned = await workflows?.serve(
+      BOT.id,
+      'echo',
+      { method: 'POST', url, headers: [['x-spin', '1']], body: '' },
+      AbortSignal.timeout(500),
+    )
+    expect(abandoned?.status).toBe(504)
+    expect(Date.now() - started).toBeLessThan(5_000)
   }, 30_000)
 })
 

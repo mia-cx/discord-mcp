@@ -93,18 +93,16 @@ const start = async () => {
   const host = await serve()
   const members = { hosts: [host.url], secret: SECRET }
   host.use(
-    createBotHost(
-      { ...members, self: host.url },
-      executor(restLayer, { bots }),
-      createVoiceUpgrade({ bots, checkToken: createTokenCheck({ rest, restLayer }) }),
-    ),
+    createBotHost({ ...members, self: host.url }, executor(restLayer, { bots }), {
+      upgrade: createVoiceUpgrade({ bots, checkToken: createTokenCheck({ rest, restLayer }) }),
+    }),
   )
   const central = await serve()
   const relay = createRelay(
     { ...config, allowedHosts: [] },
     forwardToBotHosts(members),
     discordOAuth().fetch,
-    forwardVoiceToBotHosts(members),
+    { upgrade: forwardVoiceToBotHosts(members) },
   )
   central.use(relay)
   const { tokens } = await login(relay)

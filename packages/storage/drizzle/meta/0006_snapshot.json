@@ -1,5 +1,5 @@
 {
-  "id": "e7ee8983-7f5b-46a3-ae39-ecdec9a31153",
+  "id": "bc0410ae-dd2f-4f45-9cfb-29893d296b06",
   "prevId": "d65f3087-4405-4f6f-ac4f-12c6fa3686d2",
   "version": "7",
   "dialect": "postgresql",
@@ -95,65 +95,6 @@
           "columns": [
             "bot_id",
             "shard_id"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.voice_global_opt_outs": {
-      "name": "voice_global_opt_outs",
-      "schema": "",
-      "columns": {
-        "user_id": {
-          "name": "user_id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.voice_opt_outs": {
-      "name": "voice_opt_outs",
-      "schema": "",
-      "columns": {
-        "bot_id": {
-          "name": "bot_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "guild_id": {
-          "name": "guild_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "user_id": {
-          "name": "user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {
-        "voice_opt_outs_bot_id_guild_id_user_id_pk": {
-          "name": "voice_opt_outs_bot_id_guild_id_user_id_pk",
-          "columns": [
-            "bot_id",
-            "guild_id",
-            "user_id"
           ]
         }
       },
@@ -363,6 +304,13 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true
+        },
+        "route": {
+          "name": "route",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         },
         "schedules": {
           "name": "schedules",

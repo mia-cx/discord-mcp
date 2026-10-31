@@ -44,6 +44,7 @@ const revisionColumns = {
   grants: revisions.grants,
   events: revisions.events,
   intents: revisions.intents,
+  route: revisions.route,
   schedules: revisions.schedules,
   publishedBy: revisions.publishedBy,
   publishedAt: revisions.publishedAt,
