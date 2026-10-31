@@ -222,7 +222,9 @@ describe('the voice socket', () => {
     })
     let admitting = false
     const host = createServer()
+    // Both stubs listen for socket errors, as the server binary's handlers do.
     host.on('upgrade', (request, socket, head) => {
+      socket.on('error', () => {})
       admitting = true
       void finished.then(() => sockets.handleUpgrade(request, socket, head, () => {}))
     })
@@ -233,7 +235,10 @@ describe('the voice socket', () => {
       secret: SECRET,
     })
     const central = createServer()
-    central.on('upgrade', (request, socket, head) => forward(request, socket, head, TOKEN, BOT_ID))
+    central.on('upgrade', (request, socket, head) => {
+      socket.on('error', () => {})
+      forward(request, socket, head, TOKEN, BOT_ID)
+    })
     central.listen(0, '127.0.0.1')
     await once(central, 'listening')
     cleanup.push(
