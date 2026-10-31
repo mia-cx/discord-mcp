@@ -40,12 +40,25 @@ const PROCESS_SCOPE = 'process'
 export const isCountedRejection = (status: number): boolean =>
   status === 401 || status === 403 || status === 429
 
+/**
+ * Whether a failed call may have reached Discord without its answer arriving: it timed out, was
+ * aborted, or lost its connection mid-request. Such a call settles as rejected, since the answer
+ * nobody saw could have counted. A refused connection never reached Discord and stays free.
+ */
+export const mayHaveReachedDiscord = (error: unknown): boolean =>
+  error instanceof Error &&
+  (error.name === 'AbortError' ||
+    error.name === 'TimeoutError' ||
+    ('code' in error && error.code === 'ECONNRESET') ||
+    error.message.includes('ECONNRESET'))
+
 /** A full in-flight cap clears as calls answer, so the caller should simply wait this long. */
 const IN_FLIGHT_RETRY_MS = 1_000
 
 /**
  * A refused call carries the error to return: tripped thresholds say to stop and diagnose, a full
- * in-flight cap says to wait. An admitted call must be settled exactly once.
+ * in-flight cap says to wait. An admitted call must be settled exactly once, and may reach at most
+ * one answer Discord counts, so that one settlement accounts for it.
  */
 export type Admission =
   | { readonly refused: RateGuardTrippedError | DiscordRateLimitError }

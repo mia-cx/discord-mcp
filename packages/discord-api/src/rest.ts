@@ -5,10 +5,18 @@ import {
   RateGuardTrippedError,
   requestSignal,
 } from '@discord-mcp/core'
-import { REST, type RequestData, type RouteLike } from '@discordjs/rest'
+import { DefaultRestOptions, REST, type RequestData, type RouteLike } from '@discordjs/rest'
 import { Config, Context, Effect, Layer, Redacted } from 'effect'
 import { type MappedDiscordError, mapDiscordError } from './errors.ts'
-import { isCountedRejection, RateGuard, rateGuardScope } from './rate-guard.ts'
+import {
+  isCountedRejection,
+  mayHaveReachedDiscord,
+  RateGuard,
+  rateGuardScope,
+} from './rate-guard.ts'
+
+/** An attempt Discord may have answered unseen. Unlike the error it wraps, the client never retries it. */
+class UnansweredError extends Error {}
 
 /**
  * Everything a Discord request can fail with: a mapped Discord response, or the circuit breaker
@@ -111,13 +119,29 @@ export class DiscordRest extends Context.Service<
               // Absorb short waits inside the client; fail fast on long ones so a tool call
               // returns an actionable rate-limit error instead of hanging.
               rejectOnRateLimit: (info) => info.timeToReset > config.maxRateLimitWaitMs,
+              // The client re-sends an attempt that timed out or lost its connection, though
+              // Discord may have answered it. Renamed, the error ends the call and counts once.
+              makeRequest: (url, init) =>
+                DefaultRestOptions.makeRequest(url, init).catch((error: unknown) => {
+                  throw mayHaveReachedDiscord(error)
+                    ? new UnansweredError("Discord's answer never arrived.", { cause: error })
+                    : error
+                }),
             })
             client.setToken(Redacted.value(config.token))
             // Only answers Discord actually sent count: @discordjs/rest also throws a rate-limit
             // error before sending when it knows a bucket is empty. Each call's signal names it.
             client.on('response', (request, response) => {
               const signal = request.data.signal
-              if (signal && isCountedRejection(response.status)) rejectedCalls.add(signal)
+              if (!signal || !isCountedRejection(response.status)) return
+              rejectedCalls.add(signal)
+              // The client re-sends a 429 Discord sent until one succeeds, and each counts toward
+              // the ban. It emits synchronously, so throwing here ends the call and the agent waits.
+              if (response.status === 429)
+                throw mapDiscordError(429, undefined, {
+                  retryAfterMs: (Number(response.headers.get('retry-after')) || 1) * 1000,
+                  global: response.headers.has('x-ratelimit-global'),
+                })
             })
             return client
           }),
@@ -173,9 +197,13 @@ export class DiscordRest extends Context.Service<
                 const admission = guard.admit(scopes)
                 if ('refused' in admission) throw admission.refused
                 const sent = send(req.method, req.route, options)
-                // A cancelled call may already have reached Discord, so it counts too.
-                const settle = () => admission.settle(rejectedCalls.has(tracked) || tracked.aborted)
-                sent.then(settle, settle)
+                sent.then(
+                  () => admission.settle(false),
+                  (error) =>
+                    admission.settle(
+                      rejectedCalls.has(tracked) || error instanceof UnansweredError,
+                    ),
+                )
                 return sent
               },
               catch: (cause) => cause,

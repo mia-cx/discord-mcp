@@ -255,6 +255,22 @@ describe('Discord login for the relay', () => {
     expect(oauth.calls.map((call) => call.path)).toContain('/api/v10/oauth2/token')
   })
 
+  it('counts Discord calls that time out, since Discord may have answered them', async () => {
+    let calls = 0
+    const network: typeof fetch = () => {
+      calls += 1
+      return Promise.reject(new DOMException('The operation timed out.', 'TimeoutError'))
+    }
+    const relay = createRelay(config, rest, network)
+    const { flow, cookie } = await beginLogin(relay)
+    const callback = new URL('https://relay.test/auth/discord/callback')
+    callback.search = new URLSearchParams({ state: flow, iss: 'https://discord.com', code: 'x' })
+    for (let attempt = 0; attempt < 40; attempt++) {
+      await relay.fetch(new Request(callback, { headers: { cookie } }))
+    }
+    expect(calls).toBe(25)
+  })
+
   it('reports a refresh that cannot reach Discord as unavailable, not as an expired login', async () => {
     const oauth = discordOAuth()
     let offline = false

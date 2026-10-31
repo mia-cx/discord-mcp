@@ -1,5 +1,10 @@
 import { createHash, randomBytes } from 'node:crypto'
-import { isCountedRejection, type RejectionLog, rejectionLog } from '@discord-mcp/discord-api/relay'
+import {
+  isCountedRejection,
+  mayHaveReachedDiscord,
+  type RejectionLog,
+  rejectionLog,
+} from '@discord-mcp/discord-api/relay'
 import {
   type AuthInfo,
   bearerAuthChallengeResponse,
@@ -222,10 +227,10 @@ export const createDiscordLogin = (
         admission.settle(isCountedRejection(answer.status))
         return answer
       },
-      // Nothing cancels these calls, so a missing answer is a network failure Discord never saw.
-      // It must not read as a rejected grant, or a refresh would report a live login as expired.
-      () => {
-        admission.settle(false)
+      // A timed-out call may have reached Discord, so it counts; a refused connection stays free.
+      // Neither reads as a rejected grant, or a refresh would report a live login as expired.
+      (error: unknown) => {
+        admission.settle(mayHaveReachedDiscord(error))
         throw new DiscordUnavailable(502, '1')
       },
     )
