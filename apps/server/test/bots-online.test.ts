@@ -37,7 +37,7 @@ const listTools = (accessToken: string) =>
   })
 
 describe('bot hosting', () => {
-  it('brings a bot online on first use and offline after 24 hours without a call', async () => {
+  it('brings a bot online on first use and offline for good after 24 hours without a call', async () => {
     const storage = await inMemoryStorage()
     // Heartbeats are proven in the shard suite; keep them out of this 47-hour window.
     const gateway = await fakeGateway(100 * HOUR)
@@ -82,6 +82,8 @@ describe('bot hosting', () => {
 
     clock.advance(HOUR)
     await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(1000))
+    // Its session ended, so a restart leaves it offline.
+    await vi.waitFor(async () => expect(await vault.loadSessions()).toEqual([]))
     expect(gateway.connections).toHaveLength(1)
     await gateway.close()
     await storage.close()

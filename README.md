@@ -75,6 +75,7 @@ Both paths require OAuth and bot credentials on every HTTP request.
 | `discord_api_admin` | Change bot/application settings and commands. |
 | `discord_guild_get` | Read a guild with a compact, typed result. |
 | `discord_permissions_explain` | Diagnose effective guild/channel permissions. |
+| `discord_script_run` | Run one-off discord.js code as the bot, checked against its grants. |
 
 The catalog covers the vendored specification's 242 operations. The relay exposes
 bot-authenticated, non-credential operations. OAuth-only endpoints and operations
@@ -82,13 +83,46 @@ requiring separate credentials are unavailable. Use search and describe to find
 the supported operation and its input schema.
 
 Arguments are validated locally before execution. Destructive and admin calls act
-directly under the supplied bot's Discord permissions; there are no server-side
-grants or preview-token sessions. This relay does not receive voice audio or run
-agent conversations.
+directly under the supplied bot's Discord permissions, with no preview-token
+sessions; only [scripts](#scripts) carry server-side grants. This relay does not
+receive voice audio or run agent conversations.
 
 Calls currently accept JSON payloads. Multipart file upload is not implemented.
 Discord rate limits and API errors are returned to the caller; the HTTP relay
 disables automatic retries and rate-limit waits.
+
+## Scripts
+
+`discord_script_run` batches many Discord calls into one tool call. The source is a
+module whose default export receives a discord.js `Client`:
+
+```ts
+import { EmbedBuilder } from 'discord.js'
+
+export default async ({ client }) => {
+  const channel = await client.channels.fetch('123456789012345678')
+  for (const title of ['One', 'Two', 'Three']) {
+    await channel.send({ embeds: [new EmbedBuilder().setTitle(title)] })
+  }
+  return 'sent'
+}
+```
+
+Pass `grants` with the call: `operations` lists catalog operation IDs, `families`
+grants a family's read and write operations, and `hosts` lists hostnames the script
+may `fetch()`. Destructive and admin operations must be named in `operations`. A
+refused call fails inside the script with HTTP 403 and is listed in the result's `denied`.
+
+Each script runs once in a fresh [workerd](https://github.com/cloudflare/workerd)
+process with no Gateway connection and no bot token. Every request it makes, whatever
+its URL, reaches a broker in the relay. The broker matches Discord calls to catalog
+operations, checks the grants, and replays them with the request's bot token.
+Outbound HTTP reaches public addresses only. One bot's scripts run one at a time.
+A script is killed after `timeoutSeconds` (30 by default, 120 at most).
+
+The HTTP relay offers the tool only when `DISCORD_OAUTH_ALLOWED_USER_IDS` is set.
+Local stdio always offers it. workerd ships as an npm dependency for glibc Linux,
+macOS, and Windows.
 
 ## Permission metadata
 
@@ -178,7 +212,7 @@ Keep the environment file private. Rotating the encryption key invalidates all l
 | `ALLOWED_ORIGINS` | Optional additional browser origins. The request origin and configured public origin are accepted. |
 | `DISCORD_MCP_REST_TIMEOUT_MS` | `15000`, applied to Discord requests. |
 | `DATABASE_URL` | Optional Postgres URL. Turns on [bot hosting](#bot-hosting) when the allowlist names users. |
-| `TOKEN_VAULT_KEY` | Required for bot hosting. Stable random 32-byte base64 key that encrypts stored bot tokens. |
+| `TOKEN_VAULT_KEY` | Required for bot hosting. Stable random 32-byte base64 key that encrypts stored bot tokens and Gateway sessions. |
 | `DISCORD_TOKEN` | Stdio only. Ignored by the HTTP relay. |
 | `DISCORD_MCP_TIER` | `all` runs both tiers in one process; `central` or `bot-host` runs one. See [Tiers](#tiers). |
 | `BOT_HOSTS` | Split tiers only. Comma-separated base URL of every bot host. |
@@ -205,6 +239,11 @@ encrypted, in Postgres and connects the bot to Discord's Gateway with an online 
 Each later call restarts a 24-hour timer; when it runs out, the bot disconnects and shows
 offline. Startup applies pending database migrations.
 
+A restart keeps bots online. The bot's Gateway session is stored encrypted alongside its
+token, and the next process resumes it, so Discord replays the events sent while the server was
+down. If Discord no longer accepts the session, the bot connects afresh. Each resumed bot gets a
+new 24-hour timer.
+
 Set `DATABASE_URL`, `TOKEN_VAULT_KEY` (generate it like `OAUTH_ENCRYPTION_KEY`), and a
 `DISCORD_OAUTH_ALLOWED_USER_IDS` list. Without that list, the server logs a warning and
 serves the plain relay. Back up the vault key apart from the database: without it, stored
@@ -220,8 +259,9 @@ as many replicas as it needs:
   owns that bot. It holds no bot tokens and calls Discord only to check logins.
 - **Bot hosts** check each bot token with Discord and run its requests. All requests for one
   bot share one rate limiter, whichever central replica received them. `DATABASE_URL` and
-  `TOKEN_VAULT_KEY` go on bot hosts, which start bot hosting only when their
-  `DISCORD_OAUTH_ALLOWED_USER_IDS` names users. Central enforces that allowlist.
+  `TOKEN_VAULT_KEY` go on bot hosts, and scripts run there. A bot host starts bot hosting
+  and offers `discord_script_run` by the same `DISCORD_OAUTH_ALLOWED_USER_IDS` rules as
+  the single process. Central enforces that allowlist.
 
 Give both tiers the same `BOT_HOSTS` and `BOT_HOST_SECRET`. Ownership comes from rendezvous
 hashing over `BOT_HOSTS`, so every replica agrees on it, and adding or removing a host moves
@@ -229,8 +269,7 @@ only the bots that host gains or loses. A host answers 503 with `Retry-After: 1`
 its list says it does not own, so a central still on an old list costs a retry, not a second
 owner. Two hosts on different lists can both own a bot that moved, each with its own rate
 limiter, so change `BOT_HOSTS` by stopping every bot host and then starting them all on the new
-list. Centrals can update in any order. Restarting a host takes its bots offline until their
-next call. Keep bot hosts off the public network: the hop from central is plain HTTP and
+list. Centrals can update in any order. Keep bot hosts off the public network: the hop from central is plain HTTP and
 carries bot tokens.
 
 A login must finish on the central replica that started it, because each replica tracks its

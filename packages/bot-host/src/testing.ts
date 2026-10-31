@@ -12,6 +12,8 @@ export interface GatewayPayload {
 
 /** One client connection to the fake Gateway. */
 export interface FakeConnection {
+  /** The path and query the client connected to, such as `/?v=10&encoding=json`. */
+  readonly path: string
   /** Payloads the client sent, oldest first. */
   readonly received: GatewayPayload[]
   /** The close code once the socket closed. */
@@ -25,15 +27,19 @@ export interface FakeConnection {
 export const DEFAULT_HEARTBEAT_INTERVAL_MS = 41_250
 
 /**
- * A local stand-in for Discord's Gateway: it says Hello, answers Identify with READY, and
- * acknowledges heartbeats. Tests drive drops and closes through `connections`.
+ * A local stand-in for Discord's Gateway: it says Hello, answers Identify with READY naming
+ * itself as the resume URL, and acknowledges heartbeats. Tests drive replays, drops, and closes
+ * through `connections`.
  */
 export const fakeGateway = async (heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS) => {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 })
   await once(server, 'listening')
+  const { port } = server.address() as AddressInfo
+  const url = `ws://127.0.0.1:${port}`
   const connections: FakeConnection[] = []
-  server.on('connection', (socket) => {
+  server.on('connection', (socket, request) => {
     const connection: FakeConnection = {
+      path: request.url ?? '/',
       received: [],
       closeCode: undefined,
       acknowledge: true,
@@ -45,7 +51,12 @@ export const fakeGateway = async (heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERV
       const payload: GatewayPayload = JSON.parse(String(data))
       connection.received.push(payload)
       if (payload.op === 2) {
-        connection.send({ op: 0, t: 'READY', s: 1, d: { v: 10, session_id: 'fake-session' } })
+        connection.send({
+          op: 0,
+          t: 'READY',
+          s: 1,
+          d: { v: 10, session_id: 'fake-session', resume_gateway_url: url },
+        })
       }
       if (payload.op === 1 && connection.acknowledge) connection.send({ op: 11 })
     })
@@ -54,9 +65,8 @@ export const fakeGateway = async (heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERV
     })
     connection.send({ op: 10, d: { heartbeat_interval: heartbeatIntervalMs } })
   })
-  const { port } = server.address() as AddressInfo
   return {
-    url: `ws://127.0.0.1:${port}`,
+    url,
     connections,
     close: () =>
       new Promise<void>((resolve) => {

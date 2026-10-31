@@ -3,6 +3,7 @@ import { createServer } from 'node:http'
 import { createBotRuntimes, createTokenVault, systemClock } from '@discord-mcp/bot-host'
 import { ConfigurationError } from '@discord-mcp/core'
 import { DiscordRest, RateGuard } from '@discord-mcp/discord-api/relay'
+import { makeIsolateHost } from '@discord-mcp/isolate'
 import { connectStorage } from '@discord-mcp/storage'
 import { NodeRuntime } from '@effect/platform-node'
 import { toNodeHandler } from '@modelcontextprotocol/node'
@@ -22,8 +23,9 @@ const csv = (value: string) =>
 const VAULT_KEY_BYTES = 32
 
 /**
- * Bot hosting keeps bots online and stores their tokens. It starts only with a database and an
- * allowlist naming who may use it; otherwise the process stays a plain relay.
+ * Bot hosting keeps bots online and stores their tokens and Gateway sessions, resuming the bots
+ * the previous process left online. It starts only with a database and an allowlist naming who
+ * may use it; otherwise the process stays a plain relay.
  */
 const startBotHosting = (allowedUserIds: ReadonlyArray<string> | undefined) =>
   Effect.gen(function* () {
@@ -64,14 +66,16 @@ const startBotHosting = (allowedUserIds: ReadonlyArray<string> | undefined) =>
       (storage) => Effect.promise(() => storage.close()),
     )
     return yield* Effect.acquireRelease(
-      Effect.sync(() =>
-        createBotRuntimes({
+      Effect.promise(async () => {
+        const bots = createBotRuntimes({
           vault: createTokenVault(vaultKey, storage),
           clock: systemClock,
           log,
-        }),
-      ),
-      (bots) => Effect.sync(() => bots.close()),
+        })
+        await bots.resume()
+        return bots
+      }),
+      (bots) => Effect.promise(() => bots.close()),
     )
   })
 
@@ -170,16 +174,20 @@ const main = Effect.gen(function* () {
   const rest = { timeoutMs: config.timeoutMs, retries: 0, maxRateLimitWaitMs: 0 }
 
   if (config.transport === 'stdio') {
-    // Stdio has one local caller. Its token is supplied by that caller's process environment.
+    // Stdio has one local caller. Its token is supplied by that caller's process environment, and
+    // its scripts run on that caller's own machine.
     const token = yield* Config.redacted('DISCORD_TOKEN')
     const runtime = yield* Effect.acquireRelease(
       Effect.sync(() =>
-        relayRuntime(DiscordRest.layer({ ...rest, token }).pipe(Layer.provide(RateGuard.layer()))),
+        relayRuntime(
+          DiscordRest.layer({ ...rest, token }).pipe(Layer.provide(RateGuard.layer())),
+          makeIsolateHost(),
+        ),
       ),
       (runtime) => Effect.promise(() => runtime.dispose()),
     )
     yield* Effect.acquireRelease(
-      Effect.sync(() => serveStdio(() => buildRelayServer(runtime))),
+      Effect.sync(() => serveStdio(() => buildRelayServer(runtime, true))),
       (handle) => Effect.promise(() => handle.close()),
     )
     yield* Effect.log('discord-mcp ready on stdio')
@@ -205,6 +213,8 @@ const main = Effect.gen(function* () {
     )
   }
   const allowlist = yield* allowedUsers
+  // Running agent code is a platform feature, which an unrestricted relay never offers.
+  const scripts = allowlist !== undefined
   const listen = (handler: { fetch: (request: Request) => Promise<Response> }) =>
     serve(handler, config.host, config.port, tier === 'all' ? 'discord-mcp' : `discord-mcp ${tier}`)
 
@@ -220,7 +230,9 @@ const main = Effect.gen(function* () {
       )
     }
     const bots = yield* startBotHosting(allowlist)
-    return yield* listen(createBotHost({ ...members, self }, createExecutor({ rest, bots })))
+    return yield* listen(
+      createBotHost({ ...members, self }, createExecutor({ rest, bots, scripts })),
+    )
   }
 
   yield* checkPublicExposure({
@@ -239,7 +251,7 @@ const main = Effect.gen(function* () {
   const execute =
     tier === 'central'
       ? forwardToBotHosts(yield* membership)
-      : createExecutor({ rest, bots: yield* startBotHosting(allowlist) })
+      : createExecutor({ rest, bots: yield* startBotHosting(allowlist), scripts })
   const relay = createRelay(
     {
       allowedHosts: csv(config.allowedHosts),

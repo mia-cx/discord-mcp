@@ -15,6 +15,7 @@ import {
   type RestConfig,
   relayTools,
 } from '@discord-mcp/discord-api/relay'
+import { type IsolateHost, makeIsolateHost, ScriptRunner, scriptRun } from '@discord-mcp/isolate'
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server'
 import { Effect, Layer, ManagedRuntime, Redacted } from 'effect'
 import { createDiscordLogin, type LoginConfig } from './login.ts'
@@ -26,12 +27,20 @@ export interface RelayConfig {
   readonly login: LoginConfig
 }
 
-/** The token lives only in this runtime, which the HTTP handler disposes after one response. */
-export const relayRuntime = (rest: Layer.Layer<DiscordRest>) =>
-  ManagedRuntime.make(Layer.merge(rest, OperationCatalog.layer))
+/**
+ * The token lives only in this runtime, which the HTTP handler disposes after one response.
+ * The isolate host is process-wide, so one bot's scripts queue behind each other across requests.
+ */
+export const relayRuntime = (rest: Layer.Layer<DiscordRest>, isolates: IsolateHost) =>
+  ManagedRuntime.make(
+    Layer.mergeAll(rest, OperationCatalog.layer, Layer.succeed(ScriptRunner)(isolates)),
+  )
 
-/** Register the same fixed bot-only tools for HTTP requests and local stdio. */
-export const buildRelayServer = (runtime: ReturnType<typeof relayRuntime>) => {
+/**
+ * Register the same fixed bot-only tools for HTTP requests and local stdio. `scripts` adds
+ * `discord_script_run`, which runs agent code on this host.
+ */
+export const buildRelayServer = (runtime: ReturnType<typeof relayRuntime>, scripts: boolean) => {
   const principal: Principal = {
     id: 'request-bot',
     kind: 'discord-bot',
@@ -46,7 +55,7 @@ export const buildRelayServer = (runtime: ReturnType<typeof relayRuntime>) => {
   )
   registerTools({
     server,
-    tools: relayTools,
+    tools: scripts ? [...relayTools, scriptRun] : relayTools,
     selection: { toolsets: new Set(['operator', 'api']), enabledGates: new Set(['always']) },
     runtime,
     authorize: authorizeWithPrincipal(() => Effect.succeed(principal)),
@@ -113,6 +122,11 @@ export interface ExecutorOptions {
   readonly discordFetch?: typeof fetch
   /** With `bots`, each verified call keeps its bot online and stores its token encrypted. */
   readonly bots?: Pick<BotRuntimes, 'use'> | undefined
+  /**
+   * Offer `discord_script_run`, which runs agent code on this host. Running agent code is a
+   * platform feature, which an unrestricted relay never offers.
+   */
+  readonly scripts?: boolean
   /** The Discord REST seam used by offline integration tests. */
   readonly restLayer?: (
     token: Redacted.Redacted<string>,
@@ -130,8 +144,10 @@ export const createExecutor = ({
   rest,
   discordFetch = fetch,
   bots,
+  scripts = false,
   restLayer = DiscordRest.shared,
 }: ExecutorOptions): Execute => {
+  const isolates = makeIsolateHost()
   /** Each bot's limiter, with the fingerprint of the token Discord last accepted for it. */
   const limiters = new Map<
     string,
@@ -182,7 +198,7 @@ export const createExecutor = ({
   }
 
   const run = async (request: Request, runtime: ReturnType<typeof relayRuntime>) => {
-    const mcp = createMcpHandler(() => buildRelayServer(runtime), {
+    const mcp = createMcpHandler(() => buildRelayServer(runtime, scripts), {
       legacy: 'stateless',
       maxSubscriptions: 0,
     })
@@ -227,7 +243,7 @@ export const createExecutor = ({
       void bots?.use(botId, credential)
       lane ??= acquire(botId)
       lane.accepted = fingerprint
-      return await run(request, relayRuntime(restLayer(token, lane.limiter)))
+      return await run(request, relayRuntime(restLayer(token, lane.limiter), isolates))
     } finally {
       if (lane !== undefined) release(lane)
     }

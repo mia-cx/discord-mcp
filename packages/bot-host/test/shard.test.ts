@@ -9,20 +9,24 @@ afterEach(async () => {
   for (const step of cleanup.splice(0).reverse()) await step()
 })
 
-const start = async () => {
+/** Start a shard against a fake Gateway, resuming `saved` from the fake's `/resume` path if given. */
+const start = async (saved?: { sessionId: string; sequence: number }) => {
   const gateway = await fakeGateway()
   const clock = manualClock()
   const onFatal = vi.fn()
+  const onSession = vi.fn()
   const shard = startShard({
     token: TOKEN,
     gatewayUrl: gateway.url,
     clock,
+    ...(saved && { session: { ...saved, resumeGatewayUrl: `${gateway.url}/resume` } }),
+    onSession,
     onReady: () => {},
     onFatal,
     onIdentifyBudgetSpent: () => {},
   })
   cleanup.push(gateway.close, shard.stop)
-  return { gateway, clock, onFatal, shard }
+  return { gateway, clock, onFatal, onSession, shard }
 }
 
 const identified = (gateway: Awaited<ReturnType<typeof fakeGateway>>, count: number) =>
@@ -50,8 +54,8 @@ describe('the shard supervisor', () => {
     expect(gateway.connections).toHaveLength(1)
   })
 
-  it('reconnects with a fresh identify after a zombie connection or a dropped one', async () => {
-    const { gateway, clock } = await start()
+  it('resumes after a zombie connection or a dropped one, so Discord replays what it missed', async () => {
+    const { gateway, clock, onSession } = await start()
     await identified(gateway, 1)
     const zombie = gateway.connections[0]
     if (zombie === undefined) throw new Error('no connection')
@@ -64,16 +68,197 @@ describe('the shard supervisor', () => {
     await vi.waitFor(() => expect(zombie.closeCode).toBe(4000))
     // Backoff is 1s × random() for the first attempt.
     clock.advance(500)
-    await identified(gateway, 2)
+    await vi.waitFor(() =>
+      expect(gateway.connections[1]?.received[0]).toEqual({
+        op: 6,
+        d: { token: TOKEN, session_id: 'fake-session', seq: 1 },
+      }),
+    )
+    gateway.connections[1]?.send({ op: 0, t: 'MESSAGE_CREATE', s: 2, d: {} })
+    gateway.connections[1]?.send({ op: 0, t: 'RESUMED', s: 3, d: {} })
+    await vi.waitFor(() =>
+      expect(onSession).toHaveBeenLastCalledWith({
+        sessionId: 'fake-session',
+        resumeGatewayUrl: gateway.url,
+        sequence: 3,
+      }),
+    )
 
-    // A drop right after an Identify waits out Discord's five-second Identify window.
+    // A later drop resumes again, from the replayed sequence, without spending an Identify.
     gateway.connections[1]?.close(4000)
     await vi.waitFor(() => expect(gateway.connections[1]?.closeCode).toBe(4000))
-    clock.advance(4_000)
+    clock.advance(500)
+    await vi.waitFor(() =>
+      expect(gateway.connections[2]?.received[0]).toMatchObject({ op: 6, d: { seq: 3 } }),
+    )
+    await identified(gateway, 1)
+  })
+
+  it('identifies afresh, within Identify limits, when Discord rejects a saved session', async () => {
+    const { gateway, clock } = await start({ sessionId: 'expired', sequence: 7 })
+    await vi.waitFor(() =>
+      expect(gateway.connections[0]?.received[0]).toEqual({
+        op: 6,
+        d: { token: TOKEN, session_id: 'expired', seq: 7 },
+      }),
+    )
+    expect(gateway.connections[0]?.path).toBe('/resume/?v=10&encoding=json')
+
+    gateway.connections[0]?.send({ op: 9, d: false })
+    await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(4000))
+    // Discord asks for a random 1–5 second wait; random() is 0.5.
+    clock.advance(3_000)
+    await identified(gateway, 1)
+    expect(gateway.connections[1]?.path).toBe('/?v=10&encoding=json')
+
+    // Rejected again straight away: the next Identify waits out Discord's five-second window.
+    gateway.connections[1]?.send({ op: 9, d: false })
+    await vi.waitFor(() => expect(gateway.connections[1]?.closeCode).toBe(4000))
+    clock.advance(3_000)
     await new Promise((resolve) => setTimeout(resolve, 100))
     expect(gateway.connections).toHaveLength(2)
-    clock.advance(1_000)
-    await identified(gateway, 3)
+    clock.advance(2_000)
+    await identified(gateway, 2)
+  })
+
+  it.each([4003, 4007, 4009])(
+    'identifies afresh when Discord closes a resumed session with %i',
+    async (code) => {
+      const { gateway, clock } = await start({ sessionId: 'expired', sequence: 7 })
+      await vi.waitFor(() => expect(gateway.connections[0]?.received[0]?.op).toBe(6))
+
+      gateway.connections[0]?.close(code)
+      await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(code))
+      clock.advance(500)
+      await identified(gateway, 1)
+    },
+  )
+
+  it('resumes through the initial Gateway URL when the resume URL is unreachable', async () => {
+    const gateway = await fakeGateway()
+    const clock = manualClock()
+    const NativeWebSocket = globalThis.WebSocket
+    const resumeGatewayUrl = 'wss://gateway-unreachable.discord.gg'
+    const urls: string[] = []
+    vi.stubGlobal(
+      'WebSocket',
+      class extends NativeWebSocket {
+        constructor(url: string | URL) {
+          urls.push(String(url))
+          // Make an allowed Discord resume destination unreachable without leaving localhost.
+          super(String(url).startsWith(resumeGatewayUrl) ? 'ws://127.0.0.1:1' : url)
+        }
+      },
+    )
+    cleanup.push(() => vi.unstubAllGlobals())
+    const shard = startShard({
+      token: TOKEN,
+      gatewayUrl: gateway.url,
+      clock,
+      session: { sessionId: 'saved', resumeGatewayUrl, sequence: 7 },
+      onSession: () => {},
+      onReady: () => {},
+      onFatal: () => {},
+      onIdentifyBudgetSpent: () => {},
+    })
+    cleanup.push(gateway.close, shard.stop)
+
+    // Nothing listens on port 1, so the first connection fails before Hello. Advance time until
+    // its reconnect backoff has run.
+    await vi.waitFor(() => {
+      clock.advance(500)
+      expect(gateway.connections[0]?.received[0]).toEqual({
+        op: 6,
+        d: { token: TOKEN, session_id: 'saved', seq: 7 },
+      })
+    })
+    expect(urls).toEqual([
+      `${resumeGatewayUrl}/?v=10&encoding=json`,
+      `${gateway.url}/?v=10&encoding=json`,
+    ])
+  })
+
+  it.each(['saved', 'READY'])(
+    'does not connect or send the token to a private resume URL from %s',
+    async (source) => {
+      const gateway = await fakeGateway()
+      const target = await fakeGateway()
+      const clock = manualClock()
+      const session = { sessionId: 'saved', resumeGatewayUrl: target.url, sequence: 7 }
+      const onSession = vi.fn()
+      const shard = startShard({
+        token: TOKEN,
+        gatewayUrl: gateway.url,
+        clock,
+        ...(source === 'saved' && { session }),
+        onSession,
+        onReady: () => {},
+        onFatal: () => {},
+        onIdentifyBudgetSpent: () => {},
+      })
+      cleanup.push(gateway.close, target.close, shard.stop)
+
+      if (source === 'READY') {
+        await identified(gateway, 1)
+        gateway.connections[0]?.send({
+          op: 0,
+          t: 'READY',
+          s: 7,
+          d: { session_id: session.sessionId, resume_gateway_url: target.url },
+        })
+        await vi.waitFor(() => expect(onSession).toHaveBeenLastCalledWith(session))
+        gateway.connections[0]?.send({ op: 7 })
+        await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(4000))
+        clock.advance(500)
+      }
+
+      await vi.waitFor(() =>
+        expect(gateway.connections.at(-1)?.received[0]).toEqual({
+          op: 6,
+          d: { token: TOKEN, session_id: 'saved', seq: 7 },
+        }),
+      )
+      expect(target.connections).toEqual([])
+    },
+  )
+
+  it.each([
+    ['wss://gateway.discord.gg', 'wss://gateway.discord.gg/'],
+    ['wss://gateway-us-east1-b.discord.gg', 'wss://gateway-us-east1-b.discord.gg/'],
+    ['wss://gateway.discord.gg.evil.example', 'wss://gateway.discord.gg/'],
+    ['wss://evildiscord.gg', 'wss://gateway.discord.gg/'],
+    ['wss://gateway.discord.gg@evil.example', 'wss://gateway.discord.gg/'],
+    ['wss://user:password@gateway.discord.gg', 'wss://gateway.discord.gg/'],
+    ['ws://gateway-us-east1-b.discord.gg', 'wss://gateway.discord.gg/'],
+    ['wss://gateway-us-east1-b.discord.gg:8443', 'wss://gateway.discord.gg/'],
+    ['ws://169.254.169.254', 'wss://gateway.discord.gg/'],
+    ['ws://[::1]', 'wss://gateway.discord.gg/'],
+    ['not a URL', 'wss://gateway.discord.gg/'],
+  ])('uses only a trusted Gateway for resume URL %s', (resumeGatewayUrl, expected) => {
+    const urls: string[] = []
+    vi.stubGlobal(
+      'WebSocket',
+      class extends EventTarget {
+        constructor(url: string | URL) {
+          super()
+          urls.push(String(url))
+        }
+        close() {}
+      },
+    )
+    cleanup.push(() => vi.unstubAllGlobals())
+    const shard = startShard({
+      token: TOKEN,
+      gatewayUrl: 'wss://gateway.discord.gg',
+      clock: manualClock(),
+      session: { sessionId: 'saved', resumeGatewayUrl, sequence: 7 },
+      onSession: () => {},
+      onReady: () => {},
+      onFatal: () => {},
+      onIdentifyBudgetSpent: () => {},
+    })
+    cleanup.push(shard.stop)
+    expect(urls).toEqual([`${expected}?v=10&encoding=json`])
   })
 
   it('stops for good when Discord rejects the token', async () => {

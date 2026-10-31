@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url'
-import { eq, sql } from 'drizzle-orm'
+import { and, eq, sql } from 'drizzle-orm'
 import type { PgDatabase, PgQueryResultHKT } from 'drizzle-orm/pg-core'
 import type { Storage } from './index.ts'
 import * as schema from './schema.ts'
@@ -33,5 +33,35 @@ export const createStorage = (
       .where(eq(schema.bots.id, botId))
     return row?.sealedToken
   },
+  storeSealedSession: async (botId, shardId, sealedSession) => {
+    try {
+      await db
+        .insert(schema.shardSessions)
+        .values({ botId, shardId, sealedSession })
+        .onConflictDoUpdate({
+          target: [schema.shardSessions.botId, schema.shardSessions.shardId],
+          set: { sealedSession, updatedAt: sql`now()` },
+        })
+    } catch (cause) {
+      throw new Error(
+        `Storing bot ${botId}'s shard ${shardId} session failed: ${rootMessage(cause)}`,
+      )
+    }
+  },
+  deleteSession: async (botId, shardId) => {
+    await db
+      .delete(schema.shardSessions)
+      .where(and(eq(schema.shardSessions.botId, botId), eq(schema.shardSessions.shardId, shardId)))
+  },
+  loadSealedSessions: () =>
+    db
+      .select({
+        botId: schema.shardSessions.botId,
+        shardId: schema.shardSessions.shardId,
+        sealedSession: schema.shardSessions.sealedSession,
+        sealedToken: schema.bots.sealedToken,
+      })
+      .from(schema.shardSessions)
+      .innerJoin(schema.bots, eq(schema.bots.id, schema.shardSessions.botId)),
   close,
 })

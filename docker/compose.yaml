@@ -5,6 +5,9 @@ services:
     image: ghcr.io/mia-cx/discord-mcp/server:${DISCORD_MCP_VERSION:-main}
     restart: unless-stopped
     read_only: true
+    # Each script isolate gets a private working directory here.
+    tmpfs:
+      - /tmp
     environment:
       MCP_TRANSPORT: http
       MCP_HTTP_HOST: 0.0.0.0
