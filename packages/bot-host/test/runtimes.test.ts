@@ -931,3 +931,39 @@ it('names the token its shards start with, even one stored during the pass', asy
   await gateway.close()
   await storage.close()
 })
+
+it('takes a bot offline once for a shard Discord closed, even if that pass fails', async () => {
+  const storage = await inMemoryStorage()
+  const gateway = await fakeGateway(100 * HOUR)
+  const clock = manualClock()
+  let shards = 1
+  let failRead = false
+  const flaky: Storage = {
+    ...storage,
+    loadOnlineBots: () => {
+      if (!failRead) return storage.loadOnlineBots()
+      failRead = false
+      return Promise.reject(new Error('Connection terminated unexpectedly'))
+    },
+  }
+  const bots = startHost(flaky, clock, (input, init) =>
+    gateway.discordFetch({ shards, maxConcurrency: 2 })(input, init),
+  )
+  await bots.use(BOT_ID, 'private-token-a')
+  await vi.waitFor(() => expect(identified(gateway)).toEqual(['0/1']))
+
+  // Sharding required; the pass that takes the bot offline fails after doing so.
+  shards = 2
+  failRead = true
+  gateway.connections[0]?.close(4011)
+  await vi.waitFor(() => expect(failRead).toBe(false))
+  await bots.use(BOT_ID, 'private-token-a')
+  clock.advance(RECONCILE_MS)
+
+  await vi.waitFor(() => expect(identified(gateway)).toEqual(['0/1', '1/2']))
+  expect((await storage.loadBot(BOT_ID))?.online).toMatchObject({ shardCount: 2 })
+
+  await bots.close()
+  await gateway.close()
+  await storage.close()
+})

@@ -266,19 +266,12 @@ export const createBotRuntimes = ({
     storage,
     clock,
     (name) => {
-      if (name.startsWith(REST_LEASE)) {
-        const botId = name.slice(REST_LEASE.length)
-        // Voice runs on the REST owner; another host may serve the bot now.
-        voices.get(botId)?.voice.close()
-        if (voices.delete(botId)) {
-          log(
-            `Bot ${botId}'s voice stopped on this host: it could not renew its REST lease in time.`,
-          )
-        }
-        return
-      }
+      if (name.startsWith(REST_LEASE)) return dropVoice(name.slice(REST_LEASE.length))
       const lost = running.get(name)
       if (lost === undefined) return
+      // Leases lapse together; leave the bot's voice channels while this shard can still say so.
+      if (!leases.holds(restLease(lost.botId))) dropVoice(lost.botId)
+      if (!running.has(name)) return
       running.delete(name)
       lost.shard.suspend()
       voices.get(lost.botId)?.voice.dropped(lost.shardId)
@@ -288,6 +281,23 @@ export const createBotRuntimes = ({
     },
     leaseTtlMs,
   )
+
+  /**
+   * Stop a bot's voice here, since another host may serve the bot now. A shard here whose leave
+   * could not reach Discord comes back with a fresh session, rather than one that still has the
+   * bot in a channel.
+   */
+  const dropVoice = (botId: string) => {
+    const entry = voices.get(botId)
+    if (entry === undefined) return
+    voices.delete(botId)
+    for (const shardId of entry.voice.close()) {
+      const name = shardLease(botId, shardId)
+      running.get(name)?.shard.suspend(true)
+      running.delete(name)
+    }
+    log(`Bot ${botId}'s voice stopped on this host: it could not renew its REST lease in time.`)
+  }
 
   /**
    * Storage writes, chained so they land in order: by bot, its sessions, so an ended session
@@ -532,8 +542,11 @@ export const createBotRuntimes = ({
    * those idle for 24 hours without workflows to hold them.
    */
   const onlineBots = async () => {
-    for (const { botId, token, fatal } of running.values()) {
-      if (fatal !== undefined) await vault.setOffline(botId, token, fatal)
+    for (const [name, run] of running) {
+      if (run.fatal === undefined) continue
+      await vault.setOffline(run.botId, run.token, run.fatal)
+      // Once only: should this pass fail, the bot may come back online with the same token.
+      await leave(name, run, true)
     }
     const now = clock.date()
     const online = new Map<string, OnlineVaultBot>()

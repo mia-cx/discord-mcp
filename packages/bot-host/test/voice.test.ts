@@ -278,6 +278,22 @@ describe('voice', () => {
     })
   })
 
+  it('ends the session of a shard that could not say the bot left, once the host loses the bot', async () => {
+    const { voice, vault, gateway, clock, cutRenewals } = await start({ leaseTtlMs: 15_000 })
+    await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID)
+    cutRenewals()
+    // The leases lapse 10 s in, while Discord has the shard reconnecting.
+    clock.advance(9_500)
+    gateway.connections[0]?.send({ op: 9, d: true })
+    await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(4000))
+    clock.advance(500)
+
+    // A resumed session would still have the bot in the channel, with nothing relaying.
+    await vi.waitFor(async () =>
+      expect((await vault.loadOnline())[0]?.sessions.get(0)).toMatchObject({ stale: true }),
+    )
+  })
+
   it('closes the socket on a text message or audio that does not fit the codec', async () => {
     const { voice } = await start()
     await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID)
