@@ -61,6 +61,13 @@ export const workflowRevisions = pgTable(
       .references(() => workflows.id, { onDelete: 'cascade' }),
     revision: integer('revision').notNull(),
     source: text('source').notNull(),
+    /**
+     * The source bundled with its dependencies, as the isolate runs it. Null for revisions
+     * published before bundles were stored; those are bundled from `source` when loaded.
+     */
+    bundle: text('bundle'),
+    /** Every npm package the bundle was built with, as `name@version`, sorted. */
+    packages: jsonb('packages').$type<ReadonlyArray<string>>().notNull().default([]),
     grants: jsonb('grants').$type<WorkflowGrants>().notNull(),
     /** The discord.js events the revision's clients listen for, found when it was published. */
     events: jsonb('events').$type<ReadonlyArray<string>>().notNull(),

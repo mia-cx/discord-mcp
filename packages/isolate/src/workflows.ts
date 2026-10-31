@@ -10,7 +10,7 @@ import type {
 import type { OperationEntry } from '@mia-cx/discord-catalog'
 import { Effect, Redacted } from 'effect'
 import { type KvStore, makeBroker, type Presence } from './broker.ts'
-import { prepareScript, ScriptBuildError, type ScriptModule } from './bundle.ts'
+import { bundleWorkflow, ScriptBuildError, type ScriptModule, withRuntime } from './bundle.ts'
 import type { GatewayEvent, IsolateHost, ScriptOutcome } from './isolate-host.ts'
 
 const GUILD_MEMBERS = 1 << 1
@@ -260,9 +260,14 @@ interface Enabled {
   readonly stop: AbortController
 }
 
-/** Compile a revision for later events; a failure is reported by the event that awaits it. */
-const compile = (source: string) => {
-  const modules = prepareScript(source)
+/**
+ * Load a revision's modules for later events; a failure is reported by the event that awaits it.
+ * Revisions stored before bundles were are bundled from their source here.
+ */
+const compile = ({ source, bundle }: WorkflowRevision) => {
+  const modules = (bundle === null ? bundleWorkflow(source) : Promise.resolve(bundle)).then(
+    withRuntime,
+  )
   modules.catch(() => {})
   return modules
 }
@@ -355,7 +360,7 @@ export const makeWorkflowHost = ({
         (revision) =>
           kept.get(revisionKey(revision)) ?? {
             revision,
-            modules: compile(revision.source),
+            modules: compile(revision),
             stop: new AbortController(),
           },
       ),
@@ -574,11 +579,11 @@ export const makeWorkflowHost = ({
       Promise.all(
         matching.map(({ workflow }) =>
           workflow.modules.catch((error: unknown) => {
-            const { name, revision, source } = workflow.revision
+            const { name, revision } = workflow.revision
             log(
               `Workflow ${name} (revision ${revision}) of bot ${event.botId} did not compile: ${String(error)}`,
             )
-            workflow.modules = compile(source)
+            workflow.modules = compile(workflow.revision)
             return undefined
           }),
         ),
@@ -618,10 +623,10 @@ export const makeWorkflowHost = ({
       if (Buffer.byteLength(source) > SOURCE_LIMIT_BYTES) {
         throw invalid(`The source exceeds ${SOURCE_LIMIT_BYTES} bytes.`)
       }
-      const modules = await prepareScript(source).catch((error: unknown) => {
+      const bundle = await bundleWorkflow(source).catch((error: unknown) => {
         throw error instanceof ScriptBuildError ? invalid(error.message, ...error.issues) : error
       })
-      const declared = await probe(caller, modules)
+      const declared = await probe(caller, await withRuntime(bundle))
       const unsupported = declared.events.filter(
         (event) => !(event in WORKFLOW_EVENTS) && !SILENT_EVENTS.has(event),
       )
@@ -649,6 +654,8 @@ export const makeWorkflowHost = ({
         botId: caller.botId,
         name,
         source,
+        bundle,
+        packages: [],
         grants,
         events,
         intents: declared.intents,
