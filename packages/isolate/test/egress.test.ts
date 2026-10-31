@@ -74,6 +74,7 @@ describe('the address policy', () => {
     ['IPv4-mapped loopback', '::ffff:127.0.0.1', false],
     ['IPv4-mapped public', '::ffff:8.8.8.8', false],
     ['IPv4-compatible loopback', '::127.0.0.1', false],
+    ['IPv4-translated metadata', '::ffff:0:a9fe:a9fe', false],
     ['NAT64 metadata', '64:ff9b::a9fe:a9fe', false],
     ['local-use NAT64', '64:ff9b:1::a00:1', false],
     ['6to4 loopback', '2002:7f00:1::1', false],
@@ -95,7 +96,8 @@ describe('the broker refuses outbound requests it cannot show are public and gra
     expect(target.hits).toEqual([])
   })
 
-  // `{port}` is the target's: a refusal that failed to stop the request would show up in its hits.
+  // Rows that reach loopback use the target's `{port}`: a refusal that failed to stop the
+  // request would show up in its hits.
   it.each<{
     label: string
     url: string

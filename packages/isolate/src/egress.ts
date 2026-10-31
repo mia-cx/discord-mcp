@@ -25,10 +25,11 @@ for (const [network, prefix] of [
 ] as const) {
   nonPublic.addSubnet(network, prefix, 'ipv4')
 }
-// IPv4-compatible, NAT64, Teredo, and 6to4 addresses embed an IPv4 address that a gateway on
-// the path may deliver to, so they are blocked whole rather than decoded.
+// IPv4-compatible, IPv4-translated, NAT64, Teredo, and 6to4 addresses embed an IPv4 address that
+// a gateway on the path may deliver to, so they are blocked whole rather than decoded.
 for (const [network, prefix] of [
   ['::', 96],
+  ['::ffff:0:0:0', 96],
   ['64:ff9b::', 96],
   ['64:ff9b:1::', 48],
   ['100::', 64],
