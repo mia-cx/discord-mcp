@@ -13,6 +13,7 @@ export {
 export { ScriptRunner, scriptRun } from './tool.ts'
 export { Workflows, workflowTools } from './workflow-tools.ts'
 export {
+  type BorrowedRest,
   makeWorkflowHost,
   type WorkflowEvent,
   type WorkflowHost,

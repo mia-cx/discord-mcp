@@ -1,4 +1,4 @@
-import { createBotRuntimes, createTokenVault } from '@discord-mcp/bot-host'
+import { type BotRuntimes, createBotRuntimes, createTokenVault } from '@discord-mcp/bot-host'
 import { fakeGateway, manualClock } from '@discord-mcp/bot-host/testing'
 import { DiscordRest, OperationCatalog } from '@discord-mcp/discord-api'
 import { makeIsolateHost, makeWorkflowHost, type WorkflowHost } from '@discord-mcp/isolate'
@@ -6,10 +6,10 @@ import { inMemoryStorage } from '@discord-mcp/storage/testing'
 import { Effect, Layer, Redacted } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createRelay } from '../src/relay.ts'
-import { config, discordOAuth, login } from './login-fixture.ts'
+import { botToken, config, discordOAuth, executor, login } from './login-fixture.ts'
 
-const TOKEN = 'private-bot-token'
 const BOT = { id: '345678901234567890', username: 'textile', discriminator: '0', bot: true }
+const TOKEN = botToken(BOT.id)
 const GUILD = '223456789012345678'
 const CHANNEL = '123456789012345678'
 const HUMAN_A = '234567890123456789'
@@ -80,7 +80,7 @@ afterEach(async () => {
  * The relay and bot host in one process, against a fake Discord: REST behind the relay's seam,
  * the Gateway on a local socket, and a clock that moves only when told to.
  */
-const platform = async () => {
+const platform = async (shards = 1) => {
   const storage = await inMemoryStorage()
   // Heartbeats are proven in the shard suite; keep them out of these windows.
   const gateway = await fakeGateway(100 * HOUR)
@@ -94,31 +94,36 @@ const platform = async () => {
     auth?: false
     body?: unknown
   }> = []
-  const rest = (credential: Redacted.Redacted<string>) =>
-    Layer.succeed(DiscordRest)({
-      raw: undefined as never,
-      request: (call) =>
-        Effect.sync(() => {
-          calls.push({
-            token: Redacted.value(credential),
-            method: call.method,
-            route: call.route,
-            ...(call.auth === undefined ? {} : { auth: call.auth }),
-            ...(call.body === undefined ? {} : { body: call.body }),
-          })
-          if (call.route === '/users/@me') return BOT
-          if (call.route === '/applications/@me') return { flags: discord.applicationFlags }
-          if (call.route.endsWith('/callback')) return new ArrayBuffer(0)
-          return sent((call.body as { content?: unknown } | undefined)?.content)
-        }),
-    })
+  /** Discord REST as the bot, for agent requests and workflow runs alike. */
+  const client = (credential: Redacted.Redacted<string>): DiscordRest['Service'] => ({
+    raw: undefined as never,
+    request: (call) =>
+      Effect.sync(() => {
+        calls.push({
+          token: Redacted.value(credential),
+          method: call.method,
+          route: call.route,
+          ...(call.auth === undefined ? {} : { auth: call.auth }),
+          ...(call.body === undefined ? {} : { body: call.body }),
+        })
+        if (call.route === '/users/@me') return BOT
+        if (call.route === '/applications/@me') return { flags: discord.applicationFlags }
+        if (call.route.endsWith('/callback')) return new ArrayBuffer(0)
+        return sent((call.body as { content?: unknown } | undefined)?.content)
+      }),
+  })
   let workflows: WorkflowHost | undefined
-  const bots = createBotRuntimes({
+  const bots: BotRuntimes = createBotRuntimes({
     vault: createTokenVault(Buffer.alloc(32, 1), storage),
     clock,
     log,
-    gatewayUrl: gateway.url,
-    onEvent: (event) => workflows?.dispatch(event),
+    discordFetch: gateway.discordFetch({ shards, maxConcurrency: shards }),
+    // Every shard's events, as the server wires them.
+    onDispatch: (botId, t, d) => {
+      const token = bots.tokenOf(botId)
+      if (token === undefined || typeof d !== 'object' || d === null) return
+      workflows?.dispatch({ botId, token, dispatch: { t, d: d as Record<string, unknown> } })
+    },
   })
   const catalog = await Effect.runPromise(Effect.provide(OperationCatalog, OperationCatalog.layer))
   workflows = makeWorkflowHost({
@@ -126,15 +131,18 @@ const platform = async () => {
     isolates: makeIsolateHost(),
     bots,
     operations: catalog.all,
-    rest,
+    rest: (_botId, token) => ({ client: client(token), release: () => {} }),
     log,
   })
   const oauth = discordOAuth()
   const relay = createRelay(
     { ...config, login: { ...config.login, allowedUserIds: [HUMAN_A, HUMAN_B] } },
-    rest,
+    executor((token) => Layer.succeed(DiscordRest)(client(token)), {
+      bots,
+      scripts: true,
+      workflows,
+    }),
     oauth.fetch,
-    { bots, workflows },
   )
   cleanup.push(
     () => storage.close(),
@@ -183,12 +191,15 @@ const platform = async () => {
     }
   }
 
-  /** The Gateway connection that identified with `intents`, once the shard has reconnected. */
-  const identifiedWith = async (intents: number) => {
+  /** Shard `shardId`'s connection that identified with `intents`, once it has reconnected. */
+  const identifiedWith = async (intents: number, shardId = 0) => {
     clock.advance(60_000)
     return vi.waitFor(() => {
       const connection = gateway.connections.find((c) =>
-        c.received.some((p) => p.op === 2 && (p.d as { intents: number }).intents === intents),
+        c.received.some((p) => {
+          const d = p.d as { intents?: number; shard?: number[] } | undefined
+          return p.op === 2 && d?.intents === intents && d.shard?.[0] === shardId
+        }),
       )
       if (connection === undefined) throw new Error(`No identify with intents ${intents}.`)
       return connection
@@ -200,7 +211,8 @@ const platform = async () => {
 
 describe('workflows', () => {
   it('answer Gateway events while no agent is connected, and record who changed them', async () => {
-    const { agent, calls, clock, discord, gateway, identifiedWith } = await platform()
+    // Two shards: the events below arrive on the second.
+    const { agent, calls, clock, discord, gateway, identifiedWith } = await platform(2)
     const asA = await agent(HUMAN_A)
 
     const published = await asA('discord_workflow_publish', {
@@ -228,7 +240,7 @@ describe('workflows', () => {
       grants: { operations: [], families: ['message', 'interaction', 'webhook'], hosts: [] },
       enabled: true,
     })
-    const connection = await identifiedWith(PING_INTENTS)
+    const connection = await identifiedWith(PING_INTENTS, 1)
 
     // Two days without an agent call: the bot stays online for its workflow.
     clock.advance(48 * HOUR)

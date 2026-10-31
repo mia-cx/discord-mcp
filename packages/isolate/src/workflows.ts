@@ -1,8 +1,8 @@
 import { McpRequestContext, type Principal, ValidationError } from '@discord-mcp/core'
-import { DiscordRest } from '@discord-mcp/discord-api/relay'
+import type { DiscordRest } from '@discord-mcp/discord-api/relay'
 import type { Storage, WorkflowGrants, WorkflowRevision } from '@discord-mcp/storage'
 import type { OperationEntry } from '@mia-cx/discord-catalog'
-import { Effect, type Layer, ManagedRuntime, Redacted } from 'effect'
+import { Effect, Redacted } from 'effect'
 import { makeBroker, type Presence } from './broker.ts'
 import { prepareScript, ScriptBuildError, type ScriptModule } from './bundle.ts'
 import type { GatewayEvent, IsolateHost, ScriptOutcome } from './isolate-host.ts'
@@ -111,10 +111,19 @@ export interface WorkflowHostOptions {
   readonly isolates: IsolateHost
   readonly bots: WorkflowBots
   readonly operations: ReadonlyArray<OperationEntry>
-  /** The REST client a bot's workflows call Discord through, holding its real token. */
-  readonly rest: (token: Redacted.Redacted<string>) => Layer.Layer<DiscordRest>
+  /**
+   * Borrow the REST client a bot's workflows call Discord through, acting with `token`. The bot
+   * host lends the bot's own rate limiter, so workflows and agent calls share its limits.
+   */
+  readonly rest: (botId: string, token: Redacted.Redacted<string>) => BorrowedRest
   /** Operator-facing failures. Never receives a token. */
   readonly log: (message: string) => void
+}
+
+/** A bot's REST client, lent until `release`. */
+export interface BorrowedRest {
+  readonly client: DiscordRest['Service']
+  readonly release: () => void
 }
 
 /** Who is changing a bot's workflows. */
@@ -160,8 +169,11 @@ export interface WorkflowHost {
   readonly delete: (caller: WorkflowCaller, name: string) => Promise<void>
   /** Run every enabled workflow that listens for this event. Events of one guild run in order. */
   readonly dispatch: (event: WorkflowEvent) => void
-  /** Keep every bot with enabled workflows online. Called once at startup. */
-  readonly restore: () => Promise<void>
+  /**
+   * Keep every bot with enabled workflows that `owns` accepts online. Called once at startup,
+   * before the bot host resumes stored sessions.
+   */
+  readonly restore: (owns?: (botId: string) => boolean) => Promise<void>
 }
 
 const invalid = (message: string, ...issues: ReadonlyArray<string>) =>
@@ -271,18 +283,10 @@ export const makeWorkflowHost = ({
   /** Refreshes for one bot run in order, so the last change decides what the bot host holds. */
   const refreshing = new Map<string, Promise<void>>()
   /**
-   * One REST client per bot, so its workflows share its rate limits, and the bot's user, which
-   * its isolates report as `client.user`. A resumed session brings no READY to read it from.
+   * Each bot's own user, which its isolates report as `client.user`, by the token it was read
+   * with. A resumed session brings no READY to read it from.
    */
-  const clients = new Map<
-    string,
-    {
-      readonly token: string
-      readonly runtime: ManagedRuntime.ManagedRuntime<DiscordRest, never>
-      readonly client: Promise<DiscordRest['Service']>
-      readonly user: Promise<unknown>
-    }
-  >()
+  const users = new Map<string, { readonly token: string; readonly user: Promise<unknown> }>()
 
   /**
    * Read the bot's enabled revisions. A revision still enabled keeps its entry from `previous`,
@@ -338,25 +342,20 @@ export const makeWorkflowHost = ({
     return done
   }
 
-  const restFor = (botId: string, token: string) => {
-    const current = clients.get(botId)
-    if (current?.token === token) return current
-    // A reset token retires the old client.
-    void current?.runtime.dispose()
-    const runtime = ManagedRuntime.make(rest(Redacted.make(token)))
-    const client = runtime.runPromise(Effect.flatMap(DiscordRest, Effect.succeed))
-    const user = client.then((c) =>
-      Effect.runPromise(c.request({ method: 'GET', route: '/users/@me', operationFamily: 'user' })),
-    )
-    const entry = { token, runtime, client, user }
-    clients.set(botId, entry)
-    // A failed lookup is retried with a new client on the next event.
+  const userFor = (botId: string, token: string) => {
+    const current = users.get(botId)
+    if (current?.token === token) return current.user
+    const { client, release } = rest(botId, Redacted.make(token))
+    const user = Effect.runPromise(
+      client.request({ method: 'GET', route: '/users/@me', operationFamily: 'user' }),
+    ).finally(release)
+    const entry = { token, user }
+    users.set(botId, entry)
+    // A failed lookup is retried on the next event.
     user.catch(() => {
-      if (clients.get(botId) !== entry) return
-      clients.delete(botId)
-      void runtime.dispose()
+      if (users.get(botId) === entry) users.delete(botId)
     })
-    return entry
+    return user
   }
 
   /** Queue one workflow's run of one event. Enqueues before returning, so callers keep order. */
@@ -366,9 +365,9 @@ export const makeWorkflowHost = ({
     workflow: Enabled,
     botUser: unknown,
     modules: ReadonlyArray<ScriptModule>,
-    client: Promise<DiscordRest['Service']>,
   ) => {
     const { botId } = event
+    const { client, release } = rest(botId, Redacted.make(event.token))
     const { d } = dispatch
     const { name, revision, grants } = workflow.revision
     const label = `Workflow ${name} (revision ${revision}) of bot ${botId}`
@@ -396,19 +395,15 @@ export const makeWorkflowHost = ({
           operations,
           grants,
           discord: (call, signal) =>
-            Effect.flatMap(
-              Effect.promise(() => client),
-              (c) =>
-                c.request(call).pipe(
-                  // DiscordRest aborts its HTTP request with the request context's signal.
-                  Effect.provideService(McpRequestContext, {
-                    requestId: `${label}: ${dispatch.t}`,
-                    signal,
-                    progressToken: undefined,
-                    notify: undefined,
-                    principal: WORKFLOW_PRINCIPAL,
-                  }),
-                ),
+            client.request(call).pipe(
+              // DiscordRest aborts its HTTP request with the request context's signal.
+              Effect.provideService(McpRequestContext, {
+                requestId: `${label}: ${dispatch.t}`,
+                signal,
+                progressToken: undefined,
+                notify: undefined,
+                principal: WORKFLOW_PRINCIPAL,
+              }),
             ),
           ...(isInteraction
             ? {
@@ -435,6 +430,7 @@ export const makeWorkflowHost = ({
           if (!workflow.stop.signal.aborted) log(`${label} did not run: ${String(error)}`)
         },
       )
+      .finally(release)
   }
 
   const route = async (event: WorkflowEvent) => {
@@ -449,9 +445,8 @@ export const makeWorkflowHost = ({
       return dispatch === undefined ? [] : [{ workflow, dispatch }]
     })
     if (matching.length === 0) return
-    const { client, user } = restFor(event.botId, event.token)
     const [botUser, modules] = await Promise.all([
-      user,
+      userFor(event.botId, event.token),
       Promise.all(
         matching.map(({ workflow }) =>
           workflow.modules.catch((error: unknown) => {
@@ -468,7 +463,7 @@ export const makeWorkflowHost = ({
     // Enqueued together, in order, so every workflow sees a guild's events in the order they came.
     matching.forEach(({ workflow, dispatch }, index) => {
       const compiled = modules[index]
-      if (compiled !== undefined) void run(event, dispatch, workflow, botUser, compiled, client)
+      if (compiled !== undefined) void run(event, dispatch, workflow, botUser, compiled)
     })
   }
 
@@ -616,9 +611,11 @@ export const makeWorkflowHost = ({
       routing.set(event.botId, next)
     },
 
-    restore: async () => {
+    restore: async (owns = () => true) => {
       const intents = new Map<string, number>()
       for (const { botId, intents: own } of await storage.enabledRevisions()) {
+        // Bot hosts share the database; each holds only the bots it owns.
+        if (!owns(botId)) continue
         intents.set(botId, (intents.get(botId) ?? 0) | own)
       }
       await Promise.all([...intents].map(([botId, all]) => bots.hold(botId, all)))

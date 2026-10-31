@@ -56,8 +56,9 @@ registration expires, and lapses after 30 days unused.
 Refresh revokes every copy of the previous login, so each machine needs its own
 sign-in. The stdio bridge refreshes a day before expiry and after a rejected
 access credential, and bridges sharing one login file take turns through a lock.
-Only spent login-code hashes remain in memory for one minute; run one server
-process. Restarting cancels unfinished logins but preserves issued credentials.
+Authorization codes also enclose Discord's refresh token, and redeeming one
+rotates it, so Discord rejects a replayed code. No login state lives in memory:
+any replica can finish any login, and restarts preserve logins in progress.
 
 The executable serves MCP revision `2026-07-28` without an initialization handshake
 or sessions. Older MCP clients can use the SDK's stateless compatibility path.
@@ -261,6 +262,10 @@ Keep the environment file private. Rotating the encryption key invalidates all l
 | `DATABASE_URL` | Optional Postgres URL. Turns on [bot hosting](#bot-hosting) when the allowlist names users. |
 | `TOKEN_VAULT_KEY` | Required for bot hosting. Stable random 32-byte base64 key that encrypts stored bot tokens and Gateway sessions. |
 | `DISCORD_TOKEN` | Stdio only. Ignored by the HTTP relay. |
+| `DISCORD_MCP_TIER` | `all` runs both tiers in one process; `central` or `bot-host` runs one. See [Tiers](#tiers). |
+| `BOT_HOSTS` | Split tiers only. Comma-separated base URL of every bot host. |
+| `BOT_HOST_URL` | Bot hosts only. This host's URL, exactly as `BOT_HOSTS` lists it. |
+| `BOT_HOST_SECRET` | Split tiers only. Shared random secret, at least 32 characters, that bot hosts require from central. |
 
 `/health/live` and `/health/ready` return HTTP 200 when the process is serving.
 They do not check Discord. `/mcp` returns 401 for missing, invalid, expired, or
@@ -283,15 +288,51 @@ Each later call restarts a 24-hour timer; when it runs out, the bot disconnects 
 offline, unless it has enabled [workflows](#workflows). Startup applies pending database
 migrations and brings every bot with enabled workflows online.
 
-A restart keeps bots online. The bot's Gateway session is stored encrypted alongside its
-token, and the next process resumes it, so Discord replays the events sent while the server was
-down. If Discord no longer accepts the session, the bot connects afresh. Each resumed bot gets a
-new 24-hour timer.
+A bot runs as many shards as Discord recommends, all in one process. Shards identify as fast
+as Discord's `max_concurrency` allows, and spend at most half the Identifies Discord says the
+bot has left today, leaving the rest for the bot's other clients. When Discord says the bot
+needs more shards, it goes offline until the next agent call, which brings it back with
+Discord's new count.
+
+A restart keeps bots online. Each shard's Gateway session is stored encrypted alongside the
+bot's token, and the next process resumes it, so Discord replays the events sent while the
+server was down. If Discord no longer accepts a session, that shard connects afresh. A resumed
+bot keeps its shard count and gets a new 24-hour timer.
 
 Set `DATABASE_URL`, `TOKEN_VAULT_KEY` (generate it like `OAUTH_ENCRYPTION_KEY`), and a
 `DISCORD_OAUTH_ALLOWED_USER_IDS` list. Without that list, the server logs a warning and
 serves the plain relay. Back up the vault key apart from the database: without it, stored
 tokens cannot be decrypted.
+
+### Tiers
+
+The relay runs as one process by default. To scale, split it into two tiers, each with
+as many replicas as it needs:
+
+- **Central** serves MCP and OAuth. It checks the login and the allowlist, reads the bot ID
+  from the first segment of the bot token, and forwards the request to the bot host that
+  owns that bot. It holds no bot tokens and calls Discord only to check logins.
+- **Bot hosts** check each bot token with Discord and run its requests. All requests for one
+  bot share one rate limiter, whichever central replica received them. `DATABASE_URL` and
+  `TOKEN_VAULT_KEY` go on bot hosts, and scripts and workflows run there, sharing the bot's
+  rate limiter. A bot host starts bot hosting and offers `discord_script_run` and the workflow
+  tools by the same `DISCORD_OAUTH_ALLOWED_USER_IDS` rules as the single process. Central
+  enforces that allowlist and tells the bot host which human made each request, for the
+  workflow change log.
+
+Give both tiers the same `BOT_HOSTS` and `BOT_HOST_SECRET`. Ownership comes from rendezvous
+hashing over `BOT_HOSTS`, so every replica agrees on it, and adding or removing a host moves
+only the bots that host gains or loses. A host answers 503 with `Retry-After: 1` for a bot
+its list says it does not own, so a central still on an old list costs a retry, not a second
+owner. Two hosts on different lists can both own a bot that moved, each with its own rate
+limiter, so change `BOT_HOSTS` by stopping every bot host and then starting them all on the new
+list. Centrals can update in any order. Each bot host resumes the stored sessions of the bots
+it owns when it starts, and brings its bots with enabled workflows online, so a bot that moved
+comes back online on its new host. Keep bot hosts off the public network: the hop from central is plain HTTP and
+carries bot tokens.
+
+Logins, refreshes, and MCP requests all work on any central replica, so no sticky routing is
+needed.
 
 For agent-operated clients, use the [curl example](./docs/operating.md#curl).
 For a developer-Team-derived access list, follow
@@ -312,7 +353,8 @@ After changing `packages/storage/src/schema.ts`, generate a migration with
 
 Integration tests cover browser/CLI login, credential bindings, code and refresh replay,
 concurrent bridge refreshes,
-OAuth revocation and expiry, concurrent bot isolation, reads, writes, and rate limits.
+OAuth revocation and expiry, concurrent bot isolation, reads, writes, rate limits, and
+routing across central and bot-host processes.
 
 ## Earlier implementation
 

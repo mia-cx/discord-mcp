@@ -1,7 +1,6 @@
-import { DiscordRest } from '@discord-mcp/discord-api/relay'
 import { inMemoryStorage } from '@discord-mcp/storage/testing'
 import { OperationCatalog } from '@mia-cx/discord-catalog'
-import { Effect, Layer } from 'effect'
+import { Effect } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { IsolateHost, ScriptExecution, ScriptOutcome } from '../src/isolate-host.ts'
 import { makeIsolateHost } from '../src/isolate-host.ts'
@@ -61,8 +60,10 @@ const setup = async (isolates: IsolateHost = recordingIsolates().host) => {
     isolates,
     bots,
     operations: catalog.all,
-    rest: () =>
-      Layer.succeed(DiscordRest)({ raw: undefined as never, request: () => Effect.succeed(BOT) }),
+    rest: () => ({
+      client: { raw: undefined as never, request: () => Effect.succeed(BOT) },
+      release: () => {},
+    }),
     log: () => {},
   })
   /** Store and enable a workflow listening for `events`, declaring `intents`. */
@@ -194,6 +195,27 @@ describe('the workflow dispatcher', () => {
     await expect(host.disable(caller, 'slow')).rejects.toThrow('connection lost')
 
     expect(runs.map((r) => r.execution.signal?.aborted)).toEqual([true, true])
+  })
+
+  it('holds only the bots this host owns at startup, when bot hosts share a database', async () => {
+    const { storage, bots, host } = await setup()
+    const other = '456789012345678901'
+    for (const botId of [BOT.id, other]) {
+      await storage.publishWorkflow({
+        botId,
+        name: 'ping',
+        source: '',
+        grants,
+        events: ['messageCreate'],
+        intents: GUILDS,
+        actorId: HUMAN,
+      })
+      await storage.setEnabledRevision(botId, 'ping', 1, HUMAN)
+    }
+
+    await host.restore((botId) => botId === BOT.id)
+
+    expect(bots.hold.mock.calls).toEqual([[BOT.id, GUILDS]])
   })
 
   it('refuses to publish a client that declares intent bits Discord does not define', async () => {
