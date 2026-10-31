@@ -1010,3 +1010,71 @@ it('starts a bot’s shards while another bot’s session write is slow', async 
   await gateway.close()
   await storage.close()
 })
+
+it('takes a bot offline once for all the shards Discord closed, even if that pass fails', async () => {
+  const storage = await inMemoryStorage()
+  const gateway = await fakeGateway(100 * HOUR)
+  const clock = manualClock()
+  let shards = 2
+  /** Holds the next pass at its first storage call until `resume`. */
+  let paused: Promise<void> | undefined
+  let resume = () => {}
+  const pause = () => {
+    paused = new Promise((resolve) => {
+      resume = () => {
+        paused = undefined
+        resolve()
+      }
+    })
+  }
+  let offlineCalls = 0
+  const flaky: Storage = {
+    ...storage,
+    renewLeases: async (...args) => {
+      await paused
+      return storage.renewLeases(...args)
+    },
+    setBotOffline: (...args) => {
+      offlineCalls += 1
+      if (offlineCalls !== 2) return storage.setBotOffline(...args)
+      // Postgres drops the connection after the first write, and the next pass waits on it.
+      pause()
+      return Promise.reject(new Error('Connection terminated unexpectedly'))
+    },
+  }
+  const bots = startHost(flaky, clock, (input, init) =>
+    gateway.discordFetch({ shards, maxConcurrency: 2 })(input, init),
+  )
+  await bots.use(BOT_ID, 'private-token-a')
+  await vi.waitFor(() => expect(identified(gateway)).toEqual(['0/2', '1/2']))
+
+  // Sharding required, on both shards, before the next pass.
+  pause()
+  shards = 4
+  for (const connection of gateway.connections) connection.close(4011)
+  await vi.waitFor(() => expect(gateway.connections.map((c) => c.closeCode)).toEqual([4011, 4011]))
+  // The bot host hears both closes.
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  resume()
+  clock.advance(RECONCILE_MS)
+  await vi.waitFor(async () => expect((await storage.loadBot(BOT_ID))?.online).toBeUndefined())
+  await new Promise((resolve) => setTimeout(resolve, 100))
+
+  // An agent call brings the bot back with Discord's new count before the next pass.
+  const using = bots.use(BOT_ID, 'private-token-a')
+  await vi.waitFor(async () =>
+    expect((await storage.loadBot(BOT_ID))?.online).toMatchObject({ shardCount: 4 }),
+  )
+  resume()
+  await using
+
+  await vi.waitFor(() => {
+    clock.advance(1_000)
+    expect(identified(gateway)).toContain('0/4')
+  })
+  expect((await storage.loadBot(BOT_ID))?.online).toMatchObject({ shardCount: 4 })
+
+  await bots.close()
+  await gateway.close()
+  await storage.close()
+})

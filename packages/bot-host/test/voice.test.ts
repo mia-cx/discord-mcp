@@ -59,13 +59,18 @@ const start = async ({
   let held: Promise<void> | undefined
   let release = () => {}
   let renewing = true
-  let keepsRest = true
+  let taken: string | undefined
   let saving: Promise<void> | undefined
+  let failSave = false
   const bots = createBotRuntimes({
     vault: {
       ...vault,
       storeSession: async (...args) => {
         await saving
+        if (failSave) {
+          failSave = false
+          throw new Error('Connection terminated unexpectedly')
+        }
         return vault.storeSession(...args)
       },
     },
@@ -74,9 +79,9 @@ const start = async ({
       renewLeases: async (...args) => {
         if (!renewing) throw new Error('Connection refused')
         const renewed = await storage.renewLeases(...args)
-        if (keepsRest) return renewed
-        keepsRest = true
-        return renewed.filter((name) => !name.startsWith('bot:'))
+        const lost = taken
+        taken = undefined
+        return lost === undefined ? renewed : renewed.filter((name) => !name.startsWith(lost))
       },
       voiceOptedOut: async (...lookup) => {
         await held
@@ -129,9 +134,13 @@ const start = async ({
     cut: () => {
       renewing = false
     },
-    /** The next renewal keeps every lease but the bot's REST lease, which another host took. */
-    loseRest: () => {
-      keepsRest = false
+    /** The next renewal keeps every lease but those named `prefix…`, which another host took. */
+    lose: (prefix: string) => {
+      taken = prefix
+    },
+    /** The next session write fails. */
+    failSession: () => {
+      failSave = true
     },
     /** Session writes wait until the returned function is called. */
     holdSessions: () => {
@@ -332,12 +341,46 @@ describe('voice', () => {
     gateway.connections[0]?.send({ op: 9, d: true })
     await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(4000))
     const saved = leases.holdSessions()
-    leases.loseRest()
+    leases.lose(`bot:${BOT_ID}`)
     clock.advance(500)
     await new Promise((resolve) => setTimeout(resolve, 200))
     saved()
 
     // It waits out the turn of the Identify that started the session it replaces.
+    await vi.waitFor(() => {
+      clock.advance(1_000)
+      expect(gateway.connections[1]?.received[0]).toBeDefined()
+    })
+    expect(gateway.connections[1]?.received[0]).toMatchObject({ op: 2 })
+  })
+
+  it('restarts such a shard afresh even when saving its ended session failed once', async () => {
+    const { voice, gateway, clock, leases } = await start()
+    await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID)
+    clock.advance(4_500)
+    gateway.connections[0]?.send({ op: 9, d: true })
+    await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(4000))
+    // Postgres drops the write that ends the session; the shard's lease outlives it.
+    leases.failSession()
+    leases.lose(`bot:${BOT_ID}`)
+    clock.advance(500)
+
+    await vi.waitFor(() => {
+      clock.advance(1_000)
+      expect(gateway.connections[1]?.received[0]).toBeDefined()
+    })
+    expect(gateway.connections[1]?.received[0]).toMatchObject({ op: 2 })
+  })
+
+  it('ends the session of a shard it loses while the bot is in that shard’s channel', async () => {
+    const { voice, gateway, clock, leases } = await start()
+    await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID)
+
+    // Another host takes the shard, but this host still serves the bot.
+    leases.lose(`shard:${BOT_ID}:`)
+    clock.advance(5_000)
+
+    // Resumed, the session would keep the bot in a channel this host's voice no longer carries.
     await vi.waitFor(() => {
       clock.advance(1_000)
       expect(gateway.connections[1]?.received[0]).toBeDefined()

@@ -271,12 +271,8 @@ export const createBotRuntimes = ({
       if (name.startsWith(REST_LEASE)) return dropVoice(name.slice(REST_LEASE.length))
       const lost = running.get(name)
       if (lost === undefined) return
-      // Leases lapse together; leave the bot's voice channels while this shard can still say so.
-      if (!leases.holds(restLease(lost.botId))) dropVoice(lost.botId)
-      if (!running.has(name)) return
       running.delete(name)
-      lost.shard.suspend()
-      voices.get(lost.botId)?.voice.dropped(lost.shardId)
+      halt(lost)
       log(
         `Bot ${lost.botId}'s shard ${lost.shardId} stopped on this host: it could not renew its lease in time.`,
       )
@@ -285,19 +281,30 @@ export const createBotRuntimes = ({
   )
 
   /**
-   * Stop a bot's voice here, since another host may serve the bot now. A shard here whose leave
-   * could not reach Discord comes back with a fresh session, rather than one that still has the
-   * bot in a channel.
+   * Stop a shard running here, ending it for good with `end`. Otherwise its session stays
+   * resumable, unless this host's voice has a channel on it: resumed, that session would keep the
+   * bot in a channel nothing relays, so it identifies afresh.
    */
+  const halt = (run: Running, end = false) => {
+    const voice = voices.get(run.botId)?.voice
+    if (end) run.shard.stop()
+    else run.shard.suspend(voice?.inChannel(run.shardId) ?? false)
+    // Its voice joins wait for the shard wherever it comes back.
+    voice?.dropped(run.shardId)
+  }
+
+  /** Stop a bot's voice here, since another host may serve the bot now. */
   const dropVoice = (botId: string) => {
     const entry = voices.get(botId)
     if (entry === undefined) return
-    voices.delete(botId)
-    for (const shardId of entry.voice.close()) {
-      const name = shardLease(botId, shardId)
-      running.get(name)?.shard.suspend(true)
+    entry.voice.close()
+    // Shards that could not send their leave stop here, ending their sessions.
+    for (const [name, run] of running) {
+      if (run.botId !== botId || !entry.voice.inChannel(run.shardId)) continue
       running.delete(name)
+      halt(run)
     }
+    voices.delete(botId)
     log(`Bot ${botId}'s voice stopped on this host: it could not renew its REST lease in time.`)
   }
 
@@ -368,6 +375,18 @@ export const createBotRuntimes = ({
       const cancel = clock.schedule(() => saveSession(botId, shardId, latest), RETRY_MS)
       retries.set(key, { botId, shardId, session: latest, cancel })
     })
+  }
+
+  /**
+   * Wait for a bot's session writes, after one more try at any that failed, so whoever runs its
+   * shards next starts from the newest sessions.
+   */
+  const flushSessions = async (botId: string) => {
+    await writes.get(botId)
+    for (const retry of retries.values()) {
+      if (retry.botId === botId) saveSession(botId, retry.shardId, retry.session)
+    }
+    await writes.get(botId)
   }
 
   /** Discord's sharding advice for a bot, or `undefined` when it rejects the token. */
@@ -534,11 +553,8 @@ export const createBotRuntimes = ({
   /** Stop running a shard here, once its last session write lands, and give up its lease. */
   const leave = async (name: string, run: Running, end: boolean) => {
     running.delete(name)
-    if (end) run.shard.stop()
-    else run.shard.suspend()
-    // Its voice joins wait for the shard wherever it comes back.
-    voices.get(run.botId)?.voice.dropped(run.shardId)
-    await writes.get(run.botId)
+    halt(run, end)
+    await flushSessions(run.botId)
     await leases.release(name)
   }
 
@@ -547,11 +563,16 @@ export const createBotRuntimes = ({
    * those idle for 24 hours without workflows to hold them.
    */
   const onlineBots = async () => {
-    for (const [name, run] of running) {
+    for (const run of running.values()) {
       if (run.fatal === undefined) continue
       await vault.setOffline(run.botId, run.token, run.fatal)
-      // Once only: should this pass fail, the bot may come back online with the same token.
-      await leave(name, run, true)
+      // Once for every shard Discord closed on this token: should this pass fail, the bot may
+      // come back online with the same token.
+      const ended = [...running].filter(
+        ([, other]) =>
+          other.fatal !== undefined && other.botId === run.botId && other.token === run.token,
+      )
+      await Promise.all(ended.map(([name, other]) => leave(name, other, true)))
     }
     const now = clock.date()
     const online = new Map<string, OnlineVaultBot>()
@@ -668,7 +689,7 @@ export const createBotRuntimes = ({
     if (claimed.length === 0) return
     // Read sessions again: a host that just handed a shard over saved it before releasing, and
     // this host may be saving one it stopped. Only those bots': another bot's write may be slow.
-    await Promise.all(claimed.map(({ botId }) => writes.get(botId)))
+    await Promise.all([...new Set(claimed.map(({ botId }) => botId))].map(flushSessions))
     const fresh = new Map((await vault.loadOnline()).map((bot) => [bot.botId, bot]))
     for (const { name, botId, shardId } of claimed) {
       const bot = fresh.get(botId)
@@ -713,7 +734,7 @@ export const createBotRuntimes = ({
     for (const name of leases.names()) {
       if (!name.startsWith(SHARD_LEASE) || running.has(name)) continue
       // A shard stopped between passes may still be saving the session its next host starts from.
-      await writes.get(botOfShardLease(name))
+      await flushSessions(botOfShardLease(name))
       await leases.release(name)
     }
     for (const botId of online.keys()) {
@@ -946,15 +967,11 @@ export const createBotRuntimes = ({
       onlineRetries.clear()
       for (const { cancel } of gates.values()) cancel()
       gates.clear()
-      // Voice cannot move between processes, so bots leave their voice channels first. A shard
-      // whose leave could not reach Discord comes back elsewhere with a fresh session, rather than
-      // one that still has the bot in a channel.
-      const owing = new Map([...voices].map(([botId, { voice }]) => [botId, voice.close()]))
-      voices.clear()
-      for (const { botId, shardId, shard } of running.values()) {
-        shard.suspend(owing.get(botId)?.has(shardId) ?? false)
-      }
+      // Voice cannot move between processes, so bots leave their voice channels first.
+      for (const { voice } of voices.values()) voice.close()
+      for (const run of running.values()) halt(run)
       running.clear()
+      voices.clear()
       // Sessions only: the next agent call makes a token or online-state write again.
       await sessionWrites()
       // One last try at failed writes, so the next host starts from the newest state.
