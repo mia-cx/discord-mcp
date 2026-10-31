@@ -278,7 +278,7 @@ export const startShard = ({
 
   function connect() {
     // Discord says to fall back to the initial URL when the resume URL fails.
-    let url = new URL(gatewayUrl)
+    const url = new URL(gatewayUrl)
     let viaResumeUrl = false
     if (session !== undefined && !resumeUrlFailed) {
       try {
@@ -294,7 +294,13 @@ export const startShard = ({
               resume.port === '' &&
               resume.hostname.endsWith('.discord.gg')))
         ) {
-          url = resume
+          // Keep the trusted URL object; copy only the checked authority and resume path.
+          url.protocol = resume.protocol
+          url.host = resume.host
+          url.port = resume.port
+          url.pathname = resume.pathname
+          url.username = ''
+          url.password = ''
           viaResumeUrl = true
         }
       } catch {

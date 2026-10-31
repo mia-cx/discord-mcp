@@ -302,9 +302,15 @@ describe('the shard supervisor', () => {
   it.each([
     ['wss://gateway.discord.gg', 'wss://gateway.discord.gg/'],
     ['wss://gateway-us-east1-b.discord.gg', 'wss://gateway-us-east1-b.discord.gg/'],
+    ['wss://gateway-us-east1-b.discord.gg:443', 'wss://gateway-us-east1-b.discord.gg/'],
+    [
+      'wss://gateway-us-east1-b.discord.gg/resume?redirect=http://127.0.0.1#ignored',
+      'wss://gateway-us-east1-b.discord.gg/resume/',
+    ],
     ['wss://gateway.discord.gg.evil.example', 'wss://gateway.discord.gg/'],
     ['wss://evildiscord.gg', 'wss://gateway.discord.gg/'],
     ['wss://gateway.discord.gg@evil.example', 'wss://gateway.discord.gg/'],
+    ['wss://gateway.discord.gg@127.0.0.1', 'wss://gateway.discord.gg/'],
     ['wss://user:password@gateway.discord.gg', 'wss://gateway.discord.gg/'],
     ['ws://gateway-us-east1-b.discord.gg', 'wss://gateway.discord.gg/'],
     ['wss://gateway-us-east1-b.discord.gg:8443', 'wss://gateway.discord.gg/'],
