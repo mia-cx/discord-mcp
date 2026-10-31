@@ -517,17 +517,13 @@ describe('receiving voice', () => {
   })
 
   it('lets the latest join decide while a notice is still being posted', async () => {
-    let release = () => {}
-    const held = new Promise<void>((resolve) => {
-      release = resolve
-    })
-    const notices: string[] = []
+    // Each notice waits until the test releases it.
+    const notices: Array<{ readonly path: string; readonly release: () => void }> = []
     const { voice, voiceServer, gateway } = await start({
       through: (discordFetch) => async (input, init) => {
         const path = new URL(String(input)).pathname
         if (path.endsWith('/messages')) {
-          notices.push(path)
-          await held
+          await new Promise<void>((release) => notices.push({ path, release }))
         }
         return discordFetch(input, init)
       },
@@ -539,17 +535,20 @@ describe('receiving voice', () => {
     const receiving = voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID, true)
     await vi.waitFor(() => expect(notices).toHaveLength(1))
     expect(await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID)).toEqual({ receiving: false })
+    notices[0]?.release()
+    expect(await receiving).toEqual({ receiving: false })
+
     // Asked to receive again, then moved, before the notice is up: the new channel needs its own.
     const stale = voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID, true)
+    await vi.waitFor(() => expect(notices).toHaveLength(2))
     moveBot(gateway, ELSEWHERE)
     await settle()
     const moved = voice.join(GUILD_ID, ELSEWHERE, true)
-    await vi.waitFor(() => expect(notices).toHaveLength(2))
-    expect(notices[1]).toBe(`/api/v10/channels/${ELSEWHERE}/messages`)
-
-    release()
-    expect(await receiving).toEqual({ receiving: false })
+    await vi.waitFor(() => expect(notices).toHaveLength(3))
+    expect(notices[2]?.path).toBe(`/api/v10/channels/${ELSEWHERE}/messages`)
+    notices[1]?.release()
     expect(await stale).toEqual({ receiving: false })
+    notices[2]?.release()
     expect(await moved).toEqual({ receiving: true })
     await vi.waitFor(() =>
       expect(voiceStates(gateway).at(-1)).toMatchObject({

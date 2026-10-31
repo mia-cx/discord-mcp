@@ -400,11 +400,11 @@ When the notice can't be posted, `receiving` is false, `reason` says why, and th
 sends audio. Joining the same channel again switches receiving on or off. If the bot is moved to
 another channel, it stops receiving until it joins with `receive: true` there.
 
-People who opted out never appear: their audio is dropped before it is decrypted. An opt-out
-reaches the bot whose notice was clicked at once. Other bots on the same bot host apply an
-opt-out of every bot at once too; bots on other bot hosts apply it when the person next starts
-speaking. Opt-outs are stored as user IDs only, with the bot and server for a per-bot opt-out.
-The buttons answer while the bot is online.
+People who opted out never appear: their audio is dropped before it is decrypted. Opt-outs and
+undos apply at once on every bot host, which Postgres notifies of each one. While a bot host's
+notification connection is down, its bots check storage whenever a person starts speaking.
+Opt-outs are stored as user IDs only, with the bot and server for a per-bot opt-out. The buttons
+answer while the bot is online.
 
 Discord neither documents nor supports bots receiving voice, so receiving is best-effort and may
 break without notice. A speaker is heard only once Discord names their audio stream, so their
