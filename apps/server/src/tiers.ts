@@ -9,6 +9,20 @@ export interface Membership {
   readonly secret: string
 }
 
+/** Hop-by-hop and framing headers, which `fetch` sets or rejects, and the caller's cookies. */
+const NOT_FORWARDED = [
+  'connection',
+  'content-length',
+  'cookie',
+  'host',
+  'keep-alive',
+  'proxy-connection',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+]
+
 /** Retry soon: the bot's owner is unreachable or the hosts are changing. */
 const moving = (error: string) => json(503, { error }, { 'retry-after': '1' })
 
@@ -22,7 +36,7 @@ export const forwardToBotHosts =
     const owner = ownerOf(hosts, botId)
     if (owner === undefined) return moving('bot_host_unavailable')
     const headers = new Headers(request.headers)
-    for (const name of ['host', 'cookie', 'content-length']) headers.delete(name)
+    for (const name of NOT_FORWARDED) headers.delete(name)
     headers.set('authorization', `Bearer ${secret}`)
     try {
       const response = await fetch(`${owner}/mcp`, {
@@ -33,10 +47,9 @@ export const forwardToBotHosts =
         redirect: 'error',
         signal: request.signal,
       })
-      return new Response(response.body, {
-        status: response.status,
-        headers: new Headers(response.headers),
-      })
+      const returned = new Headers(response.headers)
+      for (const name of NOT_FORWARDED) returned.delete(name)
+      return new Response(response.body, { status: response.status, headers: returned })
     } catch {
       return moving('bot_host_unavailable')
     }

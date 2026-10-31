@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { createServer } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -229,6 +229,40 @@ describe('central and bot-host tiers', () => {
     expect(centralCalls.length).toBeGreaterThan(0)
     expect(centralCalls.every((call) => call.path.includes('/oauth2/'))).toBe(true)
   }, 30_000)
+
+  it('forwards a request whose body arrives in chunks', async () => {
+    const [bot] = bots
+    const listed = new Promise<number>((resolve, reject) => {
+      const request = httpRequest(`${centrals[0]}/mcp`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+          'mcp-method': 'tools/list',
+          'mcp-protocol-version': '2026-07-28',
+          authorization: `Bearer ${accessToken}`,
+          'x-discord-bot-token': bot?.token ?? '',
+        },
+      })
+      request.on('response', (response) => resolve(response.resume().statusCode ?? 0))
+      request.on('error', reject)
+      const body = JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/list',
+        params: {
+          _meta: {
+            'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+            'io.modelcontextprotocol/clientCapabilities': {},
+          },
+        },
+      })
+      // Two writes without a Content-Length make Node send Transfer-Encoding: chunked.
+      request.write(body.slice(0, 10))
+      request.end(body.slice(10))
+    })
+    expect(await listed).toBe(200)
+  })
 
   it('refuses requests that skip central or reach a host that does not own the bot', async () => {
     const [owned, other] = bots
