@@ -62,7 +62,8 @@ const setup = async (isolates: IsolateHost = recordingIsolates().host) => {
   const bots = {
     hold: vi.fn(async () => {}),
     updatePresence: vi.fn(),
-    tokenOf: () => 'private-bot-token',
+    tokenOf: vi.fn((): string | undefined => 'private-bot-token'),
+    holds: vi.fn(() => false),
   }
   const host = makeWorkflowHost({
     storage,
@@ -247,5 +248,39 @@ describe('the workflow dispatcher', () => {
         grants,
       }),
     ).rejects.toMatchObject({ message: expect.stringContaining('intent bits') })
+  })
+})
+
+describe('workflow routes', () => {
+  it('answer 503 while an enabled route’s bot is offline, and 404 for any other route', async () => {
+    const { bots, host, storage, enable } = await setup()
+    // No running session: Discord has the bot offline.
+    bots.tokenOf.mockReturnValue(undefined)
+    const request = { method: 'POST', url: 'https://relay.test/', headers: [], body: '' }
+    const serve = (name: string) => host.serve(BOT.id, name, request, new AbortController().signal)
+    await enable('listener', GUILDS)
+    await storage.publishWorkflow({
+      botId: BOT.id,
+      name: 'hook',
+      source: '',
+      grants,
+      events: [],
+      intents: 0,
+      route: true,
+      actorId: HUMAN,
+    })
+    await host.enable(caller, 'hook', undefined, ALL_FLAGS)
+
+    // Not held here: refused before storage, whatever the name.
+    expect((await serve('hook')).status).toBe(404)
+
+    bots.holds.mockReturnValue(true)
+    const offline = await serve('hook')
+    expect(offline.status).toBe(503)
+    expect(offline.headers.get('retry-after')).toBe('1')
+    expect((await serve('listener')).status).toBe(404)
+
+    await host.disable(caller, 'hook')
+    expect((await serve('hook')).status).toBe(404)
   })
 })

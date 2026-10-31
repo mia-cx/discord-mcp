@@ -29,6 +29,8 @@ export interface WorkflowRevision {
   readonly events: ReadonlyArray<string>
   /** The Gateway intents its clients declare, as a bitfield. */
   readonly intents: number
+  /** Whether it answers its inbound HTTP route. */
+  readonly route: boolean
   /** The cron expressions its clients declare, in UTC. */
   readonly schedules: ReadonlyArray<string>
   /** The Discord user ID of the human who published it. */
@@ -58,7 +60,10 @@ export type WorkflowRunOutcome = 'completed' | 'threw' | 'timed_out' | 'crashed'
 export interface WorkflowRun {
   readonly workflowId: string
   readonly revision: number
-  /** What it ran for: a Gateway dispatch, such as MESSAGE_CREATE, or `schedule <cron>`. */
+  /**
+   * What it ran for: a Gateway dispatch, such as MESSAGE_CREATE, `schedule <cron>`, or `HTTP POST`
+   * for a route request.
+   */
   readonly event: string
   readonly outcome: WorkflowRunOutcome
   readonly error: string | null
@@ -92,6 +97,7 @@ export interface PublishWorkflow {
   readonly grants: WorkflowGrants
   readonly events: ReadonlyArray<string>
   readonly intents: number
+  readonly route: boolean
   readonly schedules: ReadonlyArray<string>
   readonly actorId: string
 }

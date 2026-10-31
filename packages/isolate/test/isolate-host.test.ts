@@ -213,6 +213,24 @@ describe('the isolate host', () => {
     expect((await running).outcome).toBe('completed')
   })
 
+  it('stops waiting for a slot as soon as the execution is abandoned', async () => {
+    const host = makeIsolateHost(1)
+    const busy = await execution(
+      '1',
+      'export default () => new Promise((r) => setTimeout(r, 1500))',
+      5000,
+    )
+    const waiting = await execution('2', 'export default () => 0', 5000)
+
+    const running = host.run(busy)
+    const started = Date.now()
+    await expect(
+      host.run({ ...waiting, admitWithinMs: 5000, signal: AbortSignal.timeout(100) }),
+    ).rejects.toThrow()
+    expect(Date.now() - started).toBeLessThan(1000)
+    expect((await running).outcome).toBe('completed')
+  })
+
   it('lets a bot past its share use idle slots while one stays free for another bot', async () => {
     const host = makeIsolateHost(4)
     const finished: string[] = []

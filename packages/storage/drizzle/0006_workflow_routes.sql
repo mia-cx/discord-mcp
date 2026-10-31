@@ -1,0 +1,1 @@
+ALTER TABLE "workflow_revisions" ADD COLUMN "route" boolean DEFAULT false NOT NULL;
