@@ -95,26 +95,32 @@ it.each([
 
 it('gets back an Identify reserved by a connection that never identified', () => {
   const gate = createIdentifyGate(manualClock(), { ...LIMIT, remaining: 2 })
-  const release = gate.reserve()
+  const reservation = gate.reserve()
   expect(waitToReserve(gate)).toBe(DAY)
 
-  release?.()
+  reservation?.release()
   expect(waitToReserve(gate)).toBe(0)
 })
 
-it('gets nothing back for a reservation from before the budget reset', () => {
+it('counts reservations still held at the reset against the new window', () => {
   const clock = manualClock()
   const gate = createIdentifyGate(clock, {
-    total: 4,
-    remaining: 2,
+    total: 6,
+    remaining: 4,
     resetAfter: HOUR,
     maxConcurrency: 1,
   })
-  const fromYesterday = gate.reserve()
+  // Both wait for Hello or their bucket's turn while Discord's window resets.
+  const sentAfterReset = gate.reserve()
+  const droppedAfterReset = gate.reserve()
 
   clock.advance(HOUR)
-  expect([waitToReserve(gate), waitToReserve(gate)]).toEqual([0, 0])
-  fromYesterday?.()
+  // The new window holds three; the two still waiting take two of them.
+  expect(waitToReserve(gate)).toBe(0)
+  expect(waitToReserve(gate)).toBe(DAY)
+  sentAfterReset?.spend()
+  droppedAfterReset?.release()
+  expect(waitToReserve(gate)).toBe(0)
   expect(waitToReserve(gate)).toBe(DAY)
 })
 

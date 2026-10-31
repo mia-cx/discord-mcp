@@ -1,5 +1,5 @@
 import type { Clock } from './clock.ts'
-import type { IdentifyGate } from './identify.ts'
+import type { IdentifyGate, Reservation } from './identify.ts'
 
 const Op = {
   Dispatch: 0,
@@ -113,16 +113,16 @@ export const startShard = ({
   let cancelTimer = () => {}
   /** Withdraws a connected shard's wait for its turn to identify. */
   let cancelIdentify = () => {}
-  /** Gives back the Identify the current connection reserved but has not sent. */
-  let release = () => {}
+  /** The Identify the current connection reserved and has not sent. */
+  let reservation: Reservation | undefined
 
   const send = (payload: Payload) => socket?.send(JSON.stringify(payload))
 
   const drop = (code: number) => {
     cancelTimer()
     cancelIdentify()
-    release()
-    release = () => {}
+    reservation?.release()
+    reservation = undefined
     const current = socket
     socket = undefined
     current?.close(code)
@@ -142,11 +142,8 @@ export const startShard = ({
 
   // A connection without a session identifies after Hello, so it reserves an Identify first.
   const connectToIdentify = () => {
-    const reservation = identifies.reserve()
-    if (reservation !== undefined) {
-      release = reservation
-      return connect()
-    }
+    reservation = identifies.reserve()
+    if (reservation !== undefined) return connect()
     const waitMs = identifies.reopensIn()
     onIdentifyBudgetSpent(waitMs)
     cancelTimer = clock.schedule(connectToIdentify, waitMs)
@@ -210,7 +207,8 @@ export const startShard = ({
         }
         cancelIdentify = identifies.whenFree(shardId, () => {
           cancelIdentify = () => {}
-          release = () => {}
+          reservation?.spend()
+          reservation = undefined
           send({
             op: Op.Identify,
             d: {

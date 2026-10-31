@@ -15,14 +15,18 @@ export interface SessionStartLimit {
   readonly maxConcurrency: number
 }
 
+/** One Identify taken from a bot's daily budget, held until it is sent or given back. */
+export interface Reservation {
+  /** The Identify went out. */
+  readonly spend: () => void
+  /** The connection closed before it identified, so the Identify returns to the budget. */
+  readonly release: () => void
+}
+
 /** Paces one bot's Identifies across all its shards. */
 export interface IdentifyGate {
-  /**
-   * Take one Identify from the bot's daily budget, or `undefined` when it is spent. The returned
-   * function gives it back, for a connection that closed before it identified. A reservation
-   * from before the budget reset gives nothing back.
-   */
-  readonly reserve: () => (() => void) | undefined
+  /** Take one Identify from the bot's daily budget, or `undefined` when it is spent. */
+  readonly reserve: () => Reservation | undefined
   /** Milliseconds until a spent budget reopens. */
   readonly reopensIn: () => number
   /**
@@ -42,19 +46,22 @@ interface Bucket {
 
 /**
  * Discord resets a bot's token once it spends its daily Identifies. The gate reserves at most half
- * of what remains, leaving the rest to the bot's other clients and to the next process. Shards
- * still waiting to send when Discord's window resets count against the old window, so the new
- * one can see up to that many more, but never past Discord's total.
+ * of what remains, leaving the rest to the bot's other clients and to the next process.
  */
 export const createIdentifyGate = (clock: Clock, limit: SessionStartLimit): IdentifyGate => {
   let allowance = Math.floor(limit.remaining / 2)
   let resetsAt = clock.now() + limit.resetAfter
+  /** Reservations not yet sent or given back. */
+  let held = 0
   const buckets = new Map<number, Bucket>()
-  /** Reopen the budget once Discord's window resets. Returns the current time. */
+  /**
+   * Reopen the budget once Discord's window resets. Held reservations will be sent in the new
+   * window, so they count against it. Returns the current time.
+   */
   const refill = () => {
     const now = clock.now()
     if (now >= resetsAt) {
-      allowance = Math.floor(limit.total / 2)
+      allowance = Math.floor(limit.total / 2) - held
       resetsAt = now + DAY_MS
     }
     return now
@@ -89,13 +96,15 @@ export const createIdentifyGate = (clock: Clock, limit: SessionStartLimit): Iden
       refill()
       if (allowance === 0) return undefined
       allowance -= 1
-      // `resetsAt` names the budget window this reservation came from.
-      const window = resetsAt
-      let held = true
-      return () => {
-        if (held && window === resetsAt) allowance += 1
-        held = false
+      held += 1
+      let settled = false
+      const settle = (refund: boolean) => {
+        if (settled) return
+        settled = true
+        held -= 1
+        if (refund) allowance += 1
       }
+      return { spend: () => settle(false), release: () => settle(true) }
     },
     reopensIn: () => resetsAt - refill(),
     whenFree: (shardId, identify) => {
