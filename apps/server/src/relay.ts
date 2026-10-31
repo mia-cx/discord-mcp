@@ -159,8 +159,26 @@ interface Lane {
   readonly limiter: RateLimiter
   /** Its fingerprint, and the guard its own checks share, so a reset token's rejections stay its. */
   accepted?: { readonly fingerprint: string; readonly guard: RateLimiter['guard'] }
+  /**
+   * Each token's rejection guard, by fingerprint. Calls share the bot's buckets but count
+   * rejections per token, so a reset token's late failures never block its successor.
+   */
+  readonly guards: Map<string, RateLimiter['guard']>
   active: number
   idleSince: number
+}
+
+const fingerprintOf = (credential: string) =>
+  createHash('sha256').update(credential).digest('base64url')
+
+/** The bot's limiter, counting rejections in the guard of the token with this fingerprint. */
+const limiterFor = (lane: Lane, fingerprint: string): RateLimiter => {
+  let guard = lane.guards.get(fingerprint)
+  if (guard === undefined) {
+    guard = Effect.runSync(RateGuard.make())
+    lane.guards.set(fingerprint, guard)
+  }
+  return { ...lane.limiter, guard }
 }
 
 /**
@@ -179,8 +197,9 @@ export const createBotLimiters = (
       lanes.delete(id)
       lane.limiter.close()
     }
-    const lane = lanes.get(botId) ?? {
+    const lane: Lane = lanes.get(botId) ?? {
       limiter: createRateLimiter(rest, discordFetch),
+      guards: new Map(),
       active: 0,
       idleSince: now,
     }
@@ -200,11 +219,12 @@ export const createBotLimiters = (
     /** Lend a bot's REST client, on its own limiter, to its workflows. */
     lend: (botId: string, token: Redacted.Redacted<string>): BorrowedRest => {
       const lane = acquire(botId)
+      const limiter = limiterFor(lane, fingerprintOf(Redacted.value(token)))
       return {
         client: Effect.runSync(
           Effect.provide(
             Effect.flatMap(DiscordRest, Effect.succeed),
-            DiscordRest.shared(token, lane.limiter),
+            DiscordRest.shared(token, limiter),
           ),
         ),
         release: () => release(lane),
@@ -304,7 +324,7 @@ export const createExecutor = ({
 
   return async (request, credential, botId, actorId) => {
     const token = Redacted.make(credential)
-    const fingerprint = createHash('sha256').update(credential).digest('base64url')
+    const fingerprint = fingerprintOf(credential)
     // Anyone can name a bot's public ID, so only the token Discord last accepted for this bot
     // checks in through the bot's buckets, recording rejections in that token's own guard. Any
     // other token, forged or freshly reset, gets a limiter of its own and so never queues ahead of
@@ -332,15 +352,16 @@ export const createExecutor = ({
       // Hosting never delays or fails the agent's call; `use` logs its own failures.
       void bots?.use(botId, credential)
       lane ??= acquire(botId)
+      const limiter = limiterFor(lane, fingerprint)
       if (lane.accepted?.fingerprint !== fingerprint) {
-        lane.accepted = { fingerprint, guard: Effect.runSync(RateGuard.make()) }
+        lane.accepted = { fingerprint, guard: limiter.guard }
       }
       // Workflow changes are recorded against the human whose login made the request.
       const access =
         scripts && workflows !== undefined && actorId !== undefined
           ? { host: workflows, actorId }
           : undefined
-      return await run(request, relayRuntime(restLayer(token, lane.limiter), isolates, access), {
+      return await run(request, relayRuntime(restLayer(token, limiter), isolates, access), {
         scripts,
         workflows: access !== undefined,
       })

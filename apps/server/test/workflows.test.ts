@@ -5,7 +5,7 @@ import { makeIsolateHost, makeWorkflowHost, type WorkflowHost } from '@discord-m
 import { inMemoryStorage } from '@discord-mcp/storage/testing'
 import { Effect, Layer, Redacted } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createRelay } from '../src/relay.ts'
+import { createBotLimiters, createRelay } from '../src/relay.ts'
 import { botToken, config, discordOAuth, executor, login } from './login-fixture.ts'
 
 const BOT = { id: '345678901234567890', username: 'textile', discriminator: '0', bot: true }
@@ -349,4 +349,41 @@ describe('workflows', () => {
       { timeout: 20_000 },
     )
   }, 30_000)
+})
+
+describe("a bot's shared limiter", () => {
+  it("keeps a reset token's late failures from blocking its successor", async () => {
+    const [retired, current] = [botToken(BOT.id, 'retired'), botToken(BOT.id, 'current')]
+    const reached: string[] = []
+    // Discord rejects the retired token and accepts its successor.
+    const discordFetch: typeof fetch = async (_url, init) => {
+      const token = new Headers(init?.headers).get('authorization')?.replace(/^Bot /, '') ?? ''
+      reached.push(token)
+      return token === retired
+        ? Response.json({ message: '401: Unauthorized', code: 0 }, { status: 401 })
+        : Response.json({ id: CHANNEL })
+    }
+    const limiters = createBotLimiters(
+      { timeoutMs: 1000, retries: 0, maxRateLimitWaitMs: 0 },
+      discordFetch,
+    )
+    const call = (token: string) => {
+      const { client, release } = limiters.lend(BOT.id, Redacted.make(token))
+      return Effect.runPromiseExit(
+        client.request({
+          method: 'GET',
+          route: `/channels/${CHANNEL}`,
+          operationFamily: 'channel',
+        }),
+      ).finally(release)
+    }
+
+    // A workflow run queued before the reset keeps failing with the old token.
+    for (let i = 0; i < 30; i += 1) await call(retired)
+    const blocked = reached.filter((token) => token === retired).length
+
+    expect(blocked).toBeLessThan(30)
+    expect((await call(current))._tag).toBe('Success')
+    expect(reached.at(-1)).toBe(current)
+  })
 })
