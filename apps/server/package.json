@@ -9,6 +9,7 @@
   "dependencies": {
     "@discord-mcp/core": "workspace:*",
     "@discord-mcp/discord-api": "workspace:*",
+    "@discord-mcp/isolate": "workspace:*",
     "@effect/platform-node": "4.0.0-beta.101",
     "@modelcontextprotocol/server": "2.3.1",
     "@modelcontextprotocol/node": "2.1.1",

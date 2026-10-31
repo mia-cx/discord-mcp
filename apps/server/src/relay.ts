@@ -12,6 +12,7 @@ import {
   type RestConfig,
   relayTools,
 } from '@discord-mcp/discord-api/relay'
+import { type IsolateHost, makeIsolateHost, ScriptRunner, scriptRun } from '@discord-mcp/isolate'
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server'
 import { Effect, Layer, ManagedRuntime, Redacted } from 'effect'
 import { createDiscordLogin, type LoginConfig } from './login.ts'
@@ -23,12 +24,20 @@ export interface RelayConfig {
   readonly login: LoginConfig
 }
 
-/** The token lives only in this runtime, which the HTTP handler disposes after one response. */
-export const relayRuntime = (rest: Layer.Layer<DiscordRest>) =>
-  ManagedRuntime.make(Layer.merge(rest, OperationCatalog.layer))
+/**
+ * The token lives only in this runtime, which the HTTP handler disposes after one response.
+ * The isolate host is process-wide, so one bot's scripts queue behind each other across requests.
+ */
+export const relayRuntime = (rest: Layer.Layer<DiscordRest>, isolates: IsolateHost) =>
+  ManagedRuntime.make(
+    Layer.mergeAll(rest, OperationCatalog.layer, Layer.succeed(ScriptRunner)(isolates)),
+  )
 
-/** Register the same fixed bot-only tools for HTTP requests and local stdio. */
-export const buildRelayServer = (runtime: ReturnType<typeof relayRuntime>) => {
+/**
+ * Register the same fixed bot-only tools for HTTP requests and local stdio. `scripts` adds
+ * `discord_script_run`, which runs agent code on this host.
+ */
+export const buildRelayServer = (runtime: ReturnType<typeof relayRuntime>, scripts: boolean) => {
   const principal: Principal = {
     id: 'request-bot',
     kind: 'discord-bot',
@@ -43,7 +52,7 @@ export const buildRelayServer = (runtime: ReturnType<typeof relayRuntime>) => {
   )
   registerTools({
     server,
-    tools: relayTools,
+    tools: scripts ? [...relayTools, scriptRun] : relayTools,
     selection: { toolsets: new Set(['operator', 'api']), enabledGates: new Set(['always']) },
     runtime,
     authorize: authorizeWithPrincipal(() => Effect.succeed(principal)),
@@ -105,6 +114,9 @@ export const createRelay = (
   bots?: Pick<BotRuntimes, 'use'>,
 ) => {
   const login = createDiscordLogin(config.login, discordFetch)
+  // Running agent code is a platform feature, which an unrestricted relay never offers.
+  const scripts = config.login.allowedUserIds !== undefined
+  const isolates = makeIsolateHost()
   const handle = async (request: Request): Promise<Response> => {
     const url = new URL(request.url)
     if (config.allowedHosts.length > 0 && !config.allowedHosts.includes(url.hostname)) {
@@ -139,8 +151,8 @@ export const createRelay = (
     const credential = request.headers.get('x-discord-bot-token')
     if (credential === null || !/^\S+$/.test(credential)) return invalidBot()
 
-    const runtime = relayRuntime(restLayer(Redacted.make(credential)))
-    const mcp = createMcpHandler(() => buildRelayServer(runtime), {
+    const runtime = relayRuntime(restLayer(Redacted.make(credential)), isolates)
+    const mcp = createMcpHandler(() => buildRelayServer(runtime, scripts), {
       legacy: 'stateless',
       maxSubscriptions: 0,
     })

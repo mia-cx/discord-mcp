@@ -3,6 +3,7 @@ import { createServer } from 'node:http'
 import { createBotRuntimes, createTokenVault, systemClock } from '@discord-mcp/bot-host'
 import { ConfigurationError } from '@discord-mcp/core'
 import { DiscordRest, RateGuard } from '@discord-mcp/discord-api/relay'
+import { makeIsolateHost } from '@discord-mcp/isolate'
 import { connectStorage } from '@discord-mcp/storage'
 import { NodeRuntime } from '@effect/platform-node'
 import { toNodeHandler } from '@modelcontextprotocol/node'
@@ -87,16 +88,20 @@ const main = Effect.gen(function* () {
   const rest = { timeoutMs: config.timeoutMs, retries: 0, maxRateLimitWaitMs: 0 }
 
   if (config.transport === 'stdio') {
-    // Stdio has one local caller. Its token is supplied by that caller's process environment.
+    // Stdio has one local caller. Its token is supplied by that caller's process environment, and
+    // its scripts run on that caller's own machine.
     const token = yield* Config.redacted('DISCORD_TOKEN')
     const runtime = yield* Effect.acquireRelease(
       Effect.sync(() =>
-        relayRuntime(DiscordRest.layer({ ...rest, token }).pipe(Layer.provide(RateGuard.layer()))),
+        relayRuntime(
+          DiscordRest.layer({ ...rest, token }).pipe(Layer.provide(RateGuard.layer())),
+          makeIsolateHost(),
+        ),
       ),
       (runtime) => Effect.promise(() => runtime.dispose()),
     )
     yield* Effect.acquireRelease(
-      Effect.sync(() => serveStdio(() => buildRelayServer(runtime))),
+      Effect.sync(() => serveStdio(() => buildRelayServer(runtime, true))),
       (handle) => Effect.promise(() => handle.close()),
     )
     yield* Effect.log('discord-mcp ready on stdio')

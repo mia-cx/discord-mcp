@@ -9,3 +9,4 @@ export {
   type ScriptExecution,
   type ScriptOutcome,
 } from './isolate-host.ts'
+export { ScriptRunner, scriptRun } from './tool.ts'

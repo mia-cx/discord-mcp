@@ -62,6 +62,9 @@ importers:
       '@discord-mcp/discord-gateway':
         specifier: workspace:*
         version: link:../../packages/discord-gateway
+      '@discord-mcp/isolate':
+        specifier: workspace:*
+        version: link:../../packages/isolate
       '@discord-mcp/persistence':
         specifier: workspace:*
         version: link:../../packages/persistence
