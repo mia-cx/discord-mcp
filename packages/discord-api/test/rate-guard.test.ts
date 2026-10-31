@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { mapDiscordError } from '../src/errors.ts'
 import { isCountedRejection, RateGuard, rateGuardScope } from '../src/rate-guard.ts'
 
-const config = { threshold: 3, windowMs: 60_000 }
+const config = { threshold: 3, processThreshold: 5, windowMs: 60_000 }
 const scope = rateGuardScope('bot', 'guild')
 
 let now = 1_700_000_000_000

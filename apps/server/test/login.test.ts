@@ -175,7 +175,7 @@ describe('Discord login for the relay', () => {
     expect((await refresh(next.refresh_token)).status).toBe(200)
   })
 
-  it('binds refresh to its client, resource and allowlist, and outlives the client registration', async () => {
+  it('binds refresh to its client and resource, outlives the client registration, and leaves the allowlist to each request', async () => {
     const oauth = discordOAuth()
     const relay = createRelay(config, rest, oauth.fetch)
     const { tokens, clientId } = await login(relay)
@@ -212,12 +212,30 @@ describe('Discord login for the relay', () => {
       rest,
       oauth.fetch,
     )
-    const denied = await redeem(restricted, {
+    // Discord has already rotated by the time a refresh could check the allowlist, so the refresh
+    // succeeds and the request it enables names the denial instead.
+    const refreshed = await redeem(restricted, {
       ...params,
       refresh_token: (await second.json()).refresh_token,
     })
-    expect(denied.status).toBe(400)
-    expect(await denied.json()).toMatchObject({ error: 'invalid_grant' })
+    expect(refreshed.status).toBe(200)
+    const denied = await restricted.fetch(mcp((await refreshed.json()).access_token))
+    expect(denied.status).toBe(403)
+    expect(await denied.json()).toMatchObject({ error: 'access_denied' })
+  })
+
+  it('stops sending replayed callbacks to Discord once its rejections near a Cloudflare ban', async () => {
+    const oauth = discordOAuth()
+    oauth.state.status = 429
+    const relay = createRelay(config, rest, oauth.fetch)
+    const { flow, cookie } = await beginLogin(relay)
+    const callback = new URL('https://relay.test/auth/discord/callback')
+    callback.search = new URLSearchParams({ state: flow, iss: 'https://discord.com', code: 'x' })
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const replayed = await relay.fetch(new Request(callback, { headers: { cookie } }))
+      expect(replayed.status).toBe(429)
+    }
+    expect(oauth.calls).toHaveLength(25)
   })
 
   it('rejects malformed allowlist configuration instead of starting with unrestricted access', () => {

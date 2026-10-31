@@ -11,7 +11,9 @@ approved additional accounts. Preserve those additions during Team resyncs; keep
 outside Git and no server-side bot token for lookups.
 
 Today's relay keeps no bot credentials, authentication results, sessions, or Discord-response
-cache; the platform below changes that. Login grants
+cache; the platform below changes that. Its one cross-request state is a ten-minute count of
+Discord's 401/403/429 responses per bot, person, and process, because Cloudflare bans the shared
+IP for them. Login grants
 travel in encrypted, audience-bound relay tokens. Spent authorization-code hashes expire after
 one minute; the next code exchange or process restart removes expired hashes. Use one process;
 an in-flight login fails on restart. Existing logins survive.

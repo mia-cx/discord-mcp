@@ -1,5 +1,5 @@
 import { RateGuardTrippedError } from '@discord-mcp/core'
-import { Context, Effect, Layer, Ref } from 'effect'
+import { Context, Effect, Layer } from 'effect'
 
 /**
  * Cloudflare bans the source IP after 10,000 401/403/429 responses in 10 minutes. The default
@@ -7,26 +7,62 @@ import { Context, Effect, Layer, Ref } from 'effect'
  * drift — it is an agent in a tight retry loop, which reaches thousands in minutes.
  */
 export const DEFAULT_FAILURE_THRESHOLD = 25
+/** Every caller in one process shares its IP, so their rejections together stay an order below. */
+export const DEFAULT_PROCESS_THRESHOLD = 1_000
 export const DEFAULT_WINDOW_MS = 10 * 60 * 1000
 
 export interface RateGuardConfig {
   readonly threshold: number
+  readonly processThreshold: number
   readonly windowMs: number
 }
 
 export const defaultRateGuardConfig: RateGuardConfig = {
   threshold: DEFAULT_FAILURE_THRESHOLD,
+  processThreshold: DEFAULT_PROCESS_THRESHOLD,
   windowMs: DEFAULT_WINDOW_MS,
 }
 
-/** Rejections are counted per auth-profile and operation family, so one bad call site trips alone. */
-export const rateGuardScope = (authProfile: string, operationFamily: string): string =>
-  `${authProfile}/${operationFamily}`
+/** Rejections are counted per credential and operation family, so one bad call site trips alone. */
+export const rateGuardScope = (credential: string, operationFamily: string): string =>
+  `${credential}/${operationFamily}`
 
-interface GuardState {
-  /** Monotonic timestamps of counted rejections, oldest first. */
-  readonly rejections: ReadonlyMap<string, ReadonlyArray<number>>
+/** The scope that totals every rejection the process records. */
+const PROCESS_SCOPE = 'process'
+
+/**
+ * Timestamps of counted rejections in a rolling window. Create one per process and hand it to every
+ * `RateGuard.layer` and to the login routes: Cloudflare counts every request from the IP together.
+ */
+export const rejectionLog = (config: RateGuardConfig = defaultRateGuardConfig) => {
+  const rejections = new Map<string, ReadonlyArray<number>>()
+  const live = (scope: string, now: number) => {
+    const kept = (rejections.get(scope) ?? []).filter((t) => t > now - config.windowMs)
+    if (kept.length === 0) rejections.delete(scope)
+    else rejections.set(scope, kept)
+    return kept.length
+  }
+  return {
+    count: live,
+    /** The over-threshold scope and its count when a call in `scope` must not be sent. */
+    refusal: (scope: string, now: number) => {
+      const count = live(scope, now)
+      if (count >= config.threshold) return { scope, count }
+      const total = live(PROCESS_SCOPE, now)
+      return total >= config.processThreshold ? { scope: PROCESS_SCOPE, count: total } : undefined
+    },
+    /** Record a 401/403/429. Other statuses must not be counted — 400s are free. */
+    record: (scope: string, now: number) => {
+      // Pruning every scope keeps the map bounded by the live rejections the thresholds allow.
+      for (const known of [...rejections.keys()]) live(known, now)
+      for (const target of [scope, PROCESS_SCOPE]) {
+        rejections.set(target, [...(rejections.get(target) ?? []), now])
+      }
+    },
+  }
 }
+
+export type RejectionLog = ReturnType<typeof rejectionLog>
 
 /**
  * A rolling circuit breaker over repeated 401/403/429 responses.
@@ -38,59 +74,38 @@ interface GuardState {
 export class RateGuard extends Context.Service<
   RateGuard,
   {
-    /** Fails with `RateGuardTrippedError` when the scope is already over threshold. */
+    /** Fails with `RateGuardTrippedError` when the scope or the process is already over threshold. */
     readonly check: (scope: string) => Effect.Effect<void, RateGuardTrippedError>
     /** Record a 401/403/429. Other statuses must not be counted — 400s are free. */
     readonly recordRejection: (scope: string) => Effect.Effect<void>
     readonly failureCount: (scope: string) => Effect.Effect<number>
   }
 >()('discord-api/RateGuard') {
-  static readonly layer = (config: RateGuardConfig = defaultRateGuardConfig) =>
-    Layer.effect(RateGuard)(
-      Effect.gen(function* () {
-        const state = yield* Ref.make<GuardState>({ rejections: new Map() })
-
-        const liveCount = (scope: string) =>
-          Effect.map(
-            Effect.all([Ref.get(state), Effect.clockWith((c) => c.currentTimeMillis)]),
-            ([s, now]) => {
-              const cutoff = now - config.windowMs
-              return (s.rejections.get(scope) ?? []).filter((t) => t > cutoff).length
-            },
-          )
-
-        return {
-          failureCount: liveCount,
-
-          check: (scope) =>
-            Effect.flatMap(liveCount(scope), (count) =>
-              count < config.threshold
-                ? Effect.void
-                : Effect.fail(
-                    new RateGuardTrippedError({
-                      message: `Blocked before sending: ${count} rejected Discord responses for ${scope} within the last ${Math.round(config.windowMs / 60_000)} minutes.`,
-                      scope,
-                      failures: count,
-                      windowMs: config.windowMs,
-                    }),
-                  ),
-            ),
-
-          recordRejection: (scope) =>
-            Effect.flatMap(
-              Effect.clockWith((c) => c.currentTimeMillis),
-              (now) =>
-                Ref.update(state, (s) => {
-                  const cutoff = now - config.windowMs
-                  const kept = (s.rejections.get(scope) ?? []).filter((t) => t > cutoff)
-                  const next = new Map(s.rejections)
-                  next.set(scope, [...kept, now])
-                  return { rejections: next }
+  /** Pass a shared `log` to count across runtimes, such as one per HTTP request. */
+  static readonly layer = (
+    config: RateGuardConfig = defaultRateGuardConfig,
+    log: RejectionLog = rejectionLog(config),
+  ) => {
+    const now = Effect.clockWith((clock) => clock.currentTimeMillis)
+    return Layer.succeed(RateGuard)({
+      failureCount: (scope) => Effect.map(now, (time) => log.count(scope, time)),
+      check: (scope) =>
+        Effect.flatMap(now, (time) => {
+          const refusal = log.refusal(scope, time)
+          return refusal === undefined
+            ? Effect.void
+            : Effect.fail(
+                new RateGuardTrippedError({
+                  message: `Blocked before sending: ${refusal.count} rejected Discord responses for ${refusal.scope} within the last ${Math.round(config.windowMs / 60_000)} minutes.`,
+                  scope: refusal.scope,
+                  failures: refusal.count,
+                  windowMs: config.windowMs,
                 }),
-            ),
-        }
-      }),
-    )
+              )
+        }),
+      recordRejection: (scope) => Effect.map(now, (time) => log.record(scope, time)),
+    })
+  }
 }
 
 /** Statuses that count toward the ban budget. 400s are free and must not be recorded. */

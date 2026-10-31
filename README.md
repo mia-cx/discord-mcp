@@ -49,14 +49,18 @@ token response also carries a `refresh_token`: an encrypted envelope around
 Discord's refresh token, bound to the human and the client ID. Refreshing at
 `/token` rotates both credentials and revokes the previous access credential.
 Discord rejects a reused refresh token, which the relay reports as `invalid_grant`:
-sign in again. Refresh rechecks the allowlist, works after the client's 30-day
-registration expires, and lapses after 30 days unused.
+sign in again. Refresh works after the client's 30-day registration expires and
+lapses after 30 days unused. The allowlist is checked at sign-in and on every
+request, not at refresh, so a refresh never spends a rotated Discord token.
 
 Refresh revokes every copy of the previous login, so each machine needs its own
 sign-in. The stdio bridge refreshes a day before expiry and after a rejected
 access credential, and bridges sharing one login file take turns through a lock.
 Only spent login-code hashes remain in memory for one minute; run one server
 process. Restarting cancels unfinished logins but preserves issued credentials.
+The process also counts Discord's 401, 403, and 429 responses for ten minutes.
+Cloudflare bans an IP after 10,000 of them, so the relay stops calling Discord
+after 25 for one bot and operation family, or 1,000 in total.
 
 The executable serves MCP revision `2026-07-28` without an initialization handshake
 or sessions. Older MCP clients can use the SDK's stateless compatibility path.

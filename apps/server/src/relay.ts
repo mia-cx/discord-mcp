@@ -8,7 +8,9 @@ import {
   DiscordRest,
   OperationCatalog,
   RateGuard,
+  type RejectionLog,
   type RestConfig,
+  rejectionLog,
   relayTools,
 } from '@discord-mcp/discord-api/relay'
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server'
@@ -87,16 +89,23 @@ const discordFailure = (error: ReturnType<typeof renderCause>) => {
 
 /**
  * Stateless MCP HTTP relay. Discord validates both login and bot credentials on every request.
- * Bot credentials, identities, and Discord responses never survive the request.
+ * Bot credentials, identities, and Discord responses never survive the request; only counts of
+ * Discord's rejections do, because Cloudflare bans the whole IP for them.
  * `restLayer` is the Discord network seam used by offline integration tests.
  */
 export const createRelay = (
   config: RelayConfig,
-  restLayer: (token: Redacted.Redacted<string>) => Layer.Layer<DiscordRest> = (token) =>
-    DiscordRest.layer({ ...config.rest, token }).pipe(Layer.provide(RateGuard.layer())),
+  restLayer?: (token: Redacted.Redacted<string>) => Layer.Layer<DiscordRest>,
   discordFetch: typeof fetch = fetch,
+  rejections: RejectionLog = rejectionLog(),
 ) => {
-  const login = createDiscordLogin(config.login, discordFetch)
+  const rest =
+    restLayer ??
+    ((token: Redacted.Redacted<string>) =>
+      DiscordRest.layer({ ...config.rest, token }).pipe(
+        Layer.provide(RateGuard.layer(undefined, rejections)),
+      ))
+  const login = createDiscordLogin(config.login, discordFetch, rejections)
   const handle = async (request: Request): Promise<Response> => {
     const url = new URL(request.url)
     if (config.allowedHosts.length > 0 && !config.allowedHosts.includes(url.hostname)) {
@@ -131,7 +140,7 @@ export const createRelay = (
     const credential = request.headers.get('x-discord-bot-token')
     if (credential === null || !/^\S+$/.test(credential)) return invalidBot()
 
-    const runtime = relayRuntime(restLayer(Redacted.make(credential)))
+    const runtime = relayRuntime(rest(Redacted.make(credential)))
     const mcp = createMcpHandler(() => buildRelayServer(runtime), {
       legacy: 'stateless',
       maxSubscriptions: 0,

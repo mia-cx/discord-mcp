@@ -52,7 +52,7 @@ the relay uses encrypted JWTs for OAuth grants and never embeds a bot token.
 - HTTP 401 means login is missing, invalid, expired, or revoked. Run the helper with `--replace`.
 - HTTP 403 `access_denied` means the human is not on this relay's allowlist. Ask the operator to update it.
 - HTTP 403 `invalid_bot_token` means fix `X-Discord-Bot-Token`; another login will not fix it.
-- HTTP 429 means Discord rate-limited validation. Honor `Retry-After`.
+- HTTP 429 means Discord rate-limited validation, or the relay stopped calling Discord after repeated rejections. Honor `Retry-After`.
 - HTTP 502 means Discord validation or request processing is unavailable.
 
 Discord permission failures appear in MCP tool results. Use

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { countIfAvailable, type RateGuardTrippedError, requestSignal } from '@discord-mcp/core'
 import { REST, type RequestData, type RouteLike } from '@discordjs/rest'
 import { Config, Context, Effect, Layer, Redacted } from 'effect'
@@ -55,12 +56,12 @@ const readError = (
   cause: unknown,
 ): { status: number; body: unknown; retryAfterMs?: number; global?: boolean } => {
   const e = (cause ?? {}) as HttpErrorLike
-  // A RateLimitError from @discordjs/rest carries retryAfter in seconds and no HTTP status.
+  // A RateLimitError from @discordjs/rest carries retryAfter in milliseconds and no HTTP status.
   if (typeof e.retryAfter === 'number') {
     return {
       status: 429,
       body: { message: e.message ?? 'Rate limited.' },
-      retryAfterMs: Math.round(e.retryAfter * 1000),
+      retryAfterMs: Math.round(e.retryAfter),
       ...(e.global === undefined ? {} : { global: e.global }),
     }
   }
@@ -90,6 +91,8 @@ export class DiscordRest extends Context.Service<
         // The guard is resolved once, at layer construction: callers name operations, they do not
         // carry the circuit breaker around.
         const guard = yield* RateGuard
+        // One HTTP relay serves many bots, so each token's rejections are counted apart.
+        const credential = `bot:${createHash('sha256').update(Redacted.value(config.token)).digest('base64url').slice(0, 12)}`
 
         const rest = yield* Effect.acquireRelease(
           Effect.sync(() => {
@@ -104,14 +107,19 @@ export class DiscordRest extends Context.Service<
             client.setToken(Redacted.value(config.token))
             return client
           }),
-          // The token is process-lifetime; there is no socket to close, but clearing it keeps the
-          // credential out of a heap snapshot taken after shutdown.
-          (client) => Effect.sync(() => client.setToken('')),
+          // The client's sweep intervals would otherwise keep it alive after release, and the HTTP
+          // relay builds one per request. Clearing the token keeps it out of later heap snapshots.
+          (client) =>
+            Effect.sync(() => {
+              client.clearHashSweeper()
+              client.clearHandlerSweeper()
+              client.setToken('')
+            }),
         )
 
         const request = (req: DiscordRequest) =>
           Effect.gen(function* () {
-            const scope = rateGuardScope('bot', req.operationFamily)
+            const scope = rateGuardScope(credential, req.operationFamily)
             yield* guard.check(scope)
 
             // The caller's cancellation signal, when there is a caller. Passing it to

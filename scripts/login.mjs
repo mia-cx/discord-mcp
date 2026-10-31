@@ -94,8 +94,12 @@ const store = async (credentials, replace = false) => {
       return
     }
     if (url.searchParams.has('error')) {
-      response.writeHead(400).end('Login cancelled. Run the login command to try again.')
-      fail(new Error('Discord login cancelled.'))
+      // The relay describes an allowlist denial; a bare error means the login was cancelled.
+      const reason =
+        url.searchParams.get('error_description') ??
+        'Login cancelled. Run the login command to try again.'
+      response.writeHead(400).end(reason)
+      fail(new Error(reason))
       return
     }
     const code = url.searchParams.get('code')
