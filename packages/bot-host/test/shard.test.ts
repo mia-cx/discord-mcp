@@ -1,11 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { nextIdentifyAt, startShard } from '../src/shard.ts'
+import { createIdentifyGate } from '../src/identify.ts'
+import { PRESENCE_INTERVAL_MS, startShard } from '../src/shard.ts'
 import { DEFAULT_HEARTBEAT_INTERVAL_MS, fakeGateway, manualClock } from '../src/testing.ts'
 
 const TOKEN = 'private-bot-token'
-/** `GUILDS` and `GUILD_VOICE_STATES`. */
-const VOICE_INTENTS = 129
 const INTERVAL = DEFAULT_HEARTBEAT_INTERVAL_MS
+/** Long enough for any reconnect backoff and the five-second Identify spacing. */
+const IDENTIFY_WAIT_MS = 60_000
+const presence = (status: string) => ({ since: null, activities: [], status, afk: false })
+const DAY = 24 * 60 * 60 * 1000
+const LIMIT = { total: 1000, remaining: 1000, resetAfter: DAY, maxConcurrency: 1 }
 const cleanup: Array<() => unknown> = []
 afterEach(async () => {
   for (const step of cleanup.splice(0).reverse()) await step()
@@ -21,8 +25,12 @@ const start = async (saved?: { sessionId: string; sequence: number }) => {
     token: TOKEN,
     gatewayUrl: gateway.url,
     clock,
+    shardId: 0,
+    shardCount: 1,
+    intents: 0,
+    identifies: createIdentifyGate(clock, LIMIT),
     ...(saved && {
-      session: { ...saved, resumeGatewayUrl: `${gateway.url}/resume`, intents: VOICE_INTENTS },
+      session: { ...saved, resumeGatewayUrl: `${gateway.url}/resume`, shardCount: 1, intents: 0 },
     }),
     onSession,
     onReady: () => {},
@@ -47,7 +55,12 @@ describe('the shard supervisor', () => {
     const connection = gateway.connections[0]
     expect(connection?.received[0]).toMatchObject({
       op: 2,
-      d: { token: TOKEN, intents: VOICE_INTENTS, presence: { status: 'online', afk: false } },
+      d: {
+        token: TOKEN,
+        intents: 0,
+        shard: [0, 1],
+        presence: { status: 'online', afk: false },
+      },
     })
 
     // The first beat is jittered: random() is 0.5, so half an interval.
@@ -56,6 +69,51 @@ describe('the shard supervisor', () => {
     clock.advance(INTERVAL)
     await vi.waitFor(() => expect(connection?.received[2]).toEqual({ op: 1, d: 1 }))
     expect(gateway.connections).toHaveLength(1)
+  })
+
+  it('sends at most one presence update per interval, the latest, and identifies with it', async () => {
+    const { gateway, clock, shard, onSession } = await start()
+    await identified(gateway, 1)
+    const connection = gateway.connections[0]
+    const updates = () => connection?.received.filter((p) => p.op === 3).map((p) => p.d)
+
+    shard.updatePresence(presence('idle'))
+    shard.updatePresence(presence('dnd'))
+    shard.updatePresence(presence('invisible'))
+    await vi.waitFor(() => expect(updates()).toEqual([presence('idle')]))
+
+    clock.advance(PRESENCE_INTERVAL_MS)
+    await vi.waitFor(() => expect(updates()).toEqual([presence('idle'), presence('invisible')]))
+
+    // New intents need a new session, so a restart must not resume the old one.
+    shard.setIntents(512)
+    expect(onSession).toHaveBeenLastCalledWith(undefined)
+    clock.advance(IDENTIFY_WAIT_MS)
+    await identified(gateway, 2)
+    expect(gateway.connections[1]?.received[0]).toMatchObject({
+      op: 2,
+      d: { intents: 512, presence: presence('invisible') },
+    })
+  })
+
+  it('holds a presence update that misses a reconnect until the session resumes', async () => {
+    const { gateway, clock, shard } = await start()
+    await identified(gateway, 1)
+    clock.advance(1_000)
+    shard.updatePresence(presence('idle'))
+    // Due at 6 s.
+    shard.updatePresence(presence('dnd'))
+
+    gateway.connections[0]?.close(4000)
+    await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(4000))
+    // Reconnects at 1.5 s; the update fires at 6 s, before the new socket can have opened.
+    expect(() => clock.advance(5_000)).not.toThrow()
+    await vi.waitFor(() => expect(gateway.connections[1]?.received[0]?.op).toBe(6))
+    gateway.connections[1]?.send({ op: 0, t: 'RESUMED', s: 2, d: {} })
+
+    await vi.waitFor(() =>
+      expect(gateway.connections[1]?.received).toContainEqual({ op: 3, d: presence('dnd') }),
+    )
   })
 
   it('resumes after a zombie connection or a dropped one, so Discord replays what it missed', async () => {
@@ -85,7 +143,8 @@ describe('the shard supervisor', () => {
         sessionId: 'fake-session',
         resumeGatewayUrl: gateway.url,
         sequence: 3,
-        intents: VOICE_INTENTS,
+        shardCount: 1,
+        intents: 0,
       }),
     )
 
@@ -101,12 +160,24 @@ describe('the shard supervisor', () => {
 
   it('identifies afresh instead of resuming a session saved with other intents', async () => {
     const gateway = await fakeGateway()
+    const clock = manualClock()
     const shard = startShard({
       token: TOKEN,
       gatewayUrl: gateway.url,
-      clock: manualClock(),
+      clock,
+      shardId: 0,
+      shardCount: 1,
+      // `GUILDS` and `GUILD_VOICE_STATES`.
+      intents: 129,
+      identifies: createIdentifyGate(clock, LIMIT),
       // Saved before voice, when the shard identified with no intents.
-      session: { sessionId: 'no-voice', resumeGatewayUrl: gateway.url, sequence: 7, intents: 0 },
+      session: {
+        sessionId: 'no-voice',
+        resumeGatewayUrl: gateway.url,
+        sequence: 7,
+        shardCount: 1,
+        intents: 0,
+      },
       onSession: () => {},
       onReady: () => {},
       onFatal: () => {},
@@ -114,10 +185,7 @@ describe('the shard supervisor', () => {
     })
     cleanup.push(gateway.close, shard.stop)
     await vi.waitFor(() =>
-      expect(gateway.connections[0]?.received[0]).toMatchObject({
-        op: 2,
-        d: { intents: VOICE_INTENTS },
-      }),
+      expect(gateway.connections[0]?.received[0]).toMatchObject({ op: 2, d: { intents: 129 } }),
     )
   })
 
@@ -142,8 +210,9 @@ describe('the shard supervisor', () => {
     gateway.connections[1]?.send({ op: 9, d: false })
     await vi.waitFor(() => expect(gateway.connections[1]?.closeCode).toBe(4000))
     clock.advance(3_000)
+    await vi.waitFor(() => expect(gateway.connections).toHaveLength(3))
     await new Promise((resolve) => setTimeout(resolve, 100))
-    expect(gateway.connections).toHaveLength(2)
+    expect(gateway.connections[2]?.received).toEqual([])
     clock.advance(2_000)
     await identified(gateway, 2)
   })
@@ -182,7 +251,11 @@ describe('the shard supervisor', () => {
       token: TOKEN,
       gatewayUrl: gateway.url,
       clock,
-      session: { sessionId: 'saved', resumeGatewayUrl, sequence: 7, intents: VOICE_INTENTS },
+      shardId: 0,
+      shardCount: 1,
+      intents: 0,
+      identifies: createIdentifyGate(clock, LIMIT),
+      session: { sessionId: 'saved', resumeGatewayUrl, sequence: 7, shardCount: 1, intents: 0 },
       onSession: () => {},
       onReady: () => {},
       onFatal: () => {},
@@ -215,13 +288,18 @@ describe('the shard supervisor', () => {
         sessionId: 'saved',
         resumeGatewayUrl: target.url,
         sequence: 7,
-        intents: VOICE_INTENTS,
+        shardCount: 1,
+        intents: 0,
       }
       const onSession = vi.fn()
       const shard = startShard({
         token: TOKEN,
         gatewayUrl: gateway.url,
         clock,
+        shardId: 0,
+        shardCount: 1,
+        intents: 0,
+        identifies: createIdentifyGate(clock, LIMIT),
         ...(source === 'saved' && { session }),
         onSession,
         onReady: () => {},
@@ -257,9 +335,15 @@ describe('the shard supervisor', () => {
   it.each([
     ['wss://gateway.discord.gg', 'wss://gateway.discord.gg/'],
     ['wss://gateway-us-east1-b.discord.gg', 'wss://gateway-us-east1-b.discord.gg/'],
+    ['wss://gateway-us-east1-b.discord.gg:443', 'wss://gateway-us-east1-b.discord.gg/'],
+    [
+      'wss://gateway-us-east1-b.discord.gg/resume?redirect=http://127.0.0.1#ignored',
+      'wss://gateway-us-east1-b.discord.gg/resume/',
+    ],
     ['wss://gateway.discord.gg.evil.example', 'wss://gateway.discord.gg/'],
     ['wss://evildiscord.gg', 'wss://gateway.discord.gg/'],
     ['wss://gateway.discord.gg@evil.example', 'wss://gateway.discord.gg/'],
+    ['wss://gateway.discord.gg@127.0.0.1', 'wss://gateway.discord.gg/'],
     ['wss://user:password@gateway.discord.gg', 'wss://gateway.discord.gg/'],
     ['ws://gateway-us-east1-b.discord.gg', 'wss://gateway.discord.gg/'],
     ['wss://gateway-us-east1-b.discord.gg:8443', 'wss://gateway.discord.gg/'],
@@ -279,11 +363,16 @@ describe('the shard supervisor', () => {
       },
     )
     cleanup.push(() => vi.unstubAllGlobals())
+    const clock = manualClock()
     const shard = startShard({
       token: TOKEN,
       gatewayUrl: 'wss://gateway.discord.gg',
-      clock: manualClock(),
-      session: { sessionId: 'saved', resumeGatewayUrl, sequence: 7, intents: VOICE_INTENTS },
+      clock,
+      shardId: 0,
+      shardCount: 1,
+      intents: 0,
+      identifies: createIdentifyGate(clock, LIMIT),
+      session: { sessionId: 'saved', resumeGatewayUrl, sequence: 7, shardCount: 1, intents: 0 },
       onSession: () => {},
       onReady: () => {},
       onFatal: () => {},
@@ -291,6 +380,45 @@ describe('the shard supervisor', () => {
     })
     cleanup.push(shard.stop)
     expect(urls).toEqual([`${expected}?v=10&encoding=json`])
+  })
+
+  it('keeps its Identify budget through connections that fail before Hello', async () => {
+    const clock = manualClock()
+    const NativeWebSocket = globalThis.WebSocket
+    let attempts = 0
+    vi.stubGlobal(
+      'WebSocket',
+      class extends NativeWebSocket {
+        constructor() {
+          attempts += 1
+          // Nothing listens on port 1, so every connection fails before Hello.
+          super('ws://127.0.0.1:1')
+        }
+      },
+    )
+    cleanup.push(() => vi.unstubAllGlobals())
+    const onIdentifyBudgetSpent = vi.fn()
+    const shard = startShard({
+      token: TOKEN,
+      gatewayUrl: 'wss://gateway.discord.gg',
+      clock,
+      shardId: 0,
+      shardCount: 1,
+      intents: 0,
+      // Room for exactly one Identify.
+      identifies: createIdentifyGate(clock, { ...LIMIT, remaining: 2 }),
+      onSession: () => {},
+      onReady: () => {},
+      onFatal: () => {},
+      onIdentifyBudgetSpent,
+    })
+    cleanup.push(shard.stop)
+
+    await vi.waitFor(() => {
+      clock.advance(30_000)
+      expect(attempts).toBeGreaterThanOrEqual(3)
+    })
+    expect(onIdentifyBudgetSpent).not.toHaveBeenCalled()
   })
 
   it('stops for good when Discord rejects the token', async () => {
@@ -311,29 +439,4 @@ describe('the shard supervisor', () => {
     shard.stop()
     await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(1000))
   })
-
-  it.each([
-    { case: 'a first Identify goes now', identifiedAt: [], next: 100_000 },
-    {
-      case: 'a recent Identify holds the next for five seconds',
-      identifiedAt: [98_000],
-      next: 103_000,
-    },
-    {
-      case: 'a spent daily budget waits for the oldest Identify to age out',
-      identifiedAt: Array.from({ length: 500 }, (_, i) => i * 100),
-      next: 24 * 60 * 60 * 1000,
-    },
-    {
-      case: 'a budget reopening still waits five seconds after the latest Identify',
-      identifiedAt: [0, ...Array.from({ length: 499 }, (_, i) => 86_398_000 - (498 - i) * 5_000)],
-      now: 86_398_000,
-      next: 86_403_000,
-    },
-  ])(
-    'schedules Identifies within Discord limits: $case',
-    ({ identifiedAt, now = 100_000, next }) => {
-      expect(nextIdentifyAt(identifiedAt, now)).toBe(next)
-    },
-  )
 })

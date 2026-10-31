@@ -12,6 +12,7 @@
   "dependencies": {
     "@discord-mcp/core": "workspace:*",
     "@discord-mcp/discord-api": "workspace:*",
+    "@discord-mcp/storage": "workspace:*",
     "@mia-cx/discord-catalog": "workspace:*",
     "discord.js": "14.27.0",
     "effect": "4.0.0-beta.101",

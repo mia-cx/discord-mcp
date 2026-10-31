@@ -26,7 +26,7 @@ afterEach(async () => {
 })
 
 /** A bot online on a fake Gateway that routes voice joins to a fake voice server. */
-const start = async ({ heartbeatIntervalMs = 41_250, answersVoice = true } = {}) => {
+const start = async ({ heartbeatIntervalMs = 41_250, answersVoice = true, shards = 1 } = {}) => {
   const storage = await inMemoryStorage()
   const voiceServer = await fakeVoiceServer()
   const gateway = await fakeGateway(
@@ -39,7 +39,7 @@ const start = async ({ heartbeatIntervalMs = 41_250, answersVoice = true } = {})
     vault,
     clock,
     log: () => {},
-    gatewayUrl: gateway.url,
+    discordFetch: gateway.discordFetch({ shards }),
   })
   cleanup.push(storage.close, voiceServer.close, gateway.close, bots.close)
   await bots.use(BOT_ID, TOKEN)
@@ -252,12 +252,39 @@ describe('voice', () => {
 
     // Shutting down mid-reconnect: a resumed session would still have the bot in the channel.
     await bots.close()
-    const next = createBotRuntimes({ vault, clock, log: () => {}, gatewayUrl: gateway.url })
+    const next = createBotRuntimes({
+      vault,
+      clock,
+      log: () => {},
+      discordFetch: gateway.discordFetch(),
+    })
     cleanup.push(next.close)
     await next.resume()
     await vi.waitFor(() =>
       expect(gateway.connections[1]?.received[0]).toMatchObject({ op: 2, d: { token: TOKEN } }),
     )
+  })
+
+  it("joins through the shard that carries the server's events", async () => {
+    const { voice, voiceServer, gateway, clock } = await start({ shards: 2 })
+    // (guild_id >> 22) % 2 is 1, so shard 1 of 2 carries this server.
+    const guildId = '419430399995805696'
+    const joining = voice.join(guildId, FAKE_VOICE_CHANNEL_ID)
+    // Shard 1 identifies five seconds after shard 0.
+    await vi.waitFor(() => expect(gateway.connections).toHaveLength(2))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    clock.advance(5_000)
+    await joining
+    await daveReady(voiceServer)
+
+    const onShard = (shardId: number) =>
+      gateway.connections.find(
+        ({ received }) =>
+          (received[0]?.d as { shard?: number[] } | undefined)?.shard?.[0] === shardId,
+      )?.received ?? []
+    const joinPayload = { op: 4, d: expect.objectContaining({ guild_id: guildId }) }
+    expect(onShard(1)).toContainEqual(joinPayload)
+    expect(onShard(0)).not.toContainEqual(joinPayload)
   })
 
   it('fails the join when Discord does not connect the bot', async () => {

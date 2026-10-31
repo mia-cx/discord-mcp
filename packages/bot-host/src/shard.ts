@@ -1,9 +1,11 @@
 import type { Clock } from './clock.ts'
+import type { IdentifyGate, Reservation } from './identify.ts'
 
 const Op = {
   Dispatch: 0,
   Heartbeat: 1,
   Identify: 2,
+  PresenceUpdate: 3,
   Resume: 6,
   Reconnect: 7,
   InvalidSession: 9,
@@ -11,8 +13,6 @@ const Op = {
   HeartbeatAck: 11,
 } as const
 
-/** `GUILDS` and `GUILD_VOICE_STATES`: voice joins need the bot's own voice state updates. */
-const INTENTS = (1 << 0) | (1 << 7)
 /** Discord refuses a new session after these too, so reconnecting cannot help. */
 const FATAL_CLOSE_CODES = new Set([4004, 4010, 4011, 4012, 4013, 4014])
 /**
@@ -24,19 +24,13 @@ const SESSION_ENDED_CLOSE_CODES = new Set([4003, 4007, 4009])
 const NORMAL_CLOSURE = 1000
 /** Closes a connection we are about to replace; any code but 1000 and 1001 keeps the session. */
 const RECONNECT_CLOSURE = 4000
-/** Discord allows one Identify per five seconds for a bot without large-bot sharding. */
-const IDENTIFY_INTERVAL_MS = 5_000
-const DAY_MS = 24 * 60 * 60 * 1000
-/**
- * Discord resets a bot's token after 1,000 Identifies in 24 hours. Half of that leaves room for
- * the bot's other clients; a healthy shard identifies a few times a day.
- */
-const DAILY_IDENTIFY_BUDGET = 500
 const BACKOFF_BASE_MS = 1_000
 const MAX_BACKOFF_MS = 60_000
 /** Discord asks for a random 1–5 second wait before identifying after an invalid session. */
 const INVALID_SESSION_MIN_MS = 1_000
 const INVALID_SESSION_SPREAD_MS = 4_000
+/** Discord allows 120 Gateway sends a minute; presence updates stay well below it. */
+export const PRESENCE_INTERVAL_MS = 5_000
 
 interface Payload {
   readonly op: number
@@ -45,19 +39,15 @@ interface Payload {
   readonly t?: string | null
 }
 
-/**
- * The earliest time a shard may identify again, given its Identify times from the last 24 hours,
- * oldest first.
- */
-export const nextIdentifyAt = (identifiedAt: ReadonlyArray<number>, now: number): number => {
-  const [oldest] = identifiedAt
-  const latest = identifiedAt.at(-1) ?? Number.NEGATIVE_INFINITY
-  const budgetReopens =
-    oldest !== undefined && identifiedAt.length >= DAILY_IDENTIFY_BUDGET
-      ? oldest + DAY_MS
-      : Number.NEGATIVE_INFINITY
-  return Math.max(now, latest + IDENTIFY_INTERVAL_MS, budgetReopens)
+/** The bot's status and activities, as a Gateway presence update carries them. */
+export interface Presence {
+  readonly since: number | null
+  readonly activities: ReadonlyArray<Record<string, unknown>>
+  readonly status: string
+  readonly afk: boolean
 }
+
+const ONLINE: Presence = { since: null, activities: [], status: 'online', afk: false }
 
 /** What a shard needs to resume its Gateway session, possibly from another process. */
 export interface ShardSession {
@@ -65,6 +55,11 @@ export interface ShardSession {
   readonly resumeGatewayUrl: string
   /** The last dispatch's sequence number; Discord replays every dispatch after it. */
   readonly sequence: number
+  /**
+   * How many shards the bot identified with. Every shard of a bot must agree on it, so a bot
+   * resumed from stored sessions keeps it.
+   */
+  readonly shardCount: number
   /** The intents it was identified with. A resumed session delivers only those events. */
   readonly intents: number
   /** The next process must identify afresh rather than resume, but still brings the bot online. */
@@ -75,6 +70,13 @@ export interface ShardOptions {
   readonly token: string
   readonly gatewayUrl: string
   readonly clock: Clock
+  /** This shard's ID, from 0 to `shardCount - 1`. Discord assigns it the matching guilds. */
+  readonly shardId: number
+  readonly shardCount: number
+  /** The Gateway intents to identify with, as a bitfield. */
+  readonly intents: number
+  /** Paces Identifies across the bot's shards. */
+  readonly identifies: IdentifyGate
   /** A session to resume instead of identifying, such as one a previous process saved. */
   readonly session?: ShardSession
   /**
@@ -88,15 +90,22 @@ export interface ShardOptions {
   readonly onFatal: (code: number) => void
   /** The daily Identify budget is spent; the shard reconnects after `waitMs`. */
   readonly onIdentifyBudgetSpent: (waitMs: number) => void
-  /** Hears every dispatch, `READY` and `RESUMED` included. */
+  /** Hears every dispatch, `READY` and replayed ones included. */
   readonly onDispatch?: (event: string, data: unknown) => void
-  /** The connection is gone; nothing can be sent until the next `READY`. */
+  /** The connection is gone; nothing can be sent until the next `READY` or `RESUMED`. */
   readonly onDrop?: () => void
 }
 
 export interface Shard {
-  /** Send a payload once the connection has identified or resumed. False before then. */
+  /** Send a payload once the connection's session has started. False before then. */
   readonly send: (payload: { readonly op: number; readonly d: unknown }) => boolean
+  /** Identify a new session with different intents. */
+  readonly setIntents: (intents: number) => void
+  /**
+   * Set the bot's presence on this shard, now or once `PRESENCE_INTERVAL_MS` has passed since the
+   * last update. Later identifies carry it too.
+   */
+  readonly updatePresence: (presence: Presence) => void
   /** End the session, so Discord shows the bot offline, and stop reconnecting. */
   readonly stop: () => void
   /**
@@ -109,12 +118,16 @@ export interface Shard {
 /**
  * One Gateway shard that identifies with an online presence and heartbeats. After a drop it
  * resumes its session, so Discord replays the dispatches it missed, and identifies afresh only
- * once Discord says the session is gone. Shard 0 of 1, guild and voice state intents.
+ * once Discord says the session is gone.
  */
 export const startShard = ({
   token,
   gatewayUrl,
   clock,
+  shardId,
+  shardCount,
+  intents: initialIntents,
+  identifies,
   session: saved,
   onSession,
   onReady,
@@ -123,24 +136,46 @@ export const startShard = ({
   onDispatch,
   onDrop,
 }: ShardOptions): Shard => {
+  let intents = initialIntents
+  let presence = ONLINE
+  let presenceSentAt = Number.NEGATIVE_INFINITY
+  let cancelPresence: (() => void) | undefined
+  /**
+   * The latest presence has not reached Discord. Discord closes a connection that sends one
+   * before its session starts, so it waits for READY or RESUMED.
+   */
+  let presenceUnsent = false
+  /** The current connection's session has started: READY or RESUMED arrived. */
+  let authenticated = false
   let socket: WebSocket | undefined
   // A session identified with other intents, or saved before sessions recorded them, would
   // resume without the events these intents need, so it identifies afresh.
-  let session = saved?.intents === INTENTS && saved.stale === undefined ? saved : undefined
+  let session = saved?.intents === initialIntents && saved.stale === undefined ? saved : undefined
   /** A connection to this session's resume URL closed before Hello. */
   let resumeUrlFailed = false
   /** The current connection got Hello. */
   let greeted = false
   let acknowledged = true
   let attempts = 0
-  const identifiedAt: number[] = []
   // The heartbeat runs only while connected and the reconnect wait only while not, so one timer.
   let cancelTimer = () => {}
+  /** Withdraws a connected shard's wait for its turn to identify. */
+  let cancelIdentify = () => {}
+  /** The Identify the current connection reserved and has not sent. */
+  let reservation: Reservation | undefined
 
-  const send = (payload: Payload) => socket?.send(JSON.stringify(payload))
+  // A replacement socket may still be connecting when a deferred presence update fires.
+  const send = (payload: Payload) => {
+    if (socket?.readyState !== WebSocket.OPEN) return false
+    socket.send(JSON.stringify(payload))
+    return true
+  }
 
   const drop = (code: number) => {
     cancelTimer()
+    cancelIdentify()
+    reservation?.release()
+    reservation = undefined
     const current = socket
     socket = undefined
     current?.close(code)
@@ -159,17 +194,17 @@ export const startShard = ({
     onSession(undefined)
   }
 
-  // A connection without a session identifies right after Hello, so Identify limits gate it.
+  // A connection without a session identifies after Hello, so it reserves an Identify first.
+  const connectToIdentify = () => {
+    reservation = identifies.reserve()
+    if (reservation !== undefined) return connect()
+    const waitMs = identifies.reopensIn()
+    onIdentifyBudgetSpent(waitMs)
+    cancelTimer = clock.schedule(connectToIdentify, waitMs)
+  }
+
   const connectAfter = (ms: number) => {
-    if (session !== undefined) {
-      cancelTimer = clock.schedule(connect, ms)
-      return
-    }
-    const now = clock.now()
-    while (identifiedAt[0] !== undefined && identifiedAt[0] <= now - DAY_MS) identifiedAt.shift()
-    const limitWait = nextIdentifyAt(identifiedAt, now) - now
-    if (identifiedAt.length >= DAILY_IDENTIFY_BUDGET) onIdentifyBudgetSpent(limitWait)
-    cancelTimer = clock.schedule(connect, Math.max(ms, limitWait))
+    cancelTimer = clock.schedule(session === undefined ? connectToIdentify : connect, ms)
   }
 
   const reconnect = () => {
@@ -187,26 +222,30 @@ export const startShard = ({
   }
 
   const dispatch = ({ t, d, s }: Payload) => {
-    // Discord numbers every dispatch.
+    // Discord numbers and names every dispatch.
     const sequence = s as number
-    if (t === 'READY') {
+    const event = t as string
+    if (event === 'READY') {
       const ready = d as { session_id: string; resume_gateway_url: string }
       session = {
         sessionId: ready.session_id,
         resumeGatewayUrl: ready.resume_gateway_url,
         sequence,
-        intents: INTENTS,
+        shardCount,
+        intents,
       }
       resumeUrlFailed = false
     } else if (session !== undefined) {
       session = { ...session, sequence }
     }
     if (session !== undefined) onSession(session)
-    if (t === 'READY' || t === 'RESUMED') {
+    if (event === 'READY' || event === 'RESUMED') {
+      authenticated = true
+      if (presenceUnsent && cancelPresence === undefined) sendPresence()
       attempts = 0
       onReady()
     }
-    if (typeof t === 'string') onDispatch?.(t, d)
+    onDispatch?.(event, d)
   }
 
   const receive = (payload: Payload) => {
@@ -223,15 +262,20 @@ export const startShard = ({
           })
           return
         }
-        identifiedAt.push(clock.now())
-        send({
-          op: Op.Identify,
-          d: {
-            token,
-            intents: INTENTS,
-            properties: { os: process.platform, browser: 'discord-mcp', device: 'discord-mcp' },
-            presence: { since: null, activities: [], status: 'online', afk: false },
-          },
+        cancelIdentify = identifies.whenFree(shardId, () => {
+          cancelIdentify = () => {}
+          reservation?.spend()
+          reservation = undefined
+          send({
+            op: Op.Identify,
+            d: {
+              token,
+              intents,
+              shard: [shardId, shardCount],
+              properties: { os: process.platform, browser: 'discord-mcp', device: 'discord-mcp' },
+              presence,
+            },
+          })
         })
         return
       }
@@ -255,13 +299,14 @@ export const startShard = ({
 
   function connect() {
     // Discord says to fall back to the initial URL when the resume URL fails.
-    let url = new URL(gatewayUrl)
+    const url = new URL(gatewayUrl)
     let viaResumeUrl = false
     if (session !== undefined && !resumeUrlFailed) {
       try {
         const resume = new URL(session.resumeGatewayUrl)
         // A received or stored URL must not redirect the connection (and token) off Discord.
-        // The configured origin is also trusted, so a local test Gateway can resume itself.
+        // The origin Discord's API named in `gatewayUrl` is also trusted, so a local test
+        // Gateway can resume itself.
         if (
           resume.username === '' &&
           resume.password === '' &&
@@ -270,7 +315,13 @@ export const startShard = ({
               resume.port === '' &&
               resume.hostname.endsWith('.discord.gg')))
         ) {
-          url = resume
+          // Keep the trusted URL object; copy only the checked authority and resume path.
+          url.protocol = resume.protocol
+          url.host = resume.host
+          url.port = resume.port
+          url.pathname = resume.pathname
+          url.username = ''
+          url.password = ''
           viaResumeUrl = true
         }
       } catch {
@@ -283,6 +334,7 @@ export const startShard = ({
     const ws = new WebSocket(url)
     socket = ws
     greeted = false
+    authenticated = false
     acknowledged = true
     // Events from a socket we already dropped are stale.
     ws.addEventListener('message', (event) => {
@@ -301,20 +353,40 @@ export const startShard = ({
     })
   }
 
-  connect()
+  function sendPresence() {
+    cancelPresence = undefined
+    presenceUnsent = !authenticated || !send({ op: Op.PresenceUpdate, d: presence })
+    if (!presenceUnsent) presenceSentAt = clock.now()
+  }
+
+  if (session === undefined) connectToIdentify()
+  else connect()
   return {
-    send: (payload) => {
-      // Discord closes a session with 4003 for any payload before Identify or Resume, which go
-      // out right after Hello.
-      if (socket?.readyState !== WebSocket.OPEN || !greeted) return false
-      send(payload)
-      return true
+    // Discord closes a session with 4003 for any payload before Identify or Resume, and Identify
+    // may wait its turn after Hello, so sends wait for the session to start.
+    send: (payload) => authenticated && send(payload),
+    setIntents: (next) => {
+      if (next === intents) return
+      intents = next
+      // A resumed session keeps the intents it was identified with, so no process may resume it.
+      end()
+      reconnect()
+    },
+    updatePresence: (next) => {
+      presence = next
+      // A pending update sends the latest presence when it runs.
+      if (cancelPresence !== undefined) return
+      const wait = presenceSentAt + PRESENCE_INTERVAL_MS - clock.now()
+      if (wait <= 0) sendPresence()
+      else cancelPresence = clock.schedule(sendPresence, wait)
     },
     stop: () => {
+      cancelPresence?.()
       drop(NORMAL_CLOSURE)
       end()
     },
     suspend: (identifyAfresh = false) => {
+      cancelPresence?.()
       drop(RECONNECT_CLOSURE)
       if (identifyAfresh && session !== undefined) onSession({ ...session, stale: true })
     },

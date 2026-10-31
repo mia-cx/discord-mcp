@@ -1,6 +1,7 @@
 import { once } from 'node:events'
-import { createServer } from 'node:http'
+import { createServer, type IncomingMessage } from 'node:http'
 import { type AddressInfo, connect } from 'node:net'
+import type { Duplex } from 'node:stream'
 import { createBotRuntimes, createTokenVault } from '@discord-mcp/bot-host'
 import {
   DAVE_MAGIC_MARKER,
@@ -11,15 +12,18 @@ import {
 } from '@discord-mcp/bot-host/testing'
 import { DiscordRest } from '@discord-mcp/discord-api'
 import { inMemoryStorage } from '@discord-mcp/storage/testing'
+import { toNodeHandler } from '@modelcontextprotocol/node'
 import { Effect, Layer } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { WebSocket } from 'ws'
-import { createRelay } from '../src/relay.ts'
-import { config, discordOAuth, login } from './login-fixture.ts'
+import { createRelay, createTokenCheck } from '../src/relay.ts'
+import { createBotHost, forwardToBotHosts, forwardVoiceToBotHosts } from '../src/tiers.ts'
+import { createVoiceUpgrade } from '../src/voice.ts'
+import { BOT_ID, botToken, config, discordOAuth, executor, login } from './login-fixture.ts'
 
-const BOT_ID = '345678901234567890'
 const GUILD_ID = '456789012345678901'
-const TOKEN = 'private-bot-token'
+const TOKEN = botToken()
+const SECRET = 'test-bot-host-secret-0123456789abcdef'
 const SILENCE = Buffer.from([0xf8, 0xff, 0xfe])
 
 const cleanup: Array<() => unknown> = []
@@ -27,7 +31,45 @@ afterEach(async () => {
   for (const step of cleanup.splice(0).reverse()) await step()
 })
 
-/** The relay with bot hosting on fake Discord, its voice WebSocket on a local port. */
+interface Tier {
+  readonly fetch: (request: Request) => Promise<Response>
+  readonly upgrade: (request: IncomingMessage, socket: Duplex, head: Buffer) => void
+}
+
+/** A local port that serves a tier's requests and upgrades, as the server binary does. */
+const serve = async () => {
+  const server = createServer()
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  cleanup.push(
+    () => server.closeAllConnections(),
+    () => server.close(),
+  )
+  return {
+    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    port: (server.address() as AddressInfo).port,
+    use: (tier: Tier) => {
+      const handle = toNodeHandler(tier)
+      server.on('request', (request, response) => {
+        void handle(
+          {
+            method: request.method ?? 'GET',
+            url: request.url ?? '/',
+            headers: request.headers,
+            [Symbol.asyncIterator]: () => request[Symbol.asyncIterator](),
+          },
+          response,
+        )
+      })
+      server.on('upgrade', tier.upgrade)
+    },
+  }
+}
+
+/**
+ * Central in front of the one bot host that owns the bot, each on a local port, with bot hosting
+ * on fake Discord. Agents reach only central.
+ */
 const start = async () => {
   const storage = await inMemoryStorage()
   const voiceServer = await fakeVoiceServer()
@@ -36,23 +78,33 @@ const start = async () => {
     vault: createTokenVault(Buffer.alloc(32, 1), storage),
     clock: manualClock(),
     log: () => {},
-    gatewayUrl: gateway.url,
+    discordFetch: gateway.discordFetch(),
   })
+  cleanup.push(storage.close, voiceServer.close, gateway.close, bots.close)
+  const restLayer = () =>
+    Layer.succeed(DiscordRest)({
+      raw: undefined as never,
+      request: () => Effect.succeed({ id: BOT_ID, bot: true }),
+    })
+  const rest = { timeoutMs: 1000, retries: 0, maxRateLimitWaitMs: 1000 }
+
+  const host = await serve()
+  const members = { hosts: [host.url], secret: SECRET }
+  host.use(
+    createBotHost(
+      { ...members, self: host.url },
+      executor(restLayer, { bots }),
+      createVoiceUpgrade({ bots, checkToken: createTokenCheck({ rest, restLayer }) }),
+    ),
+  )
+  const central = await serve()
   const relay = createRelay(
     { ...config, allowedHosts: [] },
-    () =>
-      Layer.succeed(DiscordRest)({
-        raw: undefined as never,
-        request: () => Effect.succeed({ id: BOT_ID, bot: true }),
-      }),
+    forwardToBotHosts(members),
     discordOAuth().fetch,
-    bots,
+    forwardVoiceToBotHosts(members),
   )
-  const server = createServer()
-  server.on('upgrade', relay.upgrade)
-  server.listen(0, '127.0.0.1')
-  await once(server, 'listening')
-  cleanup.push(storage.close, voiceServer.close, gateway.close, bots.close, () => server.close())
+  central.use(relay)
   const { tokens } = await login(relay)
   const headers = { authorization: `Bearer ${tokens.access_token}`, 'x-discord-bot-token': TOKEN }
 
@@ -89,8 +141,7 @@ const start = async () => {
   /** Open the voice socket the way an agent does; resolves with the socket or the refusal. */
   const openSocket = (query: string, socketHeaders: Record<string, string> = headers) =>
     new Promise<WebSocket | number>((resolve) => {
-      const { port } = server.address() as AddressInfo
-      const socket = new WebSocket(`ws://127.0.0.1:${port}/voice?${query}`, {
+      const socket = new WebSocket(`ws://127.0.0.1:${central.port}/voice?${query}`, {
         headers: socketHeaders,
       })
       socket.on('open', () => resolve(socket))
@@ -101,7 +152,7 @@ const start = async () => {
 
   /** Send a raw upgrade request with a Host header no URL can hold; resolves when it ends. */
   const upgradeWithBadHost = async () => {
-    const socket = connect((server.address() as AddressInfo).port, '127.0.0.1')
+    const socket = connect(central.port, '127.0.0.1')
     await once(socket, 'connect')
     socket.end(
       'GET /voice HTTP/1.1\r\nHost: [\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n' +
@@ -115,13 +166,13 @@ const start = async () => {
 }
 
 describe('the voice socket', () => {
-  it('plays the audio an agent streams after joining, until the bot leaves', async () => {
+  it('plays audio streamed through central after joining, until the bot leaves', async () => {
     const { callTool, openSocket, voiceServer } = await start()
     const joined = await callTool('discord_voice_join', {
       guildId: GUILD_ID,
       channelId: FAKE_VOICE_CHANNEL_ID,
     })
-    expect(joined.data).toEqual({ socket: `wss://relay.test/voice?guild_id=${GUILD_ID}` })
+    expect(joined.data).toEqual({ socket: `/voice?guild_id=${GUILD_ID}` })
     await vi.waitFor(() =>
       expect(voiceServer.received).toContainEqual({ op: 23, d: { transition_id: 1 } }),
     )

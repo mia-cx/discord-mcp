@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer, request as httpRequest, type IncomingMessage, type Server } from 'node:http'
 import { createRequire } from 'node:module'
-import { tmpdir } from 'node:os'
+import { availableParallelism, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -24,6 +24,14 @@ const HEAP_LIMIT_MB = 256
 const RESULT_LIMIT_BYTES = 1024 * 1024
 const STDERR_TAIL_BYTES = 4 * 1024
 const STARTUP_RETRY_MS = 10
+/** Enough that a host with few CPUs still runs one bot's runaway beside other bots' work. */
+const MIN_CONCURRENCY = 4
+
+/** A Gateway dispatch: its event name and data. */
+export interface GatewayEvent {
+  readonly t: string
+  readonly d: Record<string, unknown>
+}
 
 export type ScriptOutcome =
   | {
@@ -40,12 +48,29 @@ export type ScriptOutcome =
   | { readonly outcome: 'crashed'; readonly message: string }
 
 export interface ScriptExecution {
-  /** Executions for one bot run one at a time; different bots run side by side. */
+  /** The bot it runs for. Bots take turns at process slots, so none can hold them all. */
   readonly botId: string
+  /**
+   * Executions with the same queue run one at a time, in order; others run side by side. Scripts
+   * queue per bot, workflow events per bot and guild.
+   */
+  readonly queue: string
   /** The bot's own user object, which the isolate's client reports as `client.user`. */
   readonly botUser: unknown
   /** From `prepareScript`; the first is the entry module. */
   readonly modules: ReadonlyArray<ScriptModule>
+  /**
+   * What to run. Omitted, the script's default export; `event`, a workflow's listeners for one
+   * Gateway dispatch; `probe`, a report of the events and intents a workflow's clients declare.
+   */
+  readonly input?: { readonly event: GatewayEvent } | { readonly probe: true }
+  /**
+   * Takes a slot set aside for interactions, which Discord expects answered within three seconds,
+   * so it never waits behind ordinary runs.
+   */
+  readonly urgent?: boolean
+  /** Skipped, rejecting, when no slot frees within this long, as for an answer that would be late. */
+  readonly admitWithinMs?: number
   readonly timeoutMs: number
   readonly broker: Broker
   readonly signal?: AbortSignal
@@ -124,8 +149,7 @@ const readLimited = async (response: IncomingMessage) => {
 }
 
 /** Send the one request that runs the script, waiting for workerd to open its socket first. */
-const invoke = async (socketPath: string, botUser: unknown, signal: AbortSignal) => {
-  const payload = JSON.stringify({ user: botUser })
+const invoke = async (socketPath: string, payload: string, signal: AbortSignal) => {
   for (;;) {
     try {
       return await new Promise<string | undefined>((resolve, reject) => {
@@ -220,7 +244,11 @@ const execute = async (execution: ScriptExecution): Promise<ScriptOutcome> => {
             `workerd exited (${code ?? exitSignal}) before the script finished.${dropped}\n${stderr}`.trim(),
         }),
       )
-      invoke(runSocket, execution.botUser, signal).then(
+      invoke(
+        runSocket,
+        JSON.stringify({ user: execution.botUser, ...execution.input }),
+        signal,
+      ).then(
         (body) => resolve(parseOutcome(body, () => stderr)),
         // The connection dropped: workerd died or is dying. Its exit reports why, with stderr.
         (error: unknown) => {
@@ -229,8 +257,10 @@ const execute = async (execution: ScriptExecution): Promise<ScriptOutcome> => {
           child.kill('SIGKILL')
         },
       )
+      // Removed when this execution ends: a workflow's signal outlives thousands of them.
       execution.signal?.addEventListener('abort', () => reject(execution.signal?.reason), {
         once: true,
+        signal: stop.signal,
       })
     })
   } finally {
@@ -245,20 +275,102 @@ export interface IsolateHost {
   readonly run: (execution: ScriptExecution) => Promise<ScriptOutcome>
 }
 
-/** Runs scripts one at a time per bot, each in its own workerd process. */
-export const makeIsolateHost = (): IsolateHost => {
+/**
+ * Process slots. A bot within its share, half the slots, takes any free slot; a bot past it takes
+ * one only while another stays free for a different bot. Freed slots go to waiting bots in turn,
+ * so no bot can hold them all and a busy bot still uses the capacity nobody else needs.
+ */
+const slots = (size: number) => {
+  const share = Math.max(1, Math.floor(size / 2))
+  let free = size
+  /** Slots each bot holds. */
+  const held = new Map<string, number>()
+  /** Each waiting bot's line, in the order bots get their next turn. */
+  const waiting = new Map<string, Array<() => void>>()
+  const canTake = (botId: string) => free > 1 || (free > 0 && (held.get(botId) ?? 0) < share)
+  const take = (botId: string) => {
+    free -= 1
+    held.set(botId, (held.get(botId) ?? 0) + 1)
+  }
+  /** Admit the oldest run of each waiting bot that may take a slot, in turn. */
+  const grant = () => {
+    for (const [botId, [first, ...rest]] of waiting) {
+      if (first === undefined || !canTake(botId)) continue
+      waiting.delete(botId)
+      if (rest.length > 0) waiting.set(botId, rest)
+      take(botId)
+      first()
+      return grant()
+    }
+  }
+  return {
+    acquire: (botId: string, withinMs?: number) => {
+      // A bot's runs start in order, so one with a line joins its end.
+      if (!waiting.has(botId) && canTake(botId)) {
+        take(botId)
+        return Promise.resolve()
+      }
+      return new Promise<void>((resolve, reject) => {
+        const admit = () => {
+          clearTimeout(timer)
+          resolve()
+        }
+        const timer =
+          withinMs === undefined
+            ? undefined
+            : setTimeout(() => {
+                const rest = (waiting.get(botId) ?? []).filter((waiter) => waiter !== admit)
+                if (rest.length > 0) waiting.set(botId, rest)
+                else waiting.delete(botId)
+                reject(new Error(`No process slot freed within ${withinMs} ms.`))
+              }, withinMs)
+        waiting.set(botId, [...(waiting.get(botId) ?? []), admit])
+      })
+    },
+    // The releasing bot goes to the back of the line, behind every bot still waiting for a turn.
+    release: (botId: string) => {
+      free += 1
+      const count = (held.get(botId) ?? 1) - 1
+      if (count === 0) held.delete(botId)
+      else held.set(botId, count)
+      const own = waiting.get(botId)
+      if (own !== undefined) {
+        waiting.delete(botId)
+        waiting.set(botId, own)
+      }
+      grant()
+    },
+  }
+}
+
+/**
+ * Runs executions one at a time per queue, each in its own workerd process, with at most
+ * `concurrency` ordinary processes and as many urgent ones at once.
+ */
+export const makeIsolateHost = (
+  concurrency = Math.max(MIN_CONCURRENCY, availableParallelism()),
+): IsolateHost => {
   const queues = new Map<string, Promise<unknown>>()
+  const ordinary = slots(concurrency)
+  const urgent = slots(concurrency)
   return {
     run: (execution) => {
-      const previous = queues.get(execution.botId) ?? Promise.resolve()
-      const current = previous.then(() => {
+      const previous = queues.get(execution.queue) ?? Promise.resolve()
+      const pool = execution.urgent ? urgent : ordinary
+      const current = previous.then(async () => {
         execution.signal?.throwIfAborted()
-        return execute(execution)
+        await pool.acquire(execution.botId, execution.admitWithinMs)
+        try {
+          execution.signal?.throwIfAborted()
+          return await execute(execution)
+        } finally {
+          pool.release(execution.botId)
+        }
       })
       const settled = current.catch(() => undefined)
-      queues.set(execution.botId, settled)
+      queues.set(execution.queue, settled)
       void settled.then(() => {
-        if (queues.get(execution.botId) === settled) queues.delete(execution.botId)
+        if (queues.get(execution.queue) === settled) queues.delete(execution.queue)
       })
       return current
     },

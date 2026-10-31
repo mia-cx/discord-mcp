@@ -8,6 +8,7 @@ const execution = async (
   timeoutMs: number,
 ): Promise<ScriptExecution> => ({
   botId,
+  queue: botId,
   botUser: { id: botId, username: `bot-${botId}`, discriminator: '0', bot: true },
   modules: await prepareScript(source),
   timeoutMs,
@@ -98,5 +99,135 @@ describe('the isolate host', () => {
     )
 
     expect(run).toEqual({ outcome: 'completed', result: '€'.repeat(200000), logs: [] })
+  })
+
+  it('runs no more workerd processes at once than its concurrency allows', async () => {
+    const host = makeIsolateHost(1)
+    const finished: string[] = []
+    const slow = await execution(
+      '1',
+      'export default () => new Promise((r) => setTimeout(r, 500))',
+      5000,
+    )
+    const quick = await execution('2', 'export default () => "quick"', 5000)
+
+    await Promise.all([
+      host.run(slow).then(() => finished.push('slow')),
+      host.run(quick).then(() => finished.push('quick')),
+    ])
+
+    expect(finished).toEqual(['slow', 'quick'])
+  })
+
+  it('runs urgent executions in slots of their own, bounded like the rest', async () => {
+    const host = makeIsolateHost(1)
+    const finished: string[] = []
+    const sleep = (ms: number) => `export default () => new Promise((r) => setTimeout(r, ${ms}))`
+    const ordinary = await execution('1', sleep(2000), 5000)
+    const first = { ...(await execution('2', sleep(600), 5000)), urgent: true }
+    const second = { ...(await execution('3', sleep(0), 5000)), urgent: true }
+
+    await Promise.all(
+      Object.entries({ ordinary, first, second }).map(([name, run]) =>
+        host.run(run).then(() => finished.push(name)),
+      ),
+    )
+
+    // Never behind the ordinary run, but one at a time in a single urgent slot.
+    expect(finished).toEqual(['first', 'second', 'ordinary'])
+  })
+
+  it('hands a free slot to each waiting bot in turn', async () => {
+    const host = makeIsolateHost(1)
+    const finished: string[] = []
+    const busy = await execution(
+      '1',
+      'export default () => new Promise((r) => setTimeout(r, 300))',
+      5000,
+    )
+    const runs = [
+      { ...busy, queue: 'bot-1:a', label: 'bot-1 a' },
+      { ...busy, queue: 'bot-1:b', label: 'bot-1 b' },
+      { ...busy, queue: 'bot-1:c', label: 'bot-1 c' },
+      { ...(await execution('2', 'export default () => 0', 5000)), label: 'bot-2' },
+    ]
+
+    await Promise.all(
+      runs.map(({ label, ...run }) => host.run(run).then(() => finished.push(label))),
+    )
+
+    expect(finished).toEqual(['bot-1 a', 'bot-2', 'bot-1 b', 'bot-1 c'])
+  })
+
+  it('never lets one bot hold every slot, so another bot answers its interaction at once', async () => {
+    const host = makeIsolateHost(2)
+    const finished: string[] = []
+    const slow = {
+      ...(await execution(
+        '1',
+        'export default () => new Promise((r) => setTimeout(r, 600))',
+        5000,
+      )),
+      urgent: true,
+    }
+    const runs = [
+      { ...slow, queue: 'bot-1:a', label: 'bot-1 a' },
+      { ...slow, queue: 'bot-1:b', label: 'bot-1 b' },
+      { ...(await execution('2', 'export default () => 0', 5000)), urgent: true, label: 'bot-2' },
+    ]
+
+    await Promise.all(
+      runs.map(({ label, ...run }) => host.run(run).then(() => finished.push(label))),
+    )
+
+    expect(finished).toEqual(['bot-2', 'bot-1 a', 'bot-1 b'])
+  })
+
+  it('skips an execution that waits for a slot past its admission deadline', async () => {
+    const host = makeIsolateHost(1)
+    const busy = {
+      ...(await execution(
+        '1',
+        'export default () => new Promise((r) => setTimeout(r, 1500))',
+        5000,
+      )),
+      urgent: true,
+    }
+    const late = { ...(await execution('2', 'export default () => 0', 5000)), urgent: true }
+
+    const running = host.run(busy)
+    await expect(host.run({ ...late, admitWithinMs: 300 })).rejects.toThrow('No process slot')
+    expect(await host.run(late)).toMatchObject({ outcome: 'completed' })
+    expect((await running).outcome).toBe('completed')
+  })
+
+  it('lets a bot past its share use idle slots while one stays free for another bot', async () => {
+    const host = makeIsolateHost(4)
+    const finished: string[] = []
+    const slow = {
+      ...(await execution(
+        '1',
+        'export default () => new Promise((r) => setTimeout(r, 800))',
+        5000,
+      )),
+      urgent: true,
+    }
+    const runs = [
+      { ...slow, queue: 'bot-1:a', label: 'slow a' },
+      { ...slow, queue: 'bot-1:b', label: 'slow b' },
+      // A third deferred slash command of the same bot, past its share of two.
+      {
+        ...(await execution('1', 'export default () => 0', 5000)),
+        urgent: true,
+        queue: 'bot-1:c',
+        label: 'third',
+      },
+    ]
+
+    await Promise.all(
+      runs.map(({ label, ...run }) => host.run(run).then(() => finished.push(label))),
+    )
+
+    expect(finished[0]).toBe('third')
   })
 })

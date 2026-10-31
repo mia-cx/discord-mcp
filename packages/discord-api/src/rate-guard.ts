@@ -45,52 +45,54 @@ export class RateGuard extends Context.Service<
     readonly failureCount: (scope: string) => Effect.Effect<number>
   }
 >()('discord-api/RateGuard') {
+  /** A guard with its own rejection history, for sharing one bot's guard across requests. */
+  static readonly make = (config: RateGuardConfig = defaultRateGuardConfig) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make<GuardState>({ rejections: new Map() })
+
+      const liveCount = (scope: string) =>
+        Effect.map(
+          Effect.all([Ref.get(state), Effect.clockWith((c) => c.currentTimeMillis)]),
+          ([s, now]) => {
+            const cutoff = now - config.windowMs
+            return (s.rejections.get(scope) ?? []).filter((t) => t > cutoff).length
+          },
+        )
+
+      return {
+        failureCount: liveCount,
+
+        check: (scope: string) =>
+          Effect.flatMap(liveCount(scope), (count) =>
+            count < config.threshold
+              ? Effect.void
+              : Effect.fail(
+                  new RateGuardTrippedError({
+                    message: `Blocked before sending: ${count} rejected Discord responses for ${scope} within the last ${Math.round(config.windowMs / 60_000)} minutes.`,
+                    scope,
+                    failures: count,
+                    windowMs: config.windowMs,
+                  }),
+                ),
+          ),
+
+        recordRejection: (scope: string) =>
+          Effect.flatMap(
+            Effect.clockWith((c) => c.currentTimeMillis),
+            (now) =>
+              Ref.update(state, (s) => {
+                const cutoff = now - config.windowMs
+                const kept = (s.rejections.get(scope) ?? []).filter((t) => t > cutoff)
+                const next = new Map(s.rejections)
+                next.set(scope, [...kept, now])
+                return { rejections: next }
+              }),
+          ),
+      }
+    })
+
   static readonly layer = (config: RateGuardConfig = defaultRateGuardConfig) =>
-    Layer.effect(RateGuard)(
-      Effect.gen(function* () {
-        const state = yield* Ref.make<GuardState>({ rejections: new Map() })
-
-        const liveCount = (scope: string) =>
-          Effect.map(
-            Effect.all([Ref.get(state), Effect.clockWith((c) => c.currentTimeMillis)]),
-            ([s, now]) => {
-              const cutoff = now - config.windowMs
-              return (s.rejections.get(scope) ?? []).filter((t) => t > cutoff).length
-            },
-          )
-
-        return {
-          failureCount: liveCount,
-
-          check: (scope) =>
-            Effect.flatMap(liveCount(scope), (count) =>
-              count < config.threshold
-                ? Effect.void
-                : Effect.fail(
-                    new RateGuardTrippedError({
-                      message: `Blocked before sending: ${count} rejected Discord responses for ${scope} within the last ${Math.round(config.windowMs / 60_000)} minutes.`,
-                      scope,
-                      failures: count,
-                      windowMs: config.windowMs,
-                    }),
-                  ),
-            ),
-
-          recordRejection: (scope) =>
-            Effect.flatMap(
-              Effect.clockWith((c) => c.currentTimeMillis),
-              (now) =>
-                Ref.update(state, (s) => {
-                  const cutoff = now - config.windowMs
-                  const kept = (s.rejections.get(scope) ?? []).filter((t) => t > cutoff)
-                  const next = new Map(s.rejections)
-                  next.set(scope, [...kept, now])
-                  return { rejections: next }
-                }),
-            ),
-        }
-      }),
-    )
+    Layer.effect(RateGuard)(RateGuard.make(config))
 }
 
 /** Statuses that count toward the ban budget. 400s are free and must not be recorded. */

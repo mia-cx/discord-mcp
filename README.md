@@ -56,8 +56,9 @@ registration expires, and lapses after 30 days unused.
 Refresh revokes every copy of the previous login, so each machine needs its own
 sign-in. The stdio bridge refreshes a day before expiry and after a rejected
 access credential, and bridges sharing one login file take turns through a lock.
-Only spent login-code hashes remain in memory for one minute; run one server
-process. Restarting cancels unfinished logins but preserves issued credentials.
+Authorization codes also enclose Discord's refresh token, and redeeming one
+rotates it, so Discord rejects a replayed code. No login state lives in memory:
+any replica can finish any login, and restarts preserve logins in progress.
 
 The executable serves MCP revision `2026-07-28` without an initialization handshake
 or sessions. Older MCP clients can use the SDK's stateless compatibility path.
@@ -76,6 +77,11 @@ Both paths require OAuth and bot credentials on every HTTP request.
 | `discord_guild_get` | Read a guild with a compact, typed result. |
 | `discord_permissions_explain` | Diagnose effective guild/channel permissions. |
 | `discord_script_run` | Run one-off discord.js code as the bot, checked against its grants. |
+| `discord_workflow_publish` | Store a new revision of a workflow: discord.js code that runs on Gateway events. |
+| `discord_workflow_list` | List the bot's workflows, what each runs with, and who changed them. |
+| `discord_workflow_enable` | Run a workflow revision on the bot's events and show its grants. |
+| `discord_workflow_disable` | Stop running a workflow. |
+| `discord_workflow_delete` | Delete a workflow and its revisions. |
 | `discord_voice_join` | Join a voice channel to play audio there. [Bot hosting](#bot-hosting) only. |
 | `discord_voice_leave` | Leave a server's voice channel. Bot hosting only. |
 
@@ -86,8 +92,8 @@ the supported operation and its input schema.
 
 Arguments are validated locally before execution. Destructive and admin calls act
 directly under the supplied bot's Discord permissions, with no preview-token
-sessions; only [scripts](#scripts) carry server-side grants. This relay plays audio
-in voice channels but does not receive it, or run agent conversations.
+sessions; only [scripts](#scripts) and [workflows](#workflows) carry server-side grants. This
+relay plays audio in voice channels but does not receive it, or run agent conversations.
 
 Calls currently accept JSON payloads. Multipart file upload is not implemented.
 Discord rate limits and API errors are returned to the caller; the HTTP relay
@@ -128,6 +134,45 @@ A script is killed after `timeoutSeconds` (30 by default, 120 at most).
 The HTTP relay offers the tool only when `DISCORD_OAUTH_ALLOWED_USER_IDS` is set.
 Local stdio always offers it. workerd ships as an npm dependency for glibc Linux,
 macOS, and Windows.
+
+## Workflows
+
+A workflow is discord.js code that runs as the bot on Gateway events, while no agent is
+connected. It is written like an ordinary bot:
+
+```ts
+import { Client, Events, GatewayIntentBits } from 'discord.js'
+
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+})
+
+client.on(Events.MessageCreate, async (message) => {
+  if (message.content === 'ping') await message.reply('pong')
+})
+
+client.login(process.env.DISCORD_TOKEN)
+```
+
+`discord_workflow_publish` loads the source once in workerd to find the events its clients
+listen for and the intents they declare, then stores it as the workflow's next immutable
+revision. `discord_workflow_enable` runs a revision and returns its grants and intents;
+Discord's privileged intents must be on in the Developer Portal first. While any workflow is
+enabled, the bot stays online without agent calls. After a restart, workflows also run the
+events Discord replays.
+
+Workflows listen for `messageCreate`, `messageUpdate`, `messageDelete`,
+`messageReactionAdd`, `messageReactionRemove`, `guildMemberAdd`, `guildMemberRemove`, and
+`interactionCreate`. Each event runs each listening workflow in its own fresh workerd
+process for at most 30 seconds, so nothing in memory lasts between events, and listeners
+may receive partial objects. Each workflow receives only the events its own intents cover.
+A guild's events run in order; interactions run at once. The bot's own messages are not delivered. Grants work as for scripts. A
+workflow may also answer the interaction it is handling (`reply`, `deferReply`, `editReply`,
+`followUp`) with the `interaction` and `webhook` families, and set the bot's presence.
+
+Anyone with relay access and the bot's token manages its workflows. Every publish, enable,
+disable, and delete is recorded with the acting human's Discord user ID, and
+`discord_workflow_list` shows the latest changes. Workflow tools need [bot hosting](#bot-hosting).
 
 ## Permission metadata
 
@@ -219,6 +264,10 @@ Keep the environment file private. Rotating the encryption key invalidates all l
 | `DATABASE_URL` | Optional Postgres URL. Turns on [bot hosting](#bot-hosting) when the allowlist names users. |
 | `TOKEN_VAULT_KEY` | Required for bot hosting. Stable random 32-byte base64 key that encrypts stored bot tokens and Gateway sessions. |
 | `DISCORD_TOKEN` | Stdio only. Ignored by the HTTP relay. |
+| `DISCORD_MCP_TIER` | `all` runs both tiers in one process; `central` or `bot-host` runs one. See [Tiers](#tiers). |
+| `BOT_HOSTS` | Split tiers only. Comma-separated base URL of every bot host. |
+| `BOT_HOST_URL` | Bot hosts only. This host's URL, exactly as `BOT_HOSTS` lists it. |
+| `BOT_HOST_SECRET` | Split tiers only. Shared random secret, at least 32 characters, that bot hosts require from central. |
 
 `/health/live` and `/health/ready` return HTTP 200 when the process is serving.
 They do not check Discord. `/mcp` returns 401 for missing, invalid, expired, or
@@ -238,12 +287,19 @@ resource, issuer, browser state, and one-time codes. Registrations expire after
 Bot hosting keeps agents' bots online. An agent's first call for a bot stores its token,
 encrypted, in Postgres and connects the bot to Discord's Gateway with an online presence.
 Each later call restarts a 24-hour timer; when it runs out, the bot disconnects and shows
-offline. Startup applies pending database migrations.
+offline, unless it has enabled [workflows](#workflows). Startup applies pending database
+migrations and brings every bot with enabled workflows online.
 
-A restart keeps bots online. The bot's Gateway session is stored encrypted alongside its
-token, and the next process resumes it, so Discord replays the events sent while the server was
-down. If Discord no longer accepts the session, the bot connects afresh. Each resumed bot gets a
-new 24-hour timer.
+A bot runs as many shards as Discord recommends, all in one process. Shards identify as fast
+as Discord's `max_concurrency` allows, and spend at most half the Identifies Discord says the
+bot has left today, leaving the rest for the bot's other clients. When Discord says the bot
+needs more shards, it goes offline until the next agent call, which brings it back with
+Discord's new count.
+
+A restart keeps bots online. Each shard's Gateway session is stored encrypted alongside the
+bot's token, and the next process resumes it, so Discord replays the events sent while the
+server was down. If Discord no longer accepts a session, that shard connects afresh. A resumed
+bot keeps its shard count and gets a new 24-hour timer.
 
 Set `DATABASE_URL`, `TOKEN_VAULT_KEY` (generate it like `OAUTH_ENCRYPTION_KEY`), and a
 `DISCORD_OAUTH_ALLOWED_USER_IDS` list. Without that list, the server logs a warning and
@@ -257,9 +313,9 @@ encrypts the audio end to end with DAVE. Sending needs no notice to the channel;
 receives nothing.
 
 1. Call `discord_voice_join` with `guildId` and `channelId`. The bot needs View Channel,
-   Connect, and Speak. It returns the voice socket's URL, `wss://YOUR_HOST/voice?guild_id=…`.
-2. Open a WebSocket to that URL with the same `Authorization` and `X-Discord-Bot-Token`
-   headers as `/mcp`, adding the codec to the query:
+   Connect, and Speak. It returns the voice socket's path, `/voice?guild_id=…`.
+2. Open a WebSocket to that path on the relay's host (`wss:` for `https:`) with the same
+   `Authorization` and `X-Discord-Bot-Token` headers as `/mcp`, adding the codec to the query:
    - `codec=opus`: each binary message is one Opus packet of 20 ms, 48 kHz stereo audio.
    - `codec=pcm16&sample_rate=R&channels=C`: little-endian 16-bit PCM, interleaved when stereo,
      at `R` of 8000, 12000, 16000, 24000, or 48000 Hz and `C` of 1 (default) or 2. Messages may
@@ -285,6 +341,37 @@ leaves. Joining another channel in the same server moves the bot and closes its 
 socket keeps the bot online past its 24-hour idle timeout. Voice outlasts a resumed Gateway
 connection, but not a new Gateway session or a server restart: join again after a 1001 close.
 
+### Tiers
+
+The relay runs as one process by default. To scale, split it into two tiers, each with
+as many replicas as it needs:
+
+- **Central** serves MCP and OAuth. It checks the login and the allowlist, reads the bot ID
+  from the first segment of the bot token, and forwards the request to the bot host that
+  owns that bot. It relays each [voice socket](#voice) to that bot host the same way. It
+  holds no bot tokens and calls Discord only to check logins.
+- **Bot hosts** check each bot token with Discord and run its requests. All requests for one
+  bot share one rate limiter, whichever central replica received them. `DATABASE_URL` and
+  `TOKEN_VAULT_KEY` go on bot hosts, and scripts and workflows run there, sharing the bot's
+  rate limiter. A bot host starts bot hosting and offers `discord_script_run` and the workflow
+  tools by the same `DISCORD_OAUTH_ALLOWED_USER_IDS` rules as the single process. Central
+  enforces that allowlist and tells the bot host which human made each request, for the
+  workflow change log.
+
+Give both tiers the same `BOT_HOSTS` and `BOT_HOST_SECRET`. Ownership comes from rendezvous
+hashing over `BOT_HOSTS`, so every replica agrees on it, and adding or removing a host moves
+only the bots that host gains or loses. A host answers 503 with `Retry-After: 1` for a bot
+its list says it does not own, so a central still on an old list costs a retry, not a second
+owner. Two hosts on different lists can both own a bot that moved, each with its own rate
+limiter, so change `BOT_HOSTS` by stopping every bot host and then starting them all on the new
+list. Centrals can update in any order. Each bot host resumes the stored sessions of the bots
+it owns when it starts, and brings its bots with enabled workflows online, so a bot that moved
+comes back online on its new host. Keep bot hosts off the public network: the hop from central is plain HTTP and
+carries bot tokens.
+
+Logins, refreshes, and MCP requests all work on any central replica, so no sticky routing is
+needed.
+
 For agent-operated clients, use the [curl example](./docs/operating.md#curl).
 For a developer-Team-derived access list, follow
 [the explicit membership sync procedure](./docs/operating.md#developer-team-allowlist).
@@ -304,7 +391,8 @@ After changing `packages/storage/src/schema.ts`, generate a migration with
 
 Integration tests cover browser/CLI login, credential bindings, code and refresh replay,
 concurrent bridge refreshes,
-OAuth revocation and expiry, concurrent bot isolation, reads, writes, and rate limits.
+OAuth revocation and expiry, concurrent bot isolation, reads, writes, rate limits, and
+routing across central and bot-host processes.
 
 ## Earlier implementation
 
@@ -314,9 +402,9 @@ Stateless HTTP was already possible before that revision.
 
 [PLAN.md](./PLAN.md) describes the earlier stateful control-plane design.
 Its libraries and tests remain in the workspace, but the server executable no
-longer starts that application. Workflows, persistent templates/blueprints,
-and PAT/OIDC administration are outside the relay. Its Docker sandbox supervisor
-has been removed; workflows have no execution backend.
+longer starts that application. Persistent templates/blueprints and PAT/OIDC
+administration are outside the relay. Its Docker sandbox supervisor has been
+removed; [workflows](#workflows) now run in workerd.
 
 ## License
 

@@ -124,8 +124,10 @@ export interface VoicePayload {
 
 export interface VoiceOptions {
   readonly botId: string
-  /** Send a payload on the bot's Gateway shard. False when the shard is not connected. */
-  readonly send: (payload: VoicePayload) => boolean
+  /** The shard that carries a server's Gateway events, once the bot's shards have started. */
+  readonly shardOf: (guildId: string) => number | undefined
+  /** Send a payload on one of the bot's shards. False until that shard's session has started. */
+  readonly send: (shardId: number, payload: VoicePayload) => boolean
   readonly clock: Clock
   readonly log: (message: string) => void
 }
@@ -149,17 +151,17 @@ export interface BotVoice {
 }
 
 export interface Voice extends BotVoice {
-  /** Feed every Gateway dispatch the bot's shard receives. */
-  readonly dispatch: (event: string, data: unknown) => void
-  /** The shard lost its connection: joins wait for the next `READY` or `RESUMED`. */
-  readonly dropped: () => void
+  /** Feed every Gateway dispatch each of the bot's shards receives. */
+  readonly dispatch: (shardId: number, event: string, data: unknown) => void
+  /** A shard lost its connection: joins in its servers wait for its next `READY` or `RESUMED`. */
+  readonly dropped: (shardId: number) => void
   /** Whether an agent's voice socket is open, which keeps the bot online. */
   readonly streaming: () => boolean
   /**
-   * Leave every voice channel and close every socket, as the bot goes offline. False when a leave
-   * could not reach Discord, so its session would keep the bot in the channel.
+   * Leave every voice channel and close every socket, as the bot goes offline. Returns the shards
+   * whose leaves could not reach Discord, whose sessions would keep the bot in those channels.
    */
-  readonly close: () => boolean
+  readonly close: () => ReadonlySet<number>
 }
 
 interface Session {
@@ -178,10 +180,10 @@ const LEFT = { code: VoiceClose.Left, reason: 'The bot left the voice channel.' 
 const OFFLINE = { code: VoiceClose.Offline, reason: 'The bot went offline.' }
 
 /**
- * One bot's voice connections, one per server, over its own Gateway shard: `@discordjs/voice`
- * carries the audio and `@snazzah/davey` its DAVE end-to-end encryption.
+ * One bot's voice connections, one per server, each over the bot's Gateway shard for that server:
+ * `@discordjs/voice` carries the audio and `@snazzah/davey` its DAVE end-to-end encryption.
  */
-export const createVoice = ({ botId, send, clock, log }: VoiceOptions): Voice => {
+export const createVoice = ({ botId, shardOf, send, clock, log }: VoiceOptions): Voice => {
   const sessions = new Map<string, Session>()
   const adapters = new Map<string, DiscordGatewayAdapterLibraryMethods>()
   /**
@@ -189,8 +191,19 @@ export const createVoice = ({ botId, send, clock, log }: VoiceOptions): Voice =>
    * the bot in those channels, so they go out once it resumes.
    */
   const unsentLeaves = new Map<string, VoicePayload>()
-  let online = false
-  let onOnline: Array<() => void> = []
+  /** Shards whose session has started and not dropped since. */
+  const online = new Set<number>()
+  /** Joins waiting for their server's shard to come online. */
+  let waiting: Array<{ readonly guildId: string; readonly ready: () => void }> = []
+
+  const onlineFor = (guildId: string) => {
+    const shardId = shardOf(guildId)
+    return shardId !== undefined && online.has(shardId)
+  }
+  const sendFor = (guildId: string, payload: VoicePayload) => {
+    const shardId = shardOf(guildId)
+    return shardId !== undefined && send(shardId, payload)
+  }
 
   const destroy = (session: Session, ending: Session['ending']) => {
     session.ending = ending
@@ -199,19 +212,19 @@ export const createVoice = ({ botId, send, clock, log }: VoiceOptions): Voice =>
     }
   }
 
-  const untilOnline = () =>
-    online
+  const untilOnline = (guildId: string) =>
+    onlineFor(guildId)
       ? Promise.resolve()
       : new Promise<void>((resolve, reject) => {
           const cancel = clock.schedule(() => {
-            onOnline = onOnline.filter((waiter) => waiter !== ready)
+            waiting = waiting.filter((waiter) => waiter.ready !== ready)
             reject(new Error('The bot is still connecting to Discord. Try again shortly.'))
           }, JOIN_TIMEOUT_MS)
           const ready = () => {
             cancel()
             resolve()
           }
-          onOnline.push(ready)
+          waiting.push({ guildId, ready })
         })
 
   /** Settles once the connection is ready, or fails and destroys it. */
@@ -251,7 +264,7 @@ export const createVoice = ({ botId, send, clock, log }: VoiceOptions): Voice =>
         adapters.set(guildId, methods)
         return {
           sendPayload: (payload: VoicePayload) => {
-            const sent = send(payload)
+            const sent = sendFor(guildId, payload)
             if (sent) unsentLeaves.delete(guildId)
             else if ((payload.d as { channel_id: string | null }).channel_id === null) {
               unsentLeaves.set(guildId, payload)
@@ -293,6 +306,24 @@ export const createVoice = ({ botId, send, clock, log }: VoiceOptions): Voice =>
     session.ready = connected(connection)
     session.ready.catch(() => {})
     return session
+  }
+
+  /** A shard's session started: a new one, or a resumed one with its voice state intact. */
+  const started = (shardId: number, resumed: boolean) => {
+    const onShard = (guildId: string) => shardOf(guildId) === shardId
+    if (!resumed) {
+      for (const [guildId, session] of sessions) if (onShard(guildId)) destroy(session, OFFLINE)
+      for (const guildId of unsentLeaves.keys()) {
+        if (onShard(guildId)) unsentLeaves.delete(guildId)
+      }
+    }
+    for (const [guildId, leave] of unsentLeaves) {
+      if (onShard(guildId) && send(shardId, leave)) unsentLeaves.delete(guildId)
+    }
+    online.add(shardId)
+    const ready = waiting.filter((waiter) => onlineFor(waiter.guildId))
+    waiting = waiting.filter((waiter) => !ready.includes(waiter))
+    for (const waiter of ready) waiter.ready()
   }
 
   const attach = (session: Session, socket: WebSocket, format: AudioFormat) => {
@@ -339,18 +370,8 @@ export const createVoice = ({ botId, send, clock, log }: VoiceOptions): Voice =>
   }
 
   return {
-    dispatch: (event, data) => {
-      if (event === 'READY' || event === 'RESUMED') {
-        // A new Gateway session no longer holds the old session's voice state; a resumed one does.
-        if (event === 'READY') {
-          for (const session of sessions.values()) destroy(session, OFFLINE)
-          unsentLeaves.clear()
-        }
-        for (const [guildId, leave] of unsentLeaves) if (send(leave)) unsentLeaves.delete(guildId)
-        online = true
-        for (const ready of onOnline.splice(0)) ready()
-        return
-      }
+    dispatch: (shardId, event, data) => {
+      if (event === 'READY' || event === 'RESUMED') return started(shardId, event === 'RESUMED')
       const voice = data as { guild_id?: string; user_id?: string }
       if (voice.guild_id === undefined) return
       const adapter = adapters.get(voice.guild_id)
@@ -361,11 +382,11 @@ export const createVoice = ({ botId, send, clock, log }: VoiceOptions): Voice =>
         adapter?.onVoiceServerUpdate(data as Parameters<typeof adapter.onVoiceServerUpdate>[0])
       }
     },
-    dropped: () => {
-      online = false
+    dropped: (shardId) => {
+      online.delete(shardId)
     },
     join: async (guildId, channelId) => {
-      await untilOnline()
+      await untilOnline(guildId)
       const current = sessions.get(guildId)
       if (current?.connection.joinConfig.channelId === channelId) return current.ready
       if (current !== undefined) destroy(current, LEFT)
@@ -387,7 +408,7 @@ export const createVoice = ({ botId, send, clock, log }: VoiceOptions): Voice =>
     streaming: () => [...sessions.values()].some((session) => session.socket !== undefined),
     close: () => {
       for (const session of sessions.values()) destroy(session, OFFLINE)
-      return unsentLeaves.size === 0
+      return new Set([...unsentLeaves.keys()].flatMap((guildId) => shardOf(guildId) ?? []))
     },
   }
 }

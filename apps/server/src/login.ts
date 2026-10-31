@@ -16,7 +16,6 @@ const ACCESS_SECONDS = 7 * 24 * 3600
 const CLIENT_SECONDS = 30 * 24 * 3600
 // Each refresh issues a new envelope, so active logins never lapse; an idle one dies after this.
 const REFRESH_SECONDS = 30 * 24 * 3600
-const MAX_CODES = 10_000
 const BODY_LIMIT = 16_384
 const CONSENT_STYLES =
   'body{font:1rem/1.5 system-ui;max-width:60ch;margin:2rem auto;padding:0 1rem;color:#111;background:#fff}form{display:flex;flex-wrap:wrap;gap:.75rem}button{font:inherit;min-height:44px;padding:.5rem 1rem}'
@@ -120,8 +119,8 @@ const readBody = async (request: Request) => {
 /**
  * Discord-backed OAuth issuer and resource gate. Bot credentials never enter this module.
  * Login state and Discord grants travel in purpose-bound AES-GCM envelopes, not a database.
- * Only spent authorization-code hashes live in memory, until their one-minute expiry.
- * Refresh envelopes enclose Discord's rotating refresh token, so Discord rejects any replay.
+ * Authorization codes and refresh envelopes both enclose Discord's rotating refresh token, so
+ * Discord rejects any replay, whichever replica receives it. No login state lives in memory.
  * `discordFetch` is the external network seam, shared by login and per-request revocation checks.
  */
 export const createDiscordLogin = (
@@ -155,10 +154,8 @@ export const createDiscordLogin = (
   const cookieName = base.protocol === 'https:' ? '__Host-discord-mcp-login' : 'discord-mcp-login'
   const cookie = (nonce: string, age = FLOW_SECONDS) =>
     `${cookieName}=${nonce}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${age}${base.protocol === 'https:' ? '; Secure' : ''}`
-  // Login codes cannot be replayed after a process restart discards the spent-code set.
-  const epoch = random()
   const seal = (kind: string, claims: JWTPayload, lifetime: number) =>
-    new EncryptJWT({ ...claims, ...(['code', 'flow'].includes(kind) ? { epoch } : {}) })
+    new EncryptJWT(claims)
       .setProtectedHeader({ alg: 'dir', enc: 'A256GCM', typ: `discord-mcp-${kind}+jwt` })
       .setIssuer(issuer)
       .setAudience(kind === 'access' ? resource : `${issuer}/${kind}`)
@@ -175,16 +172,7 @@ export const createDiscordLogin = (
       contentEncryptionAlgorithms: ['A256GCM'],
       requiredClaims: ['exp', 'iat', 'jti'],
     })
-    if (['code', 'flow'].includes(kind) && payload.epoch !== epoch)
-      throw new Error('Restarted login')
     return payload
-  }
-  const spent = new Map<string, number>()
-  const consumeCode = (claims: JWTPayload) => {
-    for (const [id, expiry] of spent) if (expiry <= now()) spent.delete(id)
-    const id = challenge(text(claims.jti))
-    if (spent.has(id) || spent.size >= MAX_CODES) throw new Error('Code already used or busy')
-    spent.set(id, claims.exp ?? now() + CODE_SECONDS)
   }
   const checkBrowser = (request: Request, claims: JWTPayload) => {
     const nonce = request.headers
@@ -448,7 +436,7 @@ export const createDiscordLogin = (
               redirect: flow.redirect,
               challenge: flow.challenge,
               sub: subject,
-              tokens,
+              discordRefresh: tokens.refresh_token,
             },
             CODE_SECONDS,
           ),
@@ -486,8 +474,12 @@ export const createDiscordLogin = (
         code.challenge !== challenge(verifier)
       )
         throw new Error('Wrong code binding')
-      consumeCode(code)
-      return issue(Schema.decodeUnknownSync(TokenResponse)(code.tokens), clientId, text(code.sub))
+      // Redeeming rotates the sealed Discord refresh token, so a replayed code fails at Discord.
+      const tokens = await exchange({
+        grant_type: 'refresh_token',
+        refresh_token: text(code.discordRefresh),
+      })
+      return issue(tokens, clientId, await identity(tokens.access_token, text(code.sub)))
     }
     if (params.get('grant_type') === 'refresh_token') {
       // The sealed client ID was a live registration at sign-in, so a chain outlives its expiry.
