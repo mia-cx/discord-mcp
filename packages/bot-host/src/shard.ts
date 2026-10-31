@@ -138,7 +138,7 @@ export const startShard = ({
 
   // A connection without a session identifies after Hello, so it waits for the bot's budget.
   const connectToIdentify = () => {
-    const waitMs = identifies.spend()
+    const waitMs = identifies.budgetWait()
     if (waitMs === 0) return connect()
     onIdentifyBudgetSpent(waitMs)
     cancelTimer = clock.schedule(connectToIdentify, waitMs)

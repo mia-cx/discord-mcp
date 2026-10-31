@@ -236,7 +236,7 @@ Each later call restarts a 24-hour timer; when it runs out, the bot disconnects 
 offline. Startup applies pending database migrations.
 
 A bot runs as many shards as Discord recommends, all in one process. Shards identify as fast
-as Discord's `max_concurrency` allows, and spend at most half the Identifies Discord says the
+as Discord's `max_concurrency` allows, and spend about half the Identifies Discord says the
 bot has left today, leaving the rest for the bot's other clients. When Discord says the bot
 needs more shards, it goes offline until the next agent call, which brings it back with
 Discord's new count.

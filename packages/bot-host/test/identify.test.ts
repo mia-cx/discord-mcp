@@ -52,17 +52,44 @@ it.each([
     waits: [HOUR],
   },
 ])('spends the daily Identify budget: $case', ({ remaining, resetAfter, waits }) => {
-  const gate = createIdentifyGate(manualClock(), { ...LIMIT, remaining, resetAfter })
-  expect(waits.map(() => gate.spend())).toEqual(waits)
+  // Every shard in its own bucket, so only the budget makes anyone wait.
+  const gate = createIdentifyGate(manualClock(), {
+    ...LIMIT,
+    remaining,
+    resetAfter,
+    maxConcurrency: 16,
+  })
+  const seen = waits.map((_, shardId) => {
+    const wait = gate.budgetWait()
+    if (wait === 0) gate.whenFree(shardId, () => {})
+    return wait
+  })
+  expect(seen).toEqual(waits)
+})
+
+it('charges only Identifies sent, not connections that failed before Hello', () => {
+  const gate = createIdentifyGate(manualClock(), { ...LIMIT, remaining: 2 })
+  // Shards that pass the budget check but never reach Hello send no Identify.
+  for (let attempt = 0; attempt < 10; attempt++) expect(gate.budgetWait()).toBe(0)
+
+  gate.whenFree(0, () => {})
+  expect(gate.budgetWait()).toBe(DAY)
 })
 
 it('spends half the daily total once the budget resets, then waits a day', () => {
   const clock = manualClock()
-  const gate = createIdentifyGate(clock, { ...LIMIT, remaining: 0, resetAfter: HOUR })
-  expect(gate.spend()).toBe(HOUR)
+  const gate = createIdentifyGate(clock, {
+    ...LIMIT,
+    remaining: 0,
+    resetAfter: HOUR,
+    maxConcurrency: 500,
+  })
+  expect(gate.budgetWait()).toBe(HOUR)
 
   clock.advance(HOUR)
-  const spent = Array.from({ length: 500 }, () => gate.spend())
-  expect(spent.every((wait) => wait === 0)).toBe(true)
-  expect(gate.spend()).toBe(DAY)
+  for (let shardId = 0; shardId < 500; shardId++) {
+    expect(gate.budgetWait()).toBe(0)
+    gate.whenFree(shardId, () => {})
+  }
+  expect(gate.budgetWait()).toBe(DAY)
 })
