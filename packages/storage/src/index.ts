@@ -3,7 +3,7 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import { Client, Pool } from 'pg'
 import { advisoryLocks } from './locks.ts'
 import * as schema from './schema.ts'
-import { createStorage, migrationsFolder, rootMessage } from './store.ts'
+import { createStorage, type Listen, migrationsFolder, rootMessage } from './store.ts'
 
 /** What a workflow revision may do: catalog operation IDs, operation families, outbound hosts. */
 export interface WorkflowGrants {
@@ -86,6 +86,30 @@ export interface WorkflowRunQuery {
   /** Runs that finished before this are expired, even before pruning removes them. */
   readonly since: Date
   readonly limit: number
+}
+
+/** Where a voice opt-out applies: one bot in one server, or every bot everywhere. */
+export type VoiceOptOutScope =
+  | { readonly botId: string; readonly guildId: string }
+  | { readonly everywhere: true }
+
+/** A person opting out of voice relay in `scope`, or back in. */
+export interface VoiceOptOutChange {
+  readonly scope: VoiceOptOutScope
+  readonly userId: string
+  readonly optedOut: boolean
+}
+
+/** Hears voice opt-out changes as they commit. */
+export interface OptOutWatcher {
+  readonly changed: (change: VoiceOptOutChange) => void
+  /**
+   * Listening started, first or after `lost`. Changes made before it were not heard; changes
+   * from now on are, until `lost`.
+   */
+  readonly live: () => void
+  /** Listening stopped: why its connection failed or dropped. It retries on its own. */
+  readonly lost: (error: Error) => void
 }
 
 export interface PublishWorkflow {
@@ -234,6 +258,19 @@ export interface Storage {
   ) => Promise<ReadonlyArray<RecordedWorkflowRun>>
   /** Delete runs that finished before `before`. Resolves to how many were deleted. */
   readonly pruneWorkflowRuns: (before: Date) => Promise<number>
+  /** Opt a person out of voice relay, or back in, in `scope`. Repeating either changes nothing. */
+  readonly setVoiceOptOut: (
+    scope: VoiceOptOutScope,
+    userId: string,
+    optedOut: boolean,
+  ) => Promise<void>
+  /** Whether a person opted out of relay by this bot in this server, or by every bot. */
+  readonly voiceOptedOut: (botId: string, guildId: string, userId: string) => Promise<boolean>
+  /**
+   * Hear every voice opt-out change any process sharing this database makes, this one included,
+   * once it commits. Resolves to a function that stops listening.
+   */
+  readonly watchVoiceOptOuts: (watcher: OptOutWatcher) => Promise<() => Promise<void>>
   readonly close: () => Promise<void>
 }
 
@@ -282,6 +319,65 @@ const QUERY_TIMEOUT_MS = 30_000
 /** The lock session's TCP keepalives: idle seconds before probing, and probes before giving up. */
 const KEEPALIVE_IDLE_S = 10
 const KEEPALIVE_PROBES = 3
+
+/** How long a lost listening connection waits before reconnecting. */
+const RELISTEN_MS = 1_000
+/** How often the listening connection proves it is alive; a dead one is noticed within this plus the query timeout. */
+const LISTEN_HEARTBEAT_MS = 15_000
+
+/**
+ * Listen on its own connection, since a pooled one goes back to other queries. A connection that
+ * fails, first or later, is retried until stopped, and `resumed` fires once listening works again.
+ */
+const listenOn =
+  (url: string): Listen =>
+  async (channel, { payload, listening, lost: onLost }) => {
+    let stopped = false
+    let current: Client | undefined
+    let retry: ReturnType<typeof setTimeout> | undefined
+    const open = () => {
+      if (stopped) return
+      const client = new Client({
+        connectionString: url,
+        connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
+        query_timeout: CONNECT_TIMEOUT_MS,
+      })
+      current = client
+      let lost = false
+      let heartbeat: ReturnType<typeof setInterval> | undefined
+      const reopen = (error: Error) => {
+        clearInterval(heartbeat)
+        if (lost || stopped) return
+        lost = true
+        onLost(error)
+        void client.end().catch(() => {})
+        retry = setTimeout(open, RELISTEN_MS)
+      }
+      client.on('error', reopen)
+      client.on('end', () => reopen(new Error('The listening connection to Postgres ended.')))
+      client.on('notification', (message) => {
+        if (message.channel === channel && message.payload !== undefined) payload(message.payload)
+      })
+      client
+        .connect()
+        .then(() => client.query(`listen "${channel}"`))
+        .then(() => {
+          if (lost || stopped) return
+          // A connection dropped without a FIN or RST reports nothing, so ask it something.
+          heartbeat = setInterval(
+            () => void client.query('select 1').catch(reopen),
+            LISTEN_HEARTBEAT_MS,
+          )
+          listening()
+        }, reopen)
+    }
+    open()
+    return async () => {
+      stopped = true
+      clearTimeout(retry)
+      await current?.end().catch(() => {})
+    }
+  }
 
 /**
  * Connect to Postgres and apply pending migrations before anything reads or writes.
@@ -337,5 +433,5 @@ export const connectStorage = async (
       close: () => client.end(),
     }
   })
-  return createStorage(db, locks, () => pool.end())
+  return createStorage(db, locks, () => pool.end(), listenOn(url))
 }

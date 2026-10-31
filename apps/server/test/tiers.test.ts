@@ -532,4 +532,32 @@ describe('workflow events across bot hosts', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('50 events were dropped'))
     server.close()
   })
+
+  it("runs a workflow route only once this host holds the bot's REST lease", async () => {
+    const url = 'http://127.0.0.1:1'
+    const botId = '345678901234567890'
+    const serve = vi.fn<ServeRoute>(async () => new Response('accepted', { status: 202 }))
+    // A host on an older list still serves the bot for the first request.
+    const own = vi.fn(async () => true).mockResolvedValueOnce(false)
+    const botHost = createBotHost({ hosts: [url], secret: SECRET, self: url }, vi.fn(), {
+      bots: { own },
+      route: serve,
+    })
+    const request = () =>
+      botHost.fetch(
+        new Request(`${url}/workflows/${botId}/deploys`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${SECRET}`, 'content-type': 'application/json' },
+          body: JSON.stringify({
+            method: 'POST',
+            url: `https://relay.test/workflows/${botId}/deploys`,
+          }),
+        }),
+      )
+
+    const refused = await request()
+    expect(refused.status).toBe(503)
+    expect(serve).not.toHaveBeenCalled()
+    expect((await request()).status).toBe(202)
+  })
 })

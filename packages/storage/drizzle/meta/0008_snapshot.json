@@ -1,6 +1,6 @@
 {
-  "id": "9e22636c-6b33-45bd-8eb3-2303c63ae995",
-  "prevId": "bc0410ae-dd2f-4f45-9cfb-29893d296b06",
+  "id": "f0f61458-88a2-4bc1-8a6c-c53bc7d3492f",
+  "prevId": "e7c8d5b2-b0dc-4bc6-90dc-c07f685df471",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -156,6 +156,65 @@
           "columns": [
             "bot_id",
             "shard_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.voice_global_opt_outs": {
+      "name": "voice_global_opt_outs",
+      "schema": "",
+      "columns": {
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.voice_opt_outs": {
+      "name": "voice_opt_outs",
+      "schema": "",
+      "columns": {
+        "bot_id": {
+          "name": "bot_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "guild_id": {
+          "name": "guild_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "voice_opt_outs_bot_id_guild_id_user_id_pk": {
+          "name": "voice_opt_outs_bot_id_guild_id_user_id_pk",
+          "columns": [
+            "bot_id",
+            "guild_id",
+            "user_id"
           ]
         }
       },

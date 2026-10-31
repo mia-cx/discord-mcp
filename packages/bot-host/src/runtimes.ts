@@ -1,6 +1,7 @@
-import type { Storage } from '@discord-mcp/storage'
+import type { Storage, VoiceOptOutChange } from '@discord-mcp/storage'
 import { shardOwner } from './assign.ts'
 import type { Clock } from './clock.ts'
+import { createConsent } from './consent.ts'
 import {
   createIdentifyGate,
   IDENTIFY_INTERVAL_MS,
@@ -75,9 +76,15 @@ export interface BotRuntimesOptions {
   readonly self: string
   /** How many bot hosts share each bot's shards, and so its daily Identify budget. */
   readonly hostCount?: number
-  /** Reaches Discord's REST API for each bot's Gateway URL, shard count, and Identify limits. */
+  /**
+   * Reaches Discord's REST API for each bot's Gateway URL, shard count, and Identify limits, its
+   * voice notices, and the answers to their buttons.
+   */
   readonly discordFetch?: typeof fetch
-  /** Hears every dispatch from every shard this host runs, replayed ones included. */
+  /**
+   * Hears every dispatch from every shard this host runs, replayed ones included, except clicks
+   * on Textile's own voice notice buttons.
+   */
   readonly onDispatch?: (botId: string, event: string, data: unknown) => void
   /**
    * How long this host's leases last without renewal, `LEASE_TTL_MS` unless a test jumping the
@@ -128,8 +135,9 @@ export interface BotRuntimes {
   readonly voice: (botId: string) => BotVoice | undefined
   /**
    * Disconnect every shard without ending its session and give up this host's leases, so other
-   * hosts, or the next process, resume them. Resolves once every session write has settled; a
-   * token or online-state write still waiting on Discord is left to the next agent call.
+   * hosts, or the next process, resume them. Resolves once every session write has settled and
+   * opt-outs are no longer followed; a token or online-state write still waiting on Discord is
+   * left to the next agent call.
    */
   readonly close: () => Promise<void>
 }
@@ -210,6 +218,48 @@ export const createBotRuntimes = ({
   /** Bots `hold` last said enabled workflows hold, as this host's workflow host keeps them. */
   const holding = new Set<string>()
   let closed = false
+
+  const optOutChanged = ({ scope, userId, optedOut }: VoiceOptOutChange) => {
+    if ('everywhere' in scope) {
+      for (const { voice } of voices.values()) voice.optOutChanged(undefined, userId, optedOut)
+    } else {
+      voices.get(scope.botId)?.voice.optOutChanged(scope.guildId, userId, optedOut)
+    }
+  }
+  // A click applies to this host's voices as soon as it is stored, whichever host's shard heard
+  // it. Every bot host, this one included, hears it again from Postgres. While that feed isn't
+  // listening, an opt-out made elsewhere would go unheard, so nobody is relayed until it is back
+  // and everyone is checked.
+  const consent = createConsent({
+    storage,
+    discordFetch,
+    apiUrl: DISCORD_API_URL,
+    log,
+    changed: optOutChanged,
+  })
+  let feedLive = false
+  const recheckAll = () => {
+    for (const { voice } of voices.values()) voice.recheck()
+  }
+  const watching = storage
+    .watchVoiceOptOuts({
+      changed: optOutChanged,
+      live: () => {
+        feedLive = true
+        recheckAll()
+      },
+      lost: (error) => {
+        log(
+          `Lost the voice opt-out feed from Postgres; relaying nobody until it is back: ${error.message}`,
+        )
+        feedLive = false
+        recheckAll()
+      },
+    })
+    .catch((cause) => {
+      log(`Could not follow voice opt-outs from other bot hosts: ${reason(cause)}`)
+      return async () => {}
+    })
 
   const leases = createLeases(
     storage,
@@ -414,6 +464,7 @@ export const createBotRuntimes = ({
       },
       onDispatch: (event, data) => {
         voices.get(botId)?.voice.dispatch(shardId, event, data)
+        if (event === 'INTERACTION_CREATE' && consent.answer(botId, data)) return
         onDispatch?.(botId, event, data)
       },
       onDrop: () => {
@@ -825,6 +876,17 @@ export const createBotRuntimes = ({
         },
         send: (shardId, payload) =>
           running.get(shardLease(botId, shardId))?.shard.send(payload) ?? false,
+        consent: {
+          notice: (channelId) => {
+            const token = known.get(botId)?.token
+            return token === undefined
+              ? Promise.resolve('The bot is offline.')
+              : consent.notice(token, channelId)
+          },
+          // Without the feed, everyone counts as opted out.
+          optedOut: async (guildId, userId) =>
+            !feedLive || (await consent.optedOut(botId, guildId, userId)),
+        },
         clock,
         log,
       })
@@ -868,6 +930,7 @@ export const createBotRuntimes = ({
       await leases
         .close()
         .catch((cause) => log(`Releasing this host's leases failed: ${reason(cause)}`))
+      await (await watching)()
     },
   }
 }

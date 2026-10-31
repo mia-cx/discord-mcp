@@ -51,13 +51,27 @@ export const fakeGateway = async (
   const { port } = server.address() as AddressInfo
   const url = `ws://127.0.0.1:${port}`
   const connections: FakeConnection[] = []
+  /** The bot's voice channel in each server, so only a move sends a new voice server. */
+  const voiceChannels = new Map<string, string | null>()
+  const rest: Array<{ readonly method: string; readonly path: string; readonly body: unknown }> = []
   server.on('connection', (socket, request) => {
     const connection: FakeConnection = {
       path: request.url ?? '/',
       received: [],
       closeCode: undefined,
       acknowledge: true,
-      send: (payload) => socket.send(JSON.stringify(payload)),
+      send: (payload) => {
+        // A voice state the test sends, such as the bot being moved, is where Discord has it.
+        if (payload.t === 'VOICE_STATE_UPDATE') {
+          const { guild_id, channel_id, user_id } = payload.d as {
+            guild_id: string
+            channel_id: string | null
+            user_id: string
+          }
+          if (user_id === voice?.botId) voiceChannels.set(guild_id, channel_id)
+        }
+        socket.send(JSON.stringify(payload))
+      },
       close: (code) => socket.close(code),
     }
     connections.push(connection)
@@ -79,13 +93,14 @@ export const fakeGateway = async (
           guild_id: string
           channel_id: string | null
         }
+        const moved = voiceChannels.get(guild_id) !== channel_id
         connection.send({
           op: 0,
           t: 'VOICE_STATE_UPDATE',
           s: ++sequence,
           d: { guild_id, channel_id, user_id: voice.botId, session_id: 'fake-voice-session' },
         })
-        if (channel_id !== null) {
+        if (channel_id !== null && moved) {
           connection.send({
             op: 0,
             t: 'VOICE_SERVER_UPDATE',
@@ -104,32 +119,66 @@ export const fakeGateway = async (
     url,
     connections,
     /**
+     * REST calls other than `GET /gateway/bot` and `GET /applications/@me`, oldest first, with
+     * their parsed JSON bodies.
+     */
+    rest,
+    /**
      * A `fetch` that answers `GET /gateway/bot` with this fake's URL, `shards` recommended
-     * shards, and a fresh daily Identify budget, unless overridden.
+     * shards, and a fresh daily Identify budget, unless overridden. It posts channel messages,
+     * unless `sendMessages` is false, when Discord refuses them as it does without Send Messages,
+     * and accepts interaction responses and edits to them. `GET /applications/@me` names
+     * `interactionsEndpoint` as the application's Interactions Endpoint URL, unset by default.
      */
     discordFetch:
       ({
         shards = 1,
         maxConcurrency = 1,
         remaining = 1000,
+        sendMessages = true,
+        interactionsEndpoint = null,
       }: {
         shards?: number
         maxConcurrency?: number
         remaining?: number
+        sendMessages?: boolean
+        interactionsEndpoint?: string | null
       } = {}): typeof fetch =>
-      async (input) =>
-        new URL(String(input)).pathname.endsWith('/gateway/bot')
-          ? Response.json({
-              url,
-              shards,
-              session_start_limit: {
-                total: 1000,
-                remaining,
-                reset_after: 24 * 60 * 60 * 1000,
-                max_concurrency: maxConcurrency,
-              },
-            })
-          : new Response(null, { status: 404 }),
+      async (input, init) => {
+        const path = new URL(String(input)).pathname.replace(/^\/api\/v10/, '')
+        if (path === '/applications/@me') {
+          return Response.json({
+            id: voice?.botId,
+            interactions_endpoint_url: interactionsEndpoint,
+          })
+        }
+        if (path === '/gateway/bot') {
+          return Response.json({
+            url,
+            shards,
+            session_start_limit: {
+              total: 1000,
+              remaining,
+              reset_after: 24 * 60 * 60 * 1000,
+              max_concurrency: maxConcurrency,
+            },
+          })
+        }
+        const method = init?.method ?? 'GET'
+        rest.push({ method, path, body: init?.body ? JSON.parse(String(init.body)) : undefined })
+        if (method === 'POST' && /^\/channels\/\d+\/messages$/.test(path)) {
+          return sendMessages
+            ? Response.json({ id: '111111111111111111' })
+            : Response.json({ message: 'Missing Permissions', code: 50013 }, { status: 403 })
+        }
+        if (method === 'POST' && /^\/interactions\/\d+\/[^/]+\/callback$/.test(path)) {
+          return new Response(null, { status: 204 })
+        }
+        if (method === 'PATCH' && /^\/webhooks\/\d+\/[^/]+\/messages\/@original$/.test(path)) {
+          return Response.json({ id: '111111111111111112' })
+        }
+        return new Response(null, { status: 404 })
+      },
     close: () =>
       new Promise<void>((resolve) => {
         for (const client of server.clients) client.terminate()

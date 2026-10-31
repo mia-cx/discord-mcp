@@ -2,6 +2,7 @@ import { Readable } from 'node:stream'
 import opus from '@discordjs/opus'
 import {
   type AudioPlayer,
+  type AudioReceiveStream,
   type AudioResource,
   createAudioPlayer,
   createAudioResource,
@@ -10,6 +11,7 @@ import {
   StreamType,
   type VoiceConnection,
   VoiceConnectionStatus,
+  type VoiceReceiver,
 } from '@discordjs/voice'
 import type { RawData, WebSocket } from 'ws'
 import type { Clock } from './clock.ts'
@@ -33,6 +35,13 @@ const QUEUE_PACKETS = 50
 export const JOIN_TIMEOUT_MS = 15_000
 /** How long a dropped voice connection may take to come back, as when the bot is moved. */
 const RECONNECT_GRACE_MS = 5_000
+/** Audio waiting to reach a slow agent before newer audio is dropped: a few seconds' worth. */
+const MAX_BUFFERED_BYTES = 1024 * 1024
+/** The trailer of a DAVE end-to-end encrypted frame. */
+const DAVE_MAGIC_MARKER = Buffer.from([0xfa, 0xfa])
+/** Voice gateway opcodes for people connecting to and leaving the channel. */
+const CLIENTS_CONNECT = 11
+const CLIENT_DISCONNECT = 13
 
 /** Voice socket close codes beyond RFC 6455's. */
 export const VoiceClose = {
@@ -110,6 +119,41 @@ const stereo = (mono: Buffer) => {
   return out
 }
 
+/**
+ * What the bot hears, sent to the agent's socket: each person's audio as a binary message of their
+ * user ID (8 bytes, big-endian) then one packet in the socket's codec, and events as JSON text.
+ * `pcm16` decodes each person separately, at the socket's rate and channels. Audio a slow agent
+ * hasn't read past `MAX_BUFFERED_BYTES` is dropped rather than queued.
+ */
+const createRelay = (socket: WebSocket, format: AudioFormat, log: (message: string) => void) => {
+  const decoders = new Map<string, opus.OpusEncoder>()
+  const decode = (userId: string, packet: Buffer) => {
+    if (format.codec === 'opus') return packet
+    let decoder = decoders.get(userId)
+    if (decoder === undefined) {
+      decoder = new opus.OpusEncoder(format.sampleRate, format.channels)
+      decoders.set(userId, decoder)
+    }
+    return decoder.decode(packet)
+  }
+  return {
+    audio: (userId, packet) => {
+      if (socket.bufferedAmount > MAX_BUFFERED_BYTES) return
+      let payload: Buffer
+      try {
+        payload = decode(userId, packet)
+      } catch (error) {
+        return log(`Dropped a corrupt Opus packet: ${(error as Error).message}`)
+      }
+      const speaker = Buffer.alloc(8)
+      speaker.writeBigUInt64BE(BigInt(userId))
+      socket.send(Buffer.concat([speaker, payload]))
+    },
+    event: (event) => socket.send(JSON.stringify(event)),
+    forget: (userId) => decoders.delete(userId),
+  } satisfies Relay
+}
+
 /** A paused socket cannot read the peer's close reply, so resume it to finish the handshake. */
 const closeSocket = (socket: WebSocket, code: number, reason: string) => {
   socket.resume()
@@ -128,9 +172,31 @@ export interface VoiceOptions {
   readonly shardOf: (guildId: string) => number | undefined
   /** Send a payload on one of the bot's shards. False until that shard's session has started. */
   readonly send: (shardId: number, payload: VoicePayload) => boolean
+  readonly consent: VoiceConsent
   readonly clock: Clock
   readonly log: (message: string) => void
 }
+
+/** What receiving voice needs from the people it relays, for this bot. */
+export interface VoiceConsent {
+  /**
+   * Post the notice in a voice channel's chat. Resolves to why it could not be posted, or
+   * `undefined` once it is up.
+   */
+  readonly notice: (channelId: string) => Promise<string | undefined>
+  /** Whether a person opted out of this bot in this server, or of every bot. */
+  readonly optedOut: (guildId: string, userId: string) => Promise<boolean>
+}
+
+/** Whether a joined session relays the channel's voice, and if it can't, why not. */
+export type Joined =
+  | { readonly receiving: true }
+  | { readonly receiving: false; readonly reason?: string }
+
+/** What the agent hears about people in the channel, as text messages on its voice socket. */
+export type VoiceEvent =
+  | { readonly type: 'join' | 'leave'; readonly user_id: string }
+  | { readonly type: 'speaking'; readonly user_id: string; readonly speaking: boolean }
 
 /** What an agent's calls can do with a bot's voice. */
 export interface BotVoice {
@@ -138,8 +204,12 @@ export interface BotVoice {
    * Join a voice channel, resolving once audio can flow. Joining the channel the bot is in does
    * nothing; joining another channel in that server leaves the current one first. Rejects with a
    * message for the agent when Discord does not connect the bot in time.
+   *
+   * With `receive`, the bot posts its notice in the channel's chat, then relays everyone who hasn't
+   * opted out to the voice socket. When the notice can't be posted, the session only sends audio.
+   * Without it, a session that was receiving stops.
    */
-  readonly join: (guildId: string, channelId: string) => Promise<void>
+  readonly join: (guildId: string, channelId: string, receive?: boolean) => Promise<Joined>
   /** Leave the server's voice channel. False when the bot was not in one. */
   readonly leave: (guildId: string) => boolean
   readonly joined: (guildId: string) => boolean
@@ -158,17 +228,55 @@ export interface Voice extends BotVoice {
   /** Whether an agent's voice socket is open, which keeps the bot online. */
   readonly streaming: () => boolean
   /**
+   * A person opted out in one server, or in every one when `guildId` is undefined, or undid it.
+   * An opt-out drops them at once; an undo checks storage again, since another opt-out may hold.
+   */
+  readonly optOutChanged: (guildId: string | undefined, userId: string, optedOut: boolean) => void
+  /** Ask about everyone's opt-out again, in every channel, as when the answers may have changed. */
+  readonly recheck: () => void
+  /**
    * Leave every voice channel and close every socket, as the bot goes offline. Returns the shards
    * whose leaves could not reach Discord, whose sessions would keep the bot in those channels.
    */
   readonly close: () => ReadonlySet<number>
 }
 
+/** Sends what the agent hears to its socket, in the codec it chose. */
+interface Relay {
+  readonly audio: (userId: string, packet: Buffer) => void
+  readonly event: (event: VoiceEvent) => void
+  /** The person left the agent's hearing; drop their decoder. */
+  readonly forget: (userId: string) => void
+}
+
+/** Someone in the bot's voice channel. */
+interface Person {
+  /** Whether they may be relayed: undefined until their opt-out is checked. */
+  allowed: boolean | undefined
+  /** Bumped by each opt-out check, so only the newest answer counts. */
+  checks: number
+  /** Their audio, while it may reach the agent. Unsubscribed audio is dropped undecrypted. */
+  stream: AudioReceiveStream | undefined
+  /** Whether the agent was told they joined. */
+  shown: boolean
+}
+
 interface Session {
+  readonly guildId: string
   readonly connection: VoiceConnection
   readonly player: AudioPlayer
   ready: Promise<void>
   socket: WebSocket | undefined
+  /** The socket's side of what the bot hears, while one is attached. */
+  relay: Relay | undefined
+  /** The channel whose chat shows the notice, while the bot relays it. */
+  receiving: string | undefined
+  /** The channel the latest join asked to relay, if any. A stale notice never starts relaying. */
+  wanted: string | undefined
+  /** The notice being posted, so concurrent joins in its channel post it once. */
+  noticing: { readonly channelId: string; readonly posted: Promise<string | undefined> } | undefined
+  /** People in the channel besides the bot, by user ID. */
+  readonly people: Map<string, Person>
   /** How to close the socket once the connection is destroyed. */
   ending: { readonly code: number; readonly reason: string }
   cancelGrace: () => void
@@ -182,8 +290,13 @@ const OFFLINE = { code: VoiceClose.Offline, reason: 'The bot went offline.' }
 /**
  * One bot's voice connections, one per server, each over the bot's Gateway shard for that server:
  * `@discordjs/voice` carries the audio and `@snazzah/davey` its DAVE end-to-end encryption.
+ *
+ * Receiving is best-effort: Discord neither documents nor supports it. Opcode 5 names the user
+ * behind each SSRC, and DAVE keys each sender's audio to their user ID, so audio from an SSRC not
+ * yet named is dropped. People reach the agent only while the notice is up and they haven't opted
+ * out; anyone else's audio is never decrypted.
  */
-export const createVoice = ({ botId, shardOf, send, clock, log }: VoiceOptions): Voice => {
+export const createVoice = ({ botId, shardOf, send, consent, clock, log }: VoiceOptions): Voice => {
   const sessions = new Map<string, Session>()
   const adapters = new Map<string, DiscordGatewayAdapterLibraryMethods>()
   /**
@@ -252,12 +365,168 @@ export const createVoice = ({ botId, shardOf, send, clock, log }: VoiceOptions):
       onChange(undefined, connection.state)
     })
 
+  /** Listen to a person, so their audio is decrypted and reaches the agent. */
+  const subscribe = (session: Session, userId: string, person: Person) => {
+    const stream = session.connection.receiver.subscribe(userId)
+    stream.on('data', (packet: Buffer) => {
+      // The receiver hands on DAVE frames it couldn't decrypt: while the connection resumes, and
+      // while its MLS session isn't ready. A plain Opus packet ending in the marker is rare enough
+      // to lose.
+      if (packet.subarray(-DAVE_MAGIC_MARKER.length).equals(DAVE_MAGIC_MARKER)) return
+      session.relay?.audio(userId, packet)
+    })
+    stream.on('error', (error) => log(`Bot ${botId} lost a speaker's audio: ${error.message}`))
+    // Ended by us, or by a packet that failed transport decryption: listen again if still wanted.
+    stream.once('close', () => {
+      if (person.stream === stream) person.stream = undefined
+      if (session.people.get(userId) === person) sync(session, userId)
+    })
+    return stream
+  }
+
+  /** Bring what the agent hears of a person in line with whether they may reach it. */
+  const sync = (session: Session, userId: string) => {
+    const person = session.people.get(userId)
+    const { relay, connection } = session
+    if (person === undefined) return
+    if (person.allowed !== true || session.receiving === undefined || relay === undefined) {
+      const { stream } = person
+      person.stream = undefined
+      stream?.destroy()
+      if (!person.shown) return
+      person.shown = false
+      relay?.event({ type: 'leave', user_id: userId })
+      relay?.forget(userId)
+      return
+    }
+    if (!person.shown) {
+      person.shown = true
+      relay.event({ type: 'join', user_id: userId })
+      if (connection.receiver.speaking.users.has(userId)) {
+        relay.event({ type: 'speaking', user_id: userId, speaking: true })
+      }
+    }
+    // A stream still closing can't be replaced yet; its close syncs again.
+    if (person.stream === undefined && !connection.receiver.subscriptions.has(userId)) {
+      person.stream = subscribe(session, userId, person)
+    }
+  }
+
+  /**
+   * Look up a person's opt-out; until it answers, they keep their last answer. A session that
+   * only sends forgets the answer instead, so receiving again always asks afresh.
+   */
+  const check = (session: Session, userId: string) => {
+    const person = session.people.get(userId)
+    if (person === undefined) return
+    const asked = ++person.checks
+    if (session.receiving === undefined) {
+      person.allowed = undefined
+      return
+    }
+    consent
+      .optedOut(session.guildId, userId)
+      .then(
+        (optedOut) => !optedOut,
+        (cause) => {
+          // Without an answer, nobody is relayed.
+          log(`Bot ${botId} could not check a speaker's voice opt-out: ${String(cause)}`)
+          return false
+        },
+      )
+      .then((allowed) => {
+        if (session.people.get(userId) !== person || person.checks !== asked) return
+        person.allowed = allowed
+        sync(session, userId)
+      })
+  }
+
+  const arrive = (session: Session, userId: string) => {
+    if (userId === botId || session.people.has(userId)) return
+    session.people.set(userId, { allowed: undefined, checks: 0, stream: undefined, shown: false })
+    check(session, userId)
+  }
+
+  const depart = (session: Session, userId: string) => {
+    const person = session.people.get(userId)
+    if (person === undefined) return
+    person.allowed = false
+    sync(session, userId)
+    session.people.delete(userId)
+  }
+
+  /** Hand what the bot hears to another socket, or to none. */
+  const switchRelay = (session: Session, relay: Relay | undefined) => {
+    session.relay = relay
+    for (const person of session.people.values()) person.shown = false
+    for (const userId of session.people.keys()) sync(session, userId)
+  }
+
+  /** Drop a person who just opted out, before storage could be asked again. */
+  const revoke = (session: Session, userId: string) => {
+    const person = session.people.get(userId)
+    if (person === undefined) return
+    // An answer still on its way predates the opt-out.
+    person.checks += 1
+    person.allowed = false
+    sync(session, userId)
+  }
+
+  /** Post the notice, then relay everyone who hasn't opted out. */
+  const listen = async (session: Session): Promise<Joined> => {
+    const channelId = session.connection.joinConfig.channelId
+    session.wanted = channelId ?? undefined
+    if (channelId === null) return { receiving: false }
+    if (session.receiving === channelId) return { receiving: true }
+    if (session.noticing?.channelId !== channelId) {
+      session.noticing = { channelId, posted: consent.notice(channelId) }
+    }
+    const noticing = session.noticing
+    // Settled either way, so a later join posts anew rather than reusing a failure.
+    const refused = await noticing.posted.finally(() => {
+      if (session.noticing === noticing) session.noticing = undefined
+    })
+    if (refused !== undefined) return { receiving: false, reason: refused }
+    if (sessions.get(session.guildId) !== session) throw new Error(LEFT.reason)
+    // Moved, or a later join asked to only send, while the notice was posted.
+    if (session.wanted !== channelId || session.connection.joinConfig.channelId !== channelId) {
+      return { receiving: session.receiving !== undefined }
+    }
+    if (session.receiving !== channelId) {
+      session.receiving = channelId
+      // Joined deafened, so the bot is seen to listen only once the notice is up.
+      session.connection.rejoin({ channelId, selfDeaf: false, selfMute: false })
+      for (const userId of session.people.keys()) check(session, userId)
+    }
+    return { receiving: true }
+  }
+
+  /** Stop relaying anyone, deafened in `channelId`; the session only sends audio. */
+  const deafen = (
+    session: Session,
+    channelId = session.connection.joinConfig.channelId,
+  ): Joined => {
+    session.wanted = undefined
+    if (session.receiving === undefined) return { receiving: false }
+    session.receiving = undefined
+    if (channelId !== null) {
+      session.connection.rejoin({ channelId, selfDeaf: true, selfMute: false })
+    }
+    for (const userId of session.people.keys()) {
+      // Forgets their answers, which no one keeps current while the bot only sends.
+      check(session, userId)
+      sync(session, userId)
+    }
+    return { receiving: false }
+  }
+
   const open = (guildId: string, channelId: string): Session => {
     const connection = joinVoiceChannel({
       guildId,
       channelId,
       // `@discordjs/voice` keeps one connection per group and server, process-wide.
       group: botId,
+      // Deafened until the bot relays the channel, which `listen` changes.
       selfDeaf: true,
       selfMute: false,
       adapterCreator: (methods) => {
@@ -280,17 +549,53 @@ export const createVoice = ({ botId, shardOf, send, clock, log }: VoiceOptions):
     const player = createAudioPlayer()
     connection.subscribe(player)
     const session: Session = {
+      guildId,
       connection,
       player,
       ready: Promise.resolve(),
       socket: undefined,
+      relay: undefined,
+      receiving: undefined,
+      wanted: undefined,
+      noticing: undefined,
+      people: new Map(),
       ending: LEFT,
       cancelGrace: () => {},
     }
     sessions.set(guildId, session)
     connection.on('error', (error) => log(`Bot ${botId} voice error: ${error.message}`))
     player.on('error', (error) => log(`Bot ${botId} audio error: ${error.message}`))
-    connection.on('stateChange', (_, state) => {
+
+    // The voice gateway names who connects and leaves; the receiver tracks only who speaks.
+    const { receiver } = connection
+    const onWsPacket = receiver.onWsPacket
+    receiver.onWsPacket = (packet: Parameters<VoiceReceiver['onWsPacket']>[0]) => {
+      onWsPacket(packet)
+      if (packet.op === CLIENTS_CONNECT) {
+        for (const userId of (packet.d as { user_ids: string[] }).user_ids) arrive(session, userId)
+      }
+      if (packet.op === CLIENT_DISCONNECT) {
+        depart(session, (packet.d as { user_id: string }).user_id)
+      }
+    }
+    receiver.speaking.on('start', (userId: string) => {
+      arrive(session, userId)
+      const person = session.people.get(userId)
+      if (person?.shown) session.relay?.event({ type: 'speaking', user_id: userId, speaking: true })
+    })
+    receiver.speaking.on('end', (userId: string) => {
+      if (session.people.get(userId)?.shown) {
+        session.relay?.event({ type: 'speaking', user_id: userId, speaking: false })
+      }
+    })
+
+    connection.on('stateChange', (previous, state) => {
+      // A new voice server session, not a resumed one, names its people afresh with opcode 11.
+      const networking = Reflect.get(state, 'networking')
+      const before = Reflect.get(previous, 'networking')
+      if (before !== undefined && networking !== undefined && networking !== before) {
+        for (const userId of [...session.people.keys()]) depart(session, userId)
+      }
       session.cancelGrace()
       if (state.status === VoiceConnectionStatus.Disconnected) {
         session.cancelGrace = clock.schedule(() => destroy(session, LEFT), RECONNECT_GRACE_MS)
@@ -298,6 +603,8 @@ export const createVoice = ({ botId, shardOf, send, clock, log }: VoiceOptions):
       if (state.status !== VoiceConnectionStatus.Destroyed) return
       if (sessions.get(guildId) === session) sessions.delete(guildId)
       player.stop(true)
+      session.receiving = undefined
+      switchRelay(session, undefined)
       const { socket } = session
       // Detached first, so messages still buffered on it never restart the stopped player.
       session.socket = undefined
@@ -332,6 +639,11 @@ export const createVoice = ({ botId, shardOf, send, clock, log }: VoiceOptions):
     if (replaced !== undefined) {
       closeSocket(replaced, VoiceClose.Replaced, 'Another voice socket replaced this one.')
     }
+    switchRelay(session, createRelay(socket, format, log))
+    const detach = () => {
+      session.socket = undefined
+      switchRelay(session, undefined)
+    }
     const packetize = packetizer(format)
     let spurt: { readonly stream: Readable; readonly resource: AudioResource } | undefined
 
@@ -351,7 +663,7 @@ export const createVoice = ({ botId, shardOf, send, clock, log }: VoiceOptions):
     }
 
     const reject = (code: number, reason: string) => {
-      session.socket = undefined
+      detach()
       closeSocket(socket, code, reason)
     }
     socket.on('message', (data: RawData, isBinary) => {
@@ -363,7 +675,7 @@ export const createVoice = ({ botId, shardOf, send, clock, log }: VoiceOptions):
     })
     socket.on('error', (error) => log(`Bot ${botId} voice socket error: ${error.message}`))
     socket.on('close', () => {
-      if (session.socket === socket) session.socket = undefined
+      if (session.socket === socket) detach()
       // Queued audio plays out.
       spurt?.stream.push(null)
     })
@@ -372,10 +684,17 @@ export const createVoice = ({ botId, shardOf, send, clock, log }: VoiceOptions):
   return {
     dispatch: (shardId, event, data) => {
       if (event === 'READY' || event === 'RESUMED') return started(shardId, event === 'RESUMED')
-      const voice = data as { guild_id?: string; user_id?: string }
+      const voice = data as { guild_id?: string; user_id?: string; channel_id?: string | null }
       if (voice.guild_id === undefined) return
       const adapter = adapters.get(voice.guild_id)
       if (event === 'VOICE_STATE_UPDATE' && voice.user_id === botId) {
+        const session = sessions.get(voice.guild_id)
+        // Moved, or disconnected, by someone else. The new channel's chat has no notice, so the
+        // agent must join it to receive again, and its people are yet to be named.
+        if (session !== undefined && voice.channel_id !== session.connection.joinConfig.channelId) {
+          deafen(session, voice.channel_id ?? null)
+          for (const userId of [...session.people.keys()]) depart(session, userId)
+        }
         adapter?.onVoiceStateUpdate(data as Parameters<typeof adapter.onVoiceStateUpdate>[0])
       }
       if (event === 'VOICE_SERVER_UPDATE') {
@@ -385,12 +704,15 @@ export const createVoice = ({ botId, shardOf, send, clock, log }: VoiceOptions):
     dropped: (shardId) => {
       online.delete(shardId)
     },
-    join: async (guildId, channelId) => {
+    join: async (guildId, channelId, receive = false) => {
       await untilOnline(guildId)
-      const current = sessions.get(guildId)
-      if (current?.connection.joinConfig.channelId === channelId) return current.ready
-      if (current !== undefined) destroy(current, LEFT)
-      return open(guildId, channelId).ready
+      let session = sessions.get(guildId)
+      if (session?.connection.joinConfig.channelId !== channelId) {
+        if (session !== undefined) destroy(session, LEFT)
+        session = open(guildId, channelId)
+      }
+      await session.ready
+      return receive ? listen(session) : deafen(session)
     },
     leave: (guildId) => {
       const session = sessions.get(guildId)
@@ -406,6 +728,18 @@ export const createVoice = ({ botId, shardOf, send, clock, log }: VoiceOptions):
       return true
     },
     streaming: () => [...sessions.values()].some((session) => session.socket !== undefined),
+    optOutChanged: (guildId, userId, optedOut) => {
+      for (const session of sessions.values()) {
+        if (guildId !== undefined && session.guildId !== guildId) continue
+        if (optedOut) revoke(session, userId)
+        else check(session, userId)
+      }
+    },
+    recheck: () => {
+      for (const session of sessions.values()) {
+        for (const userId of session.people.keys()) check(session, userId)
+      }
+    },
     close: () => {
       for (const session of sessions.values()) destroy(session, OFFLINE)
       return new Set([...unsentLeaves.keys()].flatMap((guildId) => shardOf(guildId) ?? []))
