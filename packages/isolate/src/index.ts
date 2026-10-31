@@ -1,6 +1,6 @@
 /** One-off discord.js scripts in workerd isolates, brokered through the relay's own client. */
 export { type Broker, type Denial, makeBroker } from './broker.ts'
-export { bundleScript, ScriptBuildError } from './bundle.ts'
+export { prepareScript, ScriptBuildError, type ScriptModule } from './bundle.ts'
 export { EgressBlockedError, fetchPublic, isPublicAddress } from './egress.ts'
 export { checkHost, checkOperation, matchOperation, type ScriptGrants } from './grants.ts'
 export {

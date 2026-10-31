@@ -1,5 +1,5 @@
 // "discord.js" as a script sees it: the real package, with a Client that never connects.
-// The bundler aliases `discord.js` here and `discord.js-real` to the installed package.
+// The bundler aliases `discord.js-real` to the installed package.
 import * as real from 'discord.js-real'
 
 export * from 'discord.js-real'

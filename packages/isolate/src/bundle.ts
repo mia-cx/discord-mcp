@@ -1,27 +1,20 @@
+import { readFile } from 'node:fs/promises'
 import { builtinModules, createRequire } from 'node:module'
-import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { build, type Message, type Plugin } from 'esbuild'
+import { build, type Message, transform } from 'esbuild'
 
 const runtimeFile = (name: string) => fileURLToPath(new URL(`../runtime/${name}`, import.meta.url))
 
-const DISCORD_JS = createRequire(import.meta.url).resolve('discord.js')
-const NODE_MODULES = '/node_modules/'
+const NODE_BUILTINS = [...builtinModules, ...builtinModules.map((m) => `node:${m}`)]
 
-/**
- * The only files a bundle may contain: the runtime shims and installed packages. esbuild expands a
- * glob import such as `import(\`./${name}.json\`)` without asking any plugin, so this is checked
- * on the result rather than at resolution.
- */
-const ALLOWED_ROOTS = [
-  runtimeFile(''),
-  DISCORD_JS.slice(0, DISCORD_JS.indexOf(NODE_MODULES) + NODE_MODULES.length),
-]
+/** One module in an isolate's workerd config. */
+export interface ScriptModule {
+  readonly name: string
+  readonly type: 'esModule' | 'commonJsModule'
+  readonly source: string
+}
 
-const SCRIPT_MODULE = 'textile:script'
-const NODE_BUILTINS = new Set([...builtinModules, ...builtinModules.map((m) => `node:${m}`)])
-
-/** A script that did not bundle, with esbuild's messages as `file:line: text` lines. */
+/** A script that did not compile, with esbuild's messages as `file:line: text` lines. */
 export class ScriptBuildError extends Error {
   constructor(readonly issues: ReadonlyArray<string>) {
     super('The script did not build.')
@@ -33,76 +26,58 @@ const describeMessage = ({ text, location }: Message) =>
   location === null ? text : `script.ts:${location.line}:${location.column + 1}: ${text}`
 
 /**
- * Serves the agent's source as `textile:script` and keeps its imports to `discord.js` and Node
- * built-ins, so a script cannot reach into whatever else is installed next to the relay.
+ * discord.js with the shim's Client, bundled once per process as a CommonJS module. CommonJS, so a
+ * script's named imports become property reads and need no static export list.
  */
-const scriptSource = (source: string): Plugin => ({
-  name: 'textile-script',
-  setup(build) {
-    build.onResolve({ filter: /^textile:script$/ }, () => ({
-      path: SCRIPT_MODULE,
-      namespace: 'textile-script',
-    }))
-    build.onLoad({ filter: /.*/, namespace: 'textile-script' }, () => ({
-      contents: source,
-      loader: 'ts',
-      // Without one, esbuild expands the script's glob imports against the relay's cwd.
-      resolveDir: runtimeFile(''),
-    }))
-    build.onResolve({ filter: /.*/, namespace: 'textile-script' }, ({ path }) => {
-      if (path === 'discord.js') return { path: runtimeFile('shim.js') }
-      if (NODE_BUILTINS.has(path)) return { path, external: true }
-      return {
-        errors: [{ text: `Cannot import "${path}". Scripts can import discord.js and node:*.` }],
-      }
-    })
-  },
-})
+let runtime: Promise<ReadonlyArray<ScriptModule>> | undefined
+const loadRuntime = () => {
+  runtime ??= Promise.all([
+    readFile(runtimeFile('entry.js'), 'utf8'),
+    build({
+      entryPoints: [runtimeFile('shim.js')],
+      bundle: true,
+      write: false,
+      format: 'cjs',
+      platform: 'neutral',
+      target: 'es2023',
+      conditions: ['workerd', 'worker', 'browser', 'require'],
+      mainFields: ['browser', 'module', 'main'],
+      external: NODE_BUILTINS,
+      alias: {
+        'discord.js-real': createRequire(import.meta.url).resolve('discord.js'),
+        undici: runtimeFile('undici.js'),
+      },
+      logLevel: 'silent',
+    }),
+  ]).then(([entry, shim]): ReadonlyArray<ScriptModule> => {
+    const [output] = shim.outputFiles
+    if (output === undefined) throw new Error('esbuild produced no output.')
+    return [
+      { name: 'entry.js', type: 'esModule', source: entry },
+      { name: 'discord.js', type: 'commonJsModule', source: output.text },
+    ]
+  })
+  return runtime
+}
 
 /**
- * Bundle agent source with discord.js and the shim into one ES module for workerd.
+ * Compile agent source into the modules an isolate runs: the entry, discord.js, and the script.
  *
- * Plain esbuild, no wrangler: Node built-ins stay external and resolve to workerd's own
- * `nodejs_compat` modules; the banner gives discord.js's CommonJS `require` calls something to call.
+ * The script is only transformed, never bundled, so its imports never reach a filesystem: inside
+ * workerd, `require` and `import()` resolve only these modules and Node built-ins.
  */
-export const bundleScript = async (source: string): Promise<string> => {
-  const result = await build({
-    entryPoints: [runtimeFile('entry.js')],
-    bundle: true,
-    write: false,
-    format: 'esm',
-    platform: 'neutral',
+export const prepareScript = async (source: string): Promise<ReadonlyArray<ScriptModule>> => {
+  const script = await transform(source, {
+    loader: 'ts',
+    format: 'cjs',
     target: 'es2023',
-    conditions: ['workerd', 'worker', 'browser', 'import'],
-    mainFields: ['browser', 'module', 'main'],
-    external: [...NODE_BUILTINS],
-    alias: {
-      'discord.js': runtimeFile('shim.js'),
-      'discord.js-real': DISCORD_JS,
-      undici: runtimeFile('undici.js'),
-    },
-    banner: {
-      js: "import { createRequire } from 'node:module'; const require = createRequire('/');",
-    },
-    plugins: [scriptSource(source)],
-    absWorkingDir: runtimeFile(''),
-    metafile: true,
     logLevel: 'silent',
   }).catch((error: { errors?: ReadonlyArray<Message> }) => {
     if (error.errors === undefined) throw error
     throw new ScriptBuildError(error.errors.map(describeMessage))
   })
-  const outside = Object.keys(result.metafile.inputs).filter((input) => {
-    if (input.startsWith('textile-script:')) return false
-    const file = resolve(runtimeFile(''), input)
-    return !ALLOWED_ROOTS.some((root) => file.startsWith(root))
-  })
-  if (outside.length > 0) {
-    throw new ScriptBuildError(
-      outside.map((input) => `Cannot import "${input}". Scripts can import discord.js and node:*.`),
-    )
-  }
-  const [output] = result.outputFiles
-  if (output === undefined) throw new Error('esbuild produced no output.')
-  return output.text
+  return [
+    ...(await loadRuntime()),
+    { name: 'script.js', type: 'commonJsModule', source: script.code },
+  ]
 }

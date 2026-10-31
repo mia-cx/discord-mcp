@@ -3,7 +3,7 @@ import { DiscordRest } from '@discord-mcp/discord-api/relay'
 import { OperationCatalog } from '@mia-cx/discord-catalog'
 import { Context, Effect, Schema } from 'effect'
 import { type Denial, makeBroker } from './broker.ts'
-import { bundleScript, ScriptBuildError } from './bundle.ts'
+import { prepareScript, ScriptBuildError } from './bundle.ts'
 import type { ScriptGrants } from './grants.ts'
 import type { IsolateHost } from './isolate-host.ts'
 
@@ -54,7 +54,7 @@ const resolveGrants = (input: typeof Input.Type.grants) =>
     )
   })
 
-const bundle = (source: string) =>
+const prepare = (source: string) =>
   Buffer.byteLength(source) > SOURCE_LIMIT_BYTES
     ? Effect.fail(
         new ValidationError({
@@ -62,7 +62,7 @@ const bundle = (source: string) =>
           issues: ['source: split the work across several scripts.'],
         }),
       )
-    : Effect.promise(() => bundleScript(source)).pipe(
+    : Effect.promise(() => prepareScript(source)).pipe(
         Effect.catchDefect((error) =>
           error instanceof ScriptBuildError
             ? Effect.fail(new ValidationError({ message: error.message, issues: error.issues }))
@@ -87,7 +87,7 @@ export const scriptRun = defineTool({
   handler: (args: typeof Input.Type) =>
     Effect.gen(function* () {
       const grants = yield* resolveGrants(args.grants)
-      const source = yield* bundle(args.source)
+      const modules = yield* prepare(args.source)
       const catalog = yield* OperationCatalog
       const rest = yield* DiscordRest
       const runner = yield* ScriptRunner
@@ -114,7 +114,7 @@ export const scriptRun = defineTool({
         runner.run({
           botId: bot.id,
           botUser: bot,
-          bundle: source,
+          modules,
           timeoutMs: (args.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS) * 1000,
           broker,
           signal,

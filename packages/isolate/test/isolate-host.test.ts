@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bundleScript } from '../src/bundle.ts'
+import { prepareScript } from '../src/bundle.ts'
 import { makeIsolateHost, type ScriptExecution } from '../src/isolate-host.ts'
 
 const execution = async (
@@ -9,7 +9,7 @@ const execution = async (
 ): Promise<ScriptExecution> => ({
   botId,
   botUser: { id: botId, username: `bot-${botId}`, discriminator: '0', bot: true },
-  bundle: await bundleScript(source),
+  modules: await prepareScript(source),
   timeoutMs,
   broker: async () => new Response(null, { status: 404 }),
 })
@@ -48,6 +48,28 @@ describe('the isolate host', () => {
 
     expect(never.outcome).toBe('crashed')
     expect(oom.outcome).toBe('crashed')
+  })
+
+  it('gives a script no way to read host files', async () => {
+    const run = await makeIsolateHost().run(
+      await execution(
+        '1',
+        `import { readFileSync } from 'node:fs'
+        const attempt = async (read) => { try { return JSON.stringify(await read()) } catch (error) { return 'refused' } }
+        export default async () => [
+          await attempt(() => import('../../' + String() + 'package.json', { with: { type: 'json' } })),
+          await attempt(() => require('../../../package.json')),
+          await attempt(() => readFileSync('${process.cwd()}/package.json', 'utf8')),
+        ]`,
+        5000,
+      ),
+    )
+
+    expect(run).toEqual({
+      outcome: 'completed',
+      result: ['refused', 'refused', 'refused'],
+      logs: [],
+    })
   })
 
   it('returns a large result with multi-byte characters intact', async () => {

@@ -8,6 +8,7 @@ import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { Broker } from './broker.ts'
+import type { ScriptModule } from './bundle.ts'
 
 interface Workerd {
   /** The platform binary's path. */
@@ -43,22 +44,24 @@ export interface ScriptExecution {
   readonly botId: string
   /** The bot's own user object, which the isolate's client reports as `client.user`. */
   readonly botUser: unknown
-  readonly bundle: string
+  /** From `prepareScript`; the first is the entry module. */
+  readonly modules: ReadonlyArray<ScriptModule>
   readonly timeoutMs: number
   readonly broker: Broker
   readonly signal?: AbortSignal
 }
 
-/** The isolate's workerd config: the script, plus the broker as its only way out. */
+/** The isolate's workerd config: the script's modules, plus the broker as its only way out. */
 const configFor = (
   workerd: Workerd,
+  modules: ReadonlyArray<ScriptModule>,
   brokerSocket: string,
   runSocket: string,
 ) => `using Workerd = import "/workerd/workerd.capnp";
 const config :Workerd.Config = (
   services = [
     ( name = "script", worker = (
-        modules = [(name = "script.js", esModule = embed "script.js")],
+        modules = [${modules.map(({ name, type }) => `(name = "${name}", ${type} = embed "${name}")`).join(', ')}],
         compatibilityDate = "${workerd.compatibilityDate}",
         globalOutbound = "broker" ) ),
     ( name = "broker", external = (address = "unix:${brokerSocket}", http = (style = proxy)) )
@@ -182,8 +185,11 @@ const execute = async (execution: ScriptExecution): Promise<ScriptOutcome> => {
       return { outcome: 'crashed', message: `workerd is unavailable here: ${String(error)}` }
     }
     await listen(server, brokerSocket)
-    await writeFile(join(dir, 'script.js'), execution.bundle)
-    await writeFile(join(dir, 'config.capnp'), configFor(workerd, brokerSocket, runSocket))
+    for (const { name, source } of execution.modules) await writeFile(join(dir, name), source)
+    await writeFile(
+      join(dir, 'config.capnp'),
+      configFor(workerd, execution.modules, brokerSocket, runSocket),
+    )
     const child = spawn(workerd.default, ['serve', 'config.capnp'], {
       cwd: dir,
       env: {},

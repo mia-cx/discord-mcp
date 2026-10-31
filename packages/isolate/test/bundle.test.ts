@@ -1,29 +1,20 @@
 import { describe, expect, it } from 'vitest'
-import { bundleScript, ScriptBuildError } from '../src/bundle.ts'
+import { prepareScript, ScriptBuildError } from '../src/bundle.ts'
 
-describe('bundling a script', () => {
-  it('bundles discord.js imports', async () => {
-    await expect(
-      bundleScript(`import { EmbedBuilder } from 'discord.js'
-        export default () => new EmbedBuilder().setTitle('ok').toJSON()`),
-    ).resolves.toContain('EmbedBuilder')
+describe('preparing a script', () => {
+  it('compiles TypeScript that imports discord.js', async () => {
+    const modules = await prepareScript(`import { EmbedBuilder } from 'discord.js'
+      export default (): unknown => new EmbedBuilder().setTitle('ok').toJSON()`)
+
+    expect(modules.map((module) => module.name)).toEqual(['entry.js', 'discord.js', 'script.js'])
   })
 
-  it.each([
-    ['an installed package', `import x from 'esbuild'; export default () => x`],
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: script source; the isolate interpolates it.
-    ['a glob import of host files', 'export default () => import(`../${String()}package.json`)'],
-  ])('refuses %s', async (_, source) => {
-    await expect(bundleScript(source)).rejects.toBeInstanceOf(ScriptBuildError)
-  })
+  it('reports a syntax error with its location', async () => {
+    const failure = prepareScript('export default async ( => 1')
 
-  it('never expands a glob import against the working directory', async () => {
-    // Vitest runs from the repository root, whose package.json names this dev dependency.
-    const bundle = await bundleScript(
-      // biome-ignore lint/suspicious/noTemplateCurlyInString: script source; the isolate interpolates it.
-      'export default () => import(`./${String()}.json`)',
-    )
-
-    expect(bundle).not.toContain('@biomejs/biome')
+    await expect(failure).rejects.toBeInstanceOf(ScriptBuildError)
+    await expect(failure).rejects.toMatchObject({
+      issues: [expect.stringMatching(/^script.ts:1:/)],
+    })
   })
 })

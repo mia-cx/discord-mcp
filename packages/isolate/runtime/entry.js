@@ -1,8 +1,10 @@
 // The isolate's main module. One request runs the script once and reports what happened.
-
+// `discord.js` and `script.js` are CommonJS modules beside this one; importing them yields
+// `module.exports`.
 import { format } from 'node:util'
-import script from 'textile:script'
-import { Client, ClientUser } from 'discord.js'
+import discord from 'discord.js'
+
+const { Client, ClientUser } = discord
 
 const LOG_LIMIT_CHARS = 64 * 1024
 const LEVELS = ['debug', 'info', 'log', 'warn', 'error']
@@ -31,6 +33,8 @@ export default {
     const { user } = await request.json()
     const logs = captureConsole()
     try {
+      // Loaded here, not at the top, so a failing import is the script's error, not workerd's.
+      const script = (await import('./script.js')).default.default
       if (typeof script !== 'function') {
         throw new TypeError(
           'The script must default-export a function: export default async ({ client }) => { ... }',
