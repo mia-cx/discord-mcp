@@ -148,20 +148,27 @@ export interface Storage {
    */
   readonly storeSealedToken: (botId: string, sealedToken: string) => Promise<void>
   readonly loadBot: (botId: string) => Promise<StoredBot | undefined>
-  /** Bring a stored bot online until `online.until`, with no sessions to resume. */
-  readonly setBotOnline: (botId: string, online: BotOnline) => Promise<void>
+  /**
+   * Bring an offline, unrefused bot online until `online.until`, with no sessions to resume, if
+   * its token is still `sealedToken`. Resolves whether it changed.
+   */
+  readonly setBotOnline: (botId: string, sealedToken: string, online: BotOnline) => Promise<boolean>
   /** Extend an online bot's time online. Resolves `false` when the bot is offline. */
   readonly keepBotOnline: (botId: string, until: number) => Promise<boolean>
   /** Set an online bot's presence, as JSON. Resolves `false` when the bot is offline. */
   readonly setBotPresence: (botId: string, presence: string) => Promise<boolean>
   /**
    * Take a bot offline and end its sessions. With `idleAt`, only if it has no enabled workflows
-   * and its time online ended by then; with `rejectedCode`, it stays offline until its token is stored again.
-   * Resolves whether it changed.
+   * and its time online ended by then; with `rejectedCode`, it stays offline until its token is stored again;
+   * with `sealedToken`, only if that is still its token. Resolves whether it changed.
    */
   readonly setBotOffline: (
     botId: string,
-    options?: { readonly idleAt?: number; readonly rejectedCode?: number },
+    options?: {
+      readonly idleAt?: number
+      readonly rejectedCode?: number
+      readonly sealedToken?: string
+    },
   ) => Promise<boolean>
   /** Every online bot with its sealed token and stored sessions. */
   readonly loadOnlineBots: () => Promise<ReadonlyArray<OnlineBot>>

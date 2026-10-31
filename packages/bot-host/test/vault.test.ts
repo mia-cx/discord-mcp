@@ -41,7 +41,7 @@ it('stores shard sessions that only the vault key can read, alongside their toke
   }
 
   await vault.store(BOT_ID, 'private-bot-token')
-  await storage.setBotOnline(BOT_ID, ONLINE)
+  await vault.setOnline(BOT_ID, 'private-bot-token', ONLINE)
   await storage.claimLease(FENCE.lease, FENCE.holder, 0, 1_000)
   await vault.storeSession(BOT_ID, 0, session, FENCE)
 
@@ -76,7 +76,7 @@ it('keeps a shard’s session from a host that no longer holds its lease', async
     intents: 0,
   }
   await vault.store(BOT_ID, 'private-bot-token')
-  await storage.setBotOnline(BOT_ID, ONLINE)
+  await vault.setOnline(BOT_ID, 'private-bot-token', ONLINE)
   await storage.claimLease(FENCE.lease, 'host-b', 0, 1_000)
   await vault.storeSession(BOT_ID, 0, session, { ...FENCE, holder: 'host-b' })
 
@@ -85,5 +85,49 @@ it('keeps a shard’s session from a host that no longer holds its lease', async
   await vault.clearSession(BOT_ID, 0, FENCE)
 
   expect((await vault.loadOnline())[0]?.sessions).toEqual(new Map([[0, session]]))
+  await storage.close()
+})
+
+it('keeps a replaced token’s refusal and Gateway answer from its successor', async () => {
+  const storage = await inMemoryStorage()
+  const vault = createTokenVault(Buffer.alloc(32, 1), storage)
+  await vault.store(BOT_ID, 'old-token')
+  // Another host stores a new token between this host's read and its write.
+  const racing = createTokenVault(Buffer.alloc(32, 1), {
+    ...storage,
+    loadBot: async (botId) => {
+      const stored = await storage.loadBot(botId)
+      await vault.store(botId, 'new-token')
+      return stored
+    },
+  })
+
+  expect(await racing.setOffline(BOT_ID, 'old-token', { rejectedCode: 4004 })).toBe(false)
+  expect(await racing.setOnline(BOT_ID, 'old-token', ONLINE)).toBe(false)
+
+  expect(await vault.load(BOT_ID)).toMatchObject({ token: 'new-token', rejectedCode: null })
+  expect(await vault.loadOnline()).toEqual([])
+  await storage.close()
+})
+
+it('brings a bot online once, keeping the sessions its shards saved', async () => {
+  const storage = await inMemoryStorage()
+  const vault = createTokenVault(Buffer.alloc(32, 1), storage)
+  const session = {
+    sessionId: 's',
+    resumeGatewayUrl: 'wss://resume.discord.test',
+    sequence: 1,
+    intents: 0,
+  }
+  await vault.store(BOT_ID, 'private-bot-token')
+  expect(await vault.setOnline(BOT_ID, 'private-bot-token', ONLINE)).toBe(true)
+  await storage.claimLease(FENCE.lease, FENCE.holder, 0, 1_000)
+  await vault.storeSession(BOT_ID, 0, session, FENCE)
+
+  // A second host's answer from Discord lands late.
+  const late = { ...ONLINE, gatewayUrl: 'wss://late.discord.test' }
+  expect(await vault.setOnline(BOT_ID, 'private-bot-token', late)).toBe(false)
+
+  expect(await vault.loadOnline()).toMatchObject([{ ...ONLINE, sessions: new Map([[0, session]]) }])
   await storage.close()
 })

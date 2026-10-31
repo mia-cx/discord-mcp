@@ -8,6 +8,7 @@ import {
   gte,
   inArray,
   isNotNull,
+  isNull,
   like,
   lt,
   lte,
@@ -159,14 +160,24 @@ export const createStorage = (
     const { sealedToken, intents, held, presence, rejectedCode } = row
     return { sealedToken, intents, held, presence, rejectedCode, online: online(row) }
   },
-  setBotOnline: (botId, { shardCount, gatewayUrl, until }) =>
+  setBotOnline: (botId, sealedToken, { shardCount, gatewayUrl, until }) =>
     db.transaction(async (tx) => {
-      await tx
+      const started = await tx
         .update(bots)
         .set({ shardCount, gatewayUrl, onlineUntil: until, updatedAt: sql`now()` })
-        .where(eq(bots.id, botId))
+        .where(
+          and(
+            eq(bots.id, botId),
+            eq(bots.sealedToken, sealedToken),
+            isNull(bots.onlineUntil),
+            isNull(bots.rejectedCode),
+          ),
+        )
+        .returning({ id: bots.id })
+      if (started.length === 0) return false
       // Left by a shard that wrote after the bot went offline; Discord ended it.
       await tx.delete(sessions).where(eq(sessions.botId, botId))
+      return true
     }),
   keepBotOnline: async (botId, until) => {
     const kept = await db
@@ -184,7 +195,7 @@ export const createStorage = (
       .returning({ id: bots.id })
     return set.length > 0
   },
-  setBotOffline: (botId, { idleAt, rejectedCode } = {}) =>
+  setBotOffline: (botId, { idleAt, rejectedCode, sealedToken } = {}) =>
     db.transaction(async (tx) => {
       const ended = await tx
         .update(bots)
@@ -193,6 +204,7 @@ export const createStorage = (
           and(
             eq(bots.id, botId),
             idleAt === undefined ? undefined : and(sql`not ${held}`, lte(bots.onlineUntil, idleAt)),
+            sealedToken === undefined ? undefined : eq(bots.sealedToken, sealedToken),
           ),
         )
         .returning({ id: bots.id })
