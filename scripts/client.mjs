@@ -4,6 +4,7 @@ import { readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
+import { setTimeout as delay } from 'node:timers/promises'
 import { locked } from './lock.mjs'
 
 // A private, per-user stdio connection to the hosted relay. No credentials in agent configs.
@@ -12,6 +13,7 @@ const loginFile = join(directory, 'login.json')
 const REFRESH_EARLY_SECONDS = 24 * 3600
 // Longer than the relay's 15-second Discord call, so the bridge never abandons a rotation.
 const REFRESH_TIMEOUT_MS = 30_000
+const OVERLAP_WAIT_MS = 1_000
 const LOOPBACK = ['127.0.0.1', 'localhost', '[::1]']
 // A 2026-07-28 request names its own protocol version here; older clients negotiate it once.
 const VERSION_META_KEY = 'io.modelcontextprotocol/protocolVersion'
@@ -94,6 +96,11 @@ const refresh = (stale) =>
       const error = await response.json().catch(() => undefined)
       if (error?.error !== 'invalid_grant')
         throw new Error(`Discord login refresh failed (HTTP ${response.status}).`)
+      // A bridge that overlapped this one after a crash may have rotated the token first; give it
+      // a moment to save the new login before calling this one expired.
+      await delay(OVERLAP_WAIT_MS)
+      const latest = await readLogin()
+      if (latest.refresh_token !== current.refresh_token) return latest
       throw new Error('Discord login expired. Run the login helper again.')
     }
     const tokens = await response.json()

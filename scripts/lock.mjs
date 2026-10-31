@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { link, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { setTimeout as delay } from 'node:timers/promises'
 
 // Every holder finishes well within this (a bridge's refresh gives up after 30 seconds), so an
@@ -7,32 +7,11 @@ import { setTimeout as delay } from 'node:timers/promises'
 const LOCK_STALE_MS = 60_000
 
 /**
- * Remove `lock` if its holder crashed. The waiter that hard-links it to a name derived from its
- * owner claims it; nobody else can create that name, so two waiters never both remove it, and a
- * waiter that judged an older lock stale never removes the lock that replaced it.
+ * Run `task` holding `${file}.lock`, which every bridge and `login.mjs --replace` share.
+ *
+ * Best effort: after a crash, two waiters can both clear the stale lock and overlap once. Callers
+ * keep that harmless rather than impossible; a refresh that loses the race re-reads the login.
  */
-const reclaim = async (lock) => {
-  const stale = await readFile(lock, 'utf8')
-  if (Date.now() - (await stat(lock)).mtimeMs <= LOCK_STALE_MS) return
-  const claim = `${lock}.${stale}`
-  try {
-    await link(lock, claim)
-  } catch (error) {
-    // A claimer that crashed mid-reclaim leaves its claim behind. Linking updates the ctime, so a
-    // claim untouched for the stale window is abandoned and can be cleared for the next waiter.
-    if (error.code === 'EEXIST' && Date.now() - (await stat(claim)).ctimeMs > LOCK_STALE_MS) {
-      await rm(claim, { force: true })
-    }
-    throw error
-  }
-  try {
-    if ((await readFile(claim, 'utf8')) === stale) await rm(lock)
-  } finally {
-    await rm(claim, { force: true })
-  }
-}
-
-/** Run `task` holding `${file}.lock`, which every bridge and `login.mjs --replace` share. */
 export const locked = async (file, task) => {
   const lock = `${file}.lock`
   const owner = randomBytes(16).toString('hex')
@@ -42,9 +21,12 @@ export const locked = async (file, task) => {
       break
     } catch (error) {
       if (error.code !== 'EEXIST') throw error
-      // A failed claim means the lock is live, gone, or another waiter is reclaiming it.
-      await reclaim(lock).catch(() => {})
-      await delay(50)
+      const stale = await stat(lock).then(
+        (lockStat) => Date.now() - lockStat.mtimeMs > LOCK_STALE_MS,
+        () => false,
+      )
+      if (stale) await rm(lock, { force: true })
+      else await delay(50)
     }
   }
   try {
