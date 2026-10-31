@@ -146,8 +146,8 @@ const KEEPALIVE_PROBES = 3
 /**
  * Connect to Postgres and apply pending migrations before anything reads or writes.
  * `onError` hears connection failures outside a query, such as Postgres restarting; the pool
- * replaces the lost connection on next use. `url` must reach the primary directly, not through a
- * transaction pooler, which can't hold the scheduler's session locks.
+ * replaces the lost connection on next use. `url` must reach the primary directly, with no pooler:
+ * the scheduler's session locks need a session of their own, which sets its own keepalives.
  */
 export const connectStorage = async (
   url: string,
@@ -172,11 +172,18 @@ export const connectStorage = async (
   const locks = advisoryLocks(async (onLost) => {
     // Keepalives on both ends notice a dead connection within a minute. Postgres then ends the
     // session and releases its locks, so another bot host can fire the bots this one held.
+    // pg prefers the URL's own `options` to the config's, so the server's go in the URL, after it.
+    const lockUrl = new URL(url)
+    const serverKeepalives = `-c tcp_keepalives_idle=${KEEPALIVE_IDLE_S} -c tcp_keepalives_interval=${KEEPALIVE_IDLE_S} -c tcp_keepalives_count=${KEEPALIVE_PROBES}`
+    lockUrl.searchParams.set(
+      'options',
+      [lockUrl.searchParams.get('options'), serverKeepalives].filter(Boolean).join(' '),
+    )
     const client = new Client({
       ...options,
+      connectionString: lockUrl.href,
       keepAlive: true,
       keepAliveInitialDelayMillis: KEEPALIVE_IDLE_S * 1000,
-      options: `-c tcp_keepalives_idle=${KEEPALIVE_IDLE_S} -c tcp_keepalives_interval=${KEEPALIVE_IDLE_S} -c tcp_keepalives_count=${KEEPALIVE_PROBES}`,
     })
     client.on('error', (error) => {
       onError(error)

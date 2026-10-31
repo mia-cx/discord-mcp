@@ -320,9 +320,9 @@ bot keeps its shard count and gets a new 24-hour timer.
 
 Set `DATABASE_URL`, `TOKEN_VAULT_KEY` (generate it like `OAUTH_ENCRYPTION_KEY`), and a
 `DISCORD_OAUTH_ALLOWED_USER_IDS` list. Without that list, the server logs a warning and
-serves the plain relay. `DATABASE_URL` must reach the Postgres primary directly, not through
-a transaction pooler such as PgBouncer: each bot's schedules fire only on the process holding
-its session advisory lock. Back up the vault key apart from the database: without it, stored
+serves the plain relay. `DATABASE_URL` must reach the Postgres primary directly, with no
+pooler such as PgBouncer in between: each bot's schedules fire only on the process holding
+its session advisory lock, on a connection that sets its own TCP keepalives. Back up the vault key apart from the database: without it, stored
 tokens cannot be decrypted.
 
 ### Tiers
