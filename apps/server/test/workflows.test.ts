@@ -14,7 +14,10 @@ const GUILD = '223456789012345678'
 const CHANNEL = '123456789012345678'
 const HUMAN_A = '234567890123456789'
 const HUMAN_B = '234567890123456780'
-const HOUR = 60 * 60 * 1000
+const MINUTE = 60 * 1000
+const HOUR = 60 * MINUTE
+/** A Monday, 90 seconds before 09:00 UTC. */
+const START = Date.parse('2026-11-02T08:58:30.000Z')
 /** Guilds, GuildMessages, and MessageContent. */
 const PING_INTENTS = 1 | (1 << 9) | (1 << 15)
 /** The application flag that allows the MessageContent intent. */
@@ -84,7 +87,7 @@ const platform = async (shards = 1) => {
   const storage = await inMemoryStorage()
   // Heartbeats are proven in the shard suite; keep them out of these windows.
   const gateway = await fakeGateway(100 * HOUR)
-  const clock = manualClock()
+  const clock = manualClock(0.5, START)
   const log = vi.fn()
   const discord = { applicationFlags: GATEWAY_MESSAGE_CONTENT }
   const calls: Array<{
@@ -108,6 +111,7 @@ const platform = async (shards = 1) => {
         })
         if (call.route === '/users/@me') return BOT
         if (call.route === '/applications/@me') return { flags: discord.applicationFlags }
+        if (call.route === `/channels/${CHANNEL}`) return { id: CHANNEL, type: 0, guild_id: GUILD }
         if (call.route.endsWith('/callback')) return new ArrayBuffer(0)
         return sent((call.body as { content?: unknown } | undefined)?.content)
       }),
@@ -126,14 +130,31 @@ const platform = async (shards = 1) => {
     },
   })
   const catalog = await Effect.runPromise(Effect.provide(OperationCatalog, OperationCatalog.layer))
+  /** How many times the scheduler has armed its timer: once after each sync. */
+  let armed = 0
   workflows = makeWorkflowHost({
     storage,
     isolates: makeIsolateHost(),
     bots,
+    clock: {
+      date: clock.date,
+      schedule: (callback, ms) => {
+        armed += 1
+        return clock.schedule(callback, ms)
+      },
+    },
     operations: catalog.all,
     rest: (_botId, token) => ({ client: client(token), release: () => {} }),
     log,
   })
+  await workflows.restore()
+  await vi.waitFor(() => expect(armed).toBe(1))
+  /** Move the clock by `ms`, past the next minute, and wait for the scheduler's sync there. */
+  const pass = async (ms = MINUTE - (clock.date() % MINUTE)) => {
+    const before = armed
+    clock.advance(ms)
+    await vi.waitFor(() => expect(armed).toBe(before + 1))
+  }
   const oauth = discordOAuth()
   const relay = createRelay(
     { ...config, login: { ...config.login, allowedUserIds: [HUMAN_A, HUMAN_B] } },
@@ -148,6 +169,7 @@ const platform = async (shards = 1) => {
     () => storage.close(),
     gateway.close,
     () => bots.close(),
+    () => workflows?.close(),
   )
 
   /** Log in as `human` and return a function that calls a tool with the bot's token. */
@@ -206,7 +228,7 @@ const platform = async (shards = 1) => {
     })
   }
 
-  return { agent, calls, clock, discord, gateway, identifiedWith, log }
+  return { agent, calls, clock, discord, gateway, identifiedWith, log, pass }
 }
 
 describe('workflows', () => {
@@ -316,6 +338,45 @@ describe('workflows', () => {
     expect(
       gateway.connections.every((c) => c.closeCode === undefined || c.closeCode === 4000),
     ).toBe(true)
+  }, 30_000)
+
+  it('post on their cron schedule while no agent is connected', async () => {
+    const { agent, calls, pass } = await platform()
+    const asA = await agent(HUMAN_A)
+    const published = await asA('discord_workflow_publish', {
+      name: 'digest',
+      source: `
+        import { Client } from 'discord.js'
+        const client = new Client({ intents: [], schedules: ['0 9 * * *'] })
+        client.on('schedule', async ({ scheduledAt }) => {
+          const channel = await client.channels.fetch('${CHANNEL}')
+          await channel.send('Digest for ' + scheduledAt.toISOString().slice(0, 10))
+        })`,
+      grants: { families: ['channel', 'message'] },
+    })
+    expect(published.structuredContent.data).toMatchObject({
+      events: ['schedule'],
+      schedules: ['0 9 * * *'],
+    })
+    await asA('discord_workflow_enable', { name: 'digest' })
+    const digests = () =>
+      calls
+        .filter((call) => call.method === 'POST' && call.route === `/channels/${CHANNEL}/messages`)
+        .map(({ token, body }) => [token, (body as { content: string }).content])
+
+    // 08:59, then 09:00, with no agent call from here on.
+    await pass()
+    await pass()
+    await vi.waitFor(() => expect(digests()).toEqual([[TOKEN, 'Digest for 2026-11-02']]))
+
+    // Two days pass in one step, as if the host had stalled: the missed ticks run once, late.
+    await pass(48 * HOUR)
+    await vi.waitFor(() =>
+      expect(digests()).toEqual([
+        [TOKEN, 'Digest for 2026-11-02'],
+        [TOKEN, 'Digest for 2026-11-04'],
+      ]),
+    )
   }, 30_000)
 
   it('keep answering when another workflow of the same bot crashes on the same event', async () => {

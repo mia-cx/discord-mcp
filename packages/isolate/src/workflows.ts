@@ -1,11 +1,18 @@
 import { McpRequestContext, type Principal, ValidationError } from '@discord-mcp/core'
 import type { DiscordRest } from '@discord-mcp/discord-api/relay'
-import type { Storage, WorkflowGrants, WorkflowRevision } from '@discord-mcp/storage'
+import type {
+  ScheduledWorkflow,
+  Storage,
+  WorkflowGrants,
+  WorkflowRevision,
+} from '@discord-mcp/storage'
 import type { OperationEntry } from '@mia-cx/discord-catalog'
 import { Effect, Redacted } from 'effect'
 import { makeBroker, type Presence } from './broker.ts'
 import { prepareScript, ScriptBuildError, type ScriptModule } from './bundle.ts'
-import type { GatewayEvent, IsolateHost, ScriptOutcome } from './isolate-host.ts'
+import { checkScheduleFloor, MIN_SCHEDULE_INTERVAL_MINUTES, parseCron } from './cron.ts'
+import type { GatewayEvent, IsolateHost, ScheduleTick, ScriptOutcome } from './isolate-host.ts'
+import { makeScheduler, type SchedulerClock } from './schedules.ts'
 
 const GUILD_MEMBERS = 1 << 1
 const GUILD_MESSAGES = 1 << 9
@@ -46,6 +53,8 @@ const EVENT_FOR_DISPATCH = new Map(
 )
 /** Bots listen for these by habit. A workflow never logs in or connects, so they never fire. */
 const SILENT_EVENTS = new Set(['ready', 'clientReady', 'error', 'warn', 'debug'])
+/** The event a workflow's clients hear each tick of the cron schedules in their options. */
+export const SCHEDULE_EVENT = 'schedule'
 
 /** Discord's Gateway intent bits, by discord.js's names. */
 const INTENTS: ReadonlyArray<readonly [string, number]> = [
@@ -100,16 +109,22 @@ export interface WorkflowEvent {
   readonly dispatch: GatewayEvent
 }
 
-/** The bot host's side of workflows: who stays online, with which intents, and its presence. */
+/**
+ * The bot host's side of workflows: who stays online, with which intents, its presence, and the
+ * token an online bot's scheduled runs act with.
+ */
 export interface WorkflowBots {
   readonly hold: (botId: string, intents: number | undefined) => Promise<void>
   readonly updatePresence: (botId: string, presence: Presence) => void
+  readonly tokenOf: (botId: string) => string | undefined
 }
 
 export interface WorkflowHostOptions {
   readonly storage: Storage
   readonly isolates: IsolateHost
   readonly bots: WorkflowBots
+  /** The wall clock schedules fire by. */
+  readonly clock: SchedulerClock
   readonly operations: ReadonlyArray<OperationEntry>
   /**
    * Borrow the REST client a bot's workflows call Discord through, acting with `token`. The bot
@@ -142,6 +157,7 @@ export interface WorkflowListing {
       readonly revision: number
       readonly events: ReadonlyArray<string>
       readonly intents: ReadonlyArray<string>
+      readonly schedules: ReadonlyArray<string>
       readonly grants: WorkflowGrants
     } | null
   }>
@@ -149,7 +165,10 @@ export interface WorkflowListing {
 }
 
 export interface WorkflowHost {
-  /** Load the source in an isolate to find its events and intents, then store a new revision. */
+  /**
+   * Load the source in an isolate to find its events, intents, and schedules, then store a new
+   * revision.
+   */
   readonly publish: (
     caller: WorkflowCaller,
     input: { readonly name: string; readonly source: string; readonly grants: WorkflowGrants },
@@ -170,10 +189,12 @@ export interface WorkflowHost {
   /** Run every enabled workflow that listens for this event. Events of one guild run in order. */
   readonly dispatch: (event: WorkflowEvent) => void
   /**
-   * Keep every bot with enabled workflows that `owns` accepts online. Called once at startup,
-   * before the bot host resumes stored sessions.
+   * Keep every bot with enabled workflows that `owns` accepts online, and fire their schedules.
+   * Called once at startup, before the bot host resumes stored sessions.
    */
   readonly restore: (owns?: (botId: string) => boolean) => Promise<void>
+  /** Stop firing schedules. */
+  readonly close: () => Promise<void>
 }
 
 const invalid = (message: string, ...issues: ReadonlyArray<string>) =>
@@ -268,10 +289,54 @@ const visibleMessage = (
   }
 }
 
+const SCHEDULES_HINT =
+  "source: list five-field cron expressions, in UTC, in the Client's schedules option, as in new Client({ intents: [], schedules: ['0 9 * * *'] })."
+
+/**
+ * The cron schedules a revision's clients declare, deduplicated, if each parses and fires at most
+ * every few minutes, and a `schedule` listener hears them.
+ */
+const checkSchedules = (
+  declared: ReadonlyArray<unknown>,
+  listening: boolean,
+  now: Date,
+): ReadonlyArray<string> => {
+  const schedules = [...new Set(declared)].map((cron) => {
+    if (typeof cron !== 'string') {
+      throw invalid(`Schedule ${String(cron)} is not a string.`, SCHEDULES_HINT)
+    }
+    const schedule = parseCron(cron)
+    if ('reason' in schedule) {
+      throw invalid(`Schedule "${cron}" is not valid: ${schedule.reason}`, SCHEDULES_HINT)
+    }
+    if (checkScheduleFloor(schedule, now) !== undefined) {
+      throw invalid(
+        `Schedule "${cron}" fires more often than every ${MIN_SCHEDULE_INTERVAL_MINUTES} minutes.`,
+        SCHEDULES_HINT,
+      )
+    }
+    return cron
+  })
+  if (schedules.length > 0 && !listening) {
+    throw invalid(
+      'The workflow declares schedules, but nothing listens for them.',
+      `source: add client.on('${SCHEDULE_EVENT}', (tick) => { ... }). Each tick has the cron expression that fired and its scheduledAt Date.`,
+    )
+  }
+  if (schedules.length === 0 && listening) {
+    throw invalid(
+      'The workflow listens for schedule ticks, but declares no schedules.',
+      SCHEDULES_HINT,
+    )
+  }
+  return schedules
+}
+
 export const makeWorkflowHost = ({
   storage,
   isolates,
   bots,
+  clock,
   operations,
   rest,
   log,
@@ -358,35 +423,42 @@ export const makeWorkflowHost = ({
     return user
   }
 
-  /** Queue one workflow's run of one event. Enqueues before returning, so callers keep order. */
+  /**
+   * Queue one workflow's run of one Gateway event or schedule tick. Enqueues before returning, so
+   * callers keep order.
+   */
   const run = (
-    event: WorkflowEvent,
-    dispatch: GatewayEvent,
+    botId: string,
+    token: string,
+    trigger: { readonly event: GatewayEvent } | { readonly tick: ScheduleTick },
     workflow: Enabled,
     botUser: unknown,
     modules: ReadonlyArray<ScriptModule>,
   ) => {
-    const { botId } = event
-    const { client, release } = rest(botId, Redacted.make(event.token))
-    const { d } = dispatch
+    const { client, release } = rest(botId, Redacted.make(token))
+    const dispatch = 'event' in trigger ? trigger.event : undefined
+    const d = dispatch?.d ?? {}
     const { name, revision, grants } = workflow.revision
     const label = `Workflow ${name} (revision ${revision}) of bot ${botId}`
-    const isInteraction = dispatch.t === 'INTERACTION_CREATE'
+    const cause = dispatch?.t ?? `schedule ${'tick' in trigger ? trigger.tick.cron : ''}`
+    const isInteraction = dispatch?.t === 'INTERACTION_CREATE'
     return isolates
       .run({
         // Each workflow sees a guild's events, and a direct message channel's, in order, and never
         // waits on another workflow. Interactions skip the queue: Discord needs an answer within
-        // three seconds, whatever else the guild is doing.
+        // three seconds, whatever else the guild is doing. Ticks queue apart from events.
         botId,
         queue: `${botId}:${name}:${
-          isInteraction
-            ? `interaction:${String(d.id)}`
-            : String(d.guild_id ?? `direct:${String(d.channel_id)}`)
+          dispatch === undefined
+            ? SCHEDULE_EVENT
+            : isInteraction
+              ? `interaction:${String(d.id)}`
+              : String(d.guild_id ?? `direct:${String(d.channel_id)}`)
         }`,
         botUser,
         modules,
         timeoutMs: EVENT_TIMEOUT_MS,
-        input: { event: dispatch },
+        input: trigger,
         signal: workflow.stop.signal,
         urgent: isInteraction,
         // Discord drops an interaction not answered within three seconds of the event.
@@ -398,7 +470,7 @@ export const makeWorkflowHost = ({
             client.request(call).pipe(
               // DiscordRest aborts its HTTP request with the request context's signal.
               Effect.provideService(McpRequestContext, {
-                requestId: `${label}: ${dispatch.t}`,
+                requestId: `${label}: ${cause}`,
                 signal,
                 progressToken: undefined,
                 notify: undefined,
@@ -422,7 +494,7 @@ export const makeWorkflowHost = ({
       .then(
         (outcome) => {
           if (outcome.outcome !== 'completed') {
-            log(`${label} failed on ${dispatch.t}: ${failure(outcome)}`)
+            log(`${label} failed on ${cause}: ${failure(outcome)}`)
           }
         },
         (error: unknown) => {
@@ -432,6 +504,17 @@ export const makeWorkflowHost = ({
       )
       .finally(release)
   }
+
+  /** A revision's compiled modules, or undefined after logging why it did not compile. */
+  const modulesOf = (botId: string, workflow: Enabled) =>
+    workflow.modules.catch((error: unknown) => {
+      const { name, revision, source } = workflow.revision
+      log(
+        `Workflow ${name} (revision ${revision}) of bot ${botId} did not compile: ${String(error)}`,
+      )
+      workflow.modules = compile(source)
+      return undefined
+    })
 
   const route = async (event: WorkflowEvent) => {
     const kind = EVENT_FOR_DISPATCH.get(event.dispatch.t)
@@ -447,25 +530,49 @@ export const makeWorkflowHost = ({
     if (matching.length === 0) return
     const [botUser, modules] = await Promise.all([
       userFor(event.botId, event.token),
-      Promise.all(
-        matching.map(({ workflow }) =>
-          workflow.modules.catch((error: unknown) => {
-            const { name, revision, source } = workflow.revision
-            log(
-              `Workflow ${name} (revision ${revision}) of bot ${event.botId} did not compile: ${String(error)}`,
-            )
-            workflow.modules = compile(source)
-            return undefined
-          }),
-        ),
-      ),
+      Promise.all(matching.map(({ workflow }) => modulesOf(event.botId, workflow))),
     ])
     // Enqueued together, in order, so every workflow sees a guild's events in the order they came.
     matching.forEach(({ workflow, dispatch }, index) => {
       const compiled = modules[index]
-      if (compiled !== undefined) void run(event, dispatch, workflow, botUser, compiled)
+      if (compiled === undefined) return
+      void run(event.botId, event.token, { event: dispatch }, workflow, botUser, compiled)
     })
   }
+
+  /** Run one tick of a scheduled revision, if it still runs and its bot is online. */
+  const tick = async ({ botId, name, revision }: ScheduledWorkflow, tick: ScheduleTick) => {
+    const label = `Workflow ${name} (revision ${revision}) of bot ${botId}`
+    const token = bots.tokenOf(botId)
+    if (token === undefined) {
+      log(`${label} skipped its ${tick.cron} tick: the bot is offline.`)
+      return
+    }
+    const workflow = (await enabledFor(botId)).find(
+      (entry) => entry.revision.name === name && entry.revision.revision === revision,
+    )
+    if (workflow === undefined) {
+      log(`${label} skipped its ${tick.cron} tick: it no longer runs here.`)
+      return
+    }
+    const [botUser, modules] = await Promise.all([
+      userFor(botId, token),
+      modulesOf(botId, workflow),
+    ])
+    if (modules !== undefined) await run(botId, token, { tick }, workflow, botUser, modules)
+  }
+
+  const scheduler = makeScheduler({
+    storage,
+    clock,
+    log,
+    fire: (workflow, next) =>
+      void tick(workflow, next).catch((error: unknown) =>
+        log(
+          `Workflow ${workflow.name} of bot ${workflow.botId} missed its ${next.cron} tick: ${String(error)}`,
+        ),
+      ),
+  })
 
   const probe = async (caller: WorkflowCaller, modules: ReadonlyArray<ScriptModule>) => {
     const outcome = await isolates.run({
@@ -480,7 +587,11 @@ export const makeWorkflowHost = ({
     if (outcome.outcome !== 'completed') {
       throw invalid(`The workflow did not load: ${failure(outcome)}`)
     }
-    return outcome.result as { readonly events: ReadonlyArray<string>; readonly intents: number }
+    return outcome.result as {
+      readonly events: ReadonlyArray<string>
+      readonly intents: number
+      readonly schedules: ReadonlyArray<unknown>
+    }
   }
 
   return {
@@ -499,7 +610,8 @@ export const makeWorkflowHost = ({
       })
       const declared = await probe(caller, modules)
       const unsupported = declared.events.filter(
-        (event) => !(event in WORKFLOW_EVENTS) && !SILENT_EVENTS.has(event),
+        (event) =>
+          !(event in WORKFLOW_EVENTS) && event !== SCHEDULE_EVENT && !SILENT_EVENTS.has(event),
       )
       if (unsupported.length > 0) {
         throw invalid(
@@ -514,11 +626,18 @@ export const makeWorkflowHost = ({
           'source: use GatewayIntentBits names in the Client options.',
         )
       }
-      const events = declared.events.filter((event) => event in WORKFLOW_EVENTS)
+      const schedules = checkSchedules(
+        declared.schedules,
+        declared.events.includes(SCHEDULE_EVENT),
+        new Date(clock.date()),
+      )
+      const events = declared.events.filter(
+        (event) => event in WORKFLOW_EVENTS || event === SCHEDULE_EVENT,
+      )
       if (events.length === 0) {
         throw invalid(
-          'The workflow listens for no Gateway events.',
-          `source: add a listener with client.on(), for one of ${Object.keys(WORKFLOW_EVENTS).join(', ')}.`,
+          'The workflow listens for no Gateway events or schedules.',
+          `source: add a listener with client.on(), for one of ${Object.keys(WORKFLOW_EVENTS).join(', ')}, or ${SCHEDULE_EVENT}.`,
         )
       }
       return storage.publishWorkflow({
@@ -528,7 +647,7 @@ export const makeWorkflowHost = ({
         grants,
         events,
         intents: declared.intents,
-        schedules: [],
+        schedules,
         actorId: caller.actorId,
       })
     },
@@ -552,6 +671,7 @@ export const makeWorkflowHost = ({
                     revision: revision.revision,
                     events: revision.events,
                     intents: intentNames(revision.intents),
+                    schedules: revision.schedules,
                     grants: revision.grants,
                   },
           }
@@ -586,6 +706,8 @@ export const makeWorkflowHost = ({
         throw invalid(`No workflow is named ${name}.`)
       }
       await refresh(caller.botId)
+      // Its schedules start now, not at the next minute's sync, which could miss a tick.
+      await scheduler.sync()
       return revision
     },
 
@@ -620,6 +742,9 @@ export const makeWorkflowHost = ({
         intents.set(botId, (intents.get(botId) ?? 0) | own)
       }
       await Promise.all([...intents].map(([botId, all]) => bots.hold(botId, all)))
+      scheduler.start(owns)
     },
+
+    close: () => scheduler.close(),
   }
 }

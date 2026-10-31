@@ -1,3 +1,4 @@
+import { manualClock } from '@discord-mcp/bot-host/testing'
 import { inMemoryStorage } from '@discord-mcp/storage/testing'
 import { OperationCatalog } from '@mia-cx/discord-catalog'
 import { Effect } from 'effect'
@@ -54,11 +55,16 @@ const recordingIsolates = () => {
 const setup = async (isolates: IsolateHost = recordingIsolates().host) => {
   const storage = await inMemoryStorage()
   cleanup.push(() => storage.close())
-  const bots = { hold: vi.fn(async () => {}), updatePresence: vi.fn() }
+  const bots = {
+    hold: vi.fn(async () => {}),
+    updatePresence: vi.fn(),
+    tokenOf: () => 'private-bot-token',
+  }
   const host = makeWorkflowHost({
     storage,
     isolates,
     bots,
+    clock: manualClock(),
     operations: catalog.all,
     rest: () => ({
       client: { raw: undefined as never, request: () => Effect.succeed(BOT) },
@@ -66,6 +72,7 @@ const setup = async (isolates: IsolateHost = recordingIsolates().host) => {
     }),
     log: () => {},
   })
+  cleanup.push(() => host.close())
   /** Store and enable a workflow listening for `events`, declaring `intents`. */
   const enable = async (name: string, intents: number, events = ['messageCreate']) => {
     await storage.publishWorkflow({
@@ -75,6 +82,7 @@ const setup = async (isolates: IsolateHost = recordingIsolates().host) => {
       grants,
       events,
       intents,
+      schedules: [],
       actorId: HUMAN,
     })
     await host.enable(caller, name, undefined, ALL_FLAGS)
@@ -208,6 +216,7 @@ describe('the workflow dispatcher', () => {
         grants,
         events: ['messageCreate'],
         intents: GUILDS,
+        schedules: [],
         actorId: HUMAN,
       })
       await storage.setEnabledRevision(botId, 'ping', 1, HUMAN)

@@ -135,8 +135,8 @@ macOS, and Windows.
 
 ## Workflows
 
-A workflow is discord.js code that runs as the bot on Gateway events, while no agent is
-connected. It is written like an ordinary bot:
+A workflow is discord.js code that runs as the bot on Gateway events and cron schedules,
+while no agent is connected. It is written like an ordinary bot:
 
 ```ts
 import { Client, Events, GatewayIntentBits } from 'discord.js'
@@ -153,10 +153,10 @@ client.login(process.env.DISCORD_TOKEN)
 ```
 
 `discord_workflow_publish` loads the source once in workerd to find the events its clients
-listen for and the intents they declare, then stores it as the workflow's next immutable
-revision. `discord_workflow_enable` runs a revision and returns its grants and intents;
-Discord's privileged intents must be on in the Developer Portal first. While any workflow is
-enabled, the bot stays online without agent calls. After a restart, workflows also run the
+listen for and the intents and schedules they declare, then stores it as the workflow's next
+immutable revision. `discord_workflow_enable` runs a revision and returns its grants, intents,
+and schedules; Discord's privileged intents must be on in the Developer Portal first. While any
+workflow is enabled, the bot stays online without agent calls. After a restart, workflows also run the
 events Discord replays.
 
 Workflows listen for `messageCreate`, `messageUpdate`, `messageDelete`,
@@ -167,6 +167,24 @@ may receive partial objects. Each workflow receives only the events its own inte
 A guild's events run in order; interactions run at once. The bot's own messages are not delivered. Grants work as for scripts. A
 workflow may also answer the interaction it is handling (`reply`, `deferReply`, `editReply`,
 `followUp`) with the `interaction` and `webhook` families, and set the bot's presence.
+
+To run on a schedule, a client lists five-field cron expressions, in UTC, in a `schedules`
+option and listens for `schedule`:
+
+```ts
+const client = new Client({ intents: [], schedules: ['0 9 * * *'] })
+
+client.on('schedule', async ({ cron, scheduledAt }) => {
+  const channel = await client.channels.fetch('123456789012345678')
+  await channel.send(`Digest for ${scheduledAt.toISOString().slice(0, 10)}`)
+})
+```
+
+A schedule fires at most every five minutes. Each tick runs once, however many bot hosts
+there are, and schedules start when the workflow is enabled. A tick missed while the bot's
+host was down runs once, late, when a host comes back: each schedule runs its most recent
+missed tick and skips the earlier ones, and `scheduledAt` says when it was due. A tick
+that falls while the bot is offline is skipped.
 
 Anyone with relay access and the bot's token manages its workflows. Every publish, enable,
 disable, and delete is recorded with the acting human's Discord user ID, and
@@ -301,7 +319,9 @@ bot keeps its shard count and gets a new 24-hour timer.
 
 Set `DATABASE_URL`, `TOKEN_VAULT_KEY` (generate it like `OAUTH_ENCRYPTION_KEY`), and a
 `DISCORD_OAUTH_ALLOWED_USER_IDS` list. Without that list, the server logs a warning and
-serves the plain relay. Back up the vault key apart from the database: without it, stored
+serves the plain relay. `DATABASE_URL` must reach the Postgres primary directly, not through
+a transaction pooler such as PgBouncer: each bot's schedules fire only on the process holding
+its session advisory lock. Back up the vault key apart from the database: without it, stored
 tokens cannot be decrypted.
 
 ### Tiers

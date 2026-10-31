@@ -13,6 +13,9 @@
       "default": "./dist/cron.js"
     }
   },
+  "devDependencies": {
+    "@discord-mcp/bot-host": "workspace:*"
+  },
   "dependencies": {
     "@discord-mcp/core": "workspace:*",
     "@discord-mcp/discord-api": "workspace:*",

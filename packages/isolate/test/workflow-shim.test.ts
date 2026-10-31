@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { prepareScript } from '../src/bundle.ts'
-import { type GatewayEvent, makeIsolateHost } from '../src/isolate-host.ts'
+import { type GatewayEvent, makeIsolateHost, type ScheduleTick } from '../src/isolate-host.ts'
 
 const BOT = { id: '345678901234567890', username: 'textile', discriminator: '0', bot: true }
 const USER = { id: '456789012345678901', username: 'mia', discriminator: '0' }
@@ -30,6 +30,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
 })
 
 client.login(process.env.DISCORD_TOKEN)
+
+const digest = new Client({ intents: [], schedules: ['0 9 * * *', '30 17 * * 5'] })
+digest.on('schedule', async ({ cron, scheduledAt }) => {
+  const channel = await digest.channels.fetch('${CHANNEL}')
+  await channel.send(cron + ' at ' + scheduledAt.toISOString())
+})
+
+const nightly = new Client({ intents: [], schedules: ['0 0 * * *'] })
+nightly.on('schedule', async () => {
+  const channel = await nightly.channels.fetch('${CHANNEL}')
+  await channel.send('nightly')
+})
 `
 
 const message = (content: string): GatewayEvent => ({
@@ -96,7 +108,7 @@ const sentMessage = (content: string) => ({
 })
 
 /** Run the workflow once in workerd, recording every request its broker receives. */
-const run = async (input: { event: GatewayEvent } | { probe: true }) => {
+const run = async (input: { event: GatewayEvent } | { tick: ScheduleTick } | { probe: true }) => {
   const requests: Array<{ method: string; url: string; auth: string | null; body: unknown }> = []
   const outcome = await makeIsolateHost().run({
     botId: BOT.id,
@@ -116,6 +128,7 @@ const run = async (input: { event: GatewayEvent } | { probe: true }) => {
       if (request.url.includes('/callback') || request.url.includes('gateway')) {
         return new Response(null, { status: 204 })
       }
+      if (request.method === 'GET') return Response.json({ id: CHANNEL, type: 0, guild_id: GUILD })
       return Response.json(sentMessage((JSON.parse(text) as { content: string }).content))
     },
   })
@@ -123,15 +136,35 @@ const run = async (input: { event: GatewayEvent } | { probe: true }) => {
 }
 
 describe('the discord.js shim', () => {
-  it('reports the events and intents a workflow declares', async () => {
+  it('reports the events, intents, and schedules a workflow declares', async () => {
     const { outcome } = await run({ probe: true })
 
     expect(outcome).toEqual({
       outcome: 'completed',
-      // Guilds, GuildMessages, and MessageContent.
-      result: { events: ['messageCreate', 'interactionCreate'], intents: 1 | 512 | 32768 },
+      result: {
+        events: ['messageCreate', 'interactionCreate', 'schedule'],
+        // Guilds, GuildMessages, and MessageContent.
+        intents: 1 | 512 | 32768,
+        schedules: ['0 9 * * *', '30 17 * * 5', '0 0 * * *'],
+      },
       logs: [],
     })
+  })
+
+  it('runs a tick on the schedule listeners of the client that declared its cron, with when it was due', async () => {
+    const { outcome, requests } = await run({
+      tick: { cron: '30 17 * * 5', scheduledAt: '2026-11-06T17:30:00.000Z' },
+    })
+
+    expect(outcome.outcome).toBe('completed')
+    expect(requests.filter((request) => request.method === 'POST')).toEqual([
+      {
+        method: 'POST',
+        url: `https://discord.com/api/v10/channels/${CHANNEL}/messages`,
+        auth: 'Bot textile-broker',
+        body: expect.objectContaining({ content: '30 17 * * 5 at 2026-11-06T17:30:00.000Z' }),
+      },
+    ])
   })
 
   it('answers a forwarded message with message.reply', async () => {

@@ -2,8 +2,15 @@ import { defineTool, ValidationError } from '@discord-mcp/core'
 import { DiscordRest } from '@discord-mcp/discord-api/relay'
 import type { WorkflowRevision } from '@discord-mcp/storage'
 import { Context, Effect, Schema } from 'effect'
+import { MIN_SCHEDULE_INTERVAL_MINUTES } from './cron.ts'
 import { GrantsInput, resolveGrants } from './tool.ts'
-import { EVENT_TIMEOUT_MS, intentNames, WORKFLOW_EVENTS, type WorkflowHost } from './workflows.ts'
+import {
+  EVENT_TIMEOUT_MS,
+  intentNames,
+  SCHEDULE_EVENT,
+  WORKFLOW_EVENTS,
+  type WorkflowHost,
+} from './workflows.ts'
 
 /** The process's workflow host, and the Discord user whose relay login made this request. */
 export class Workflows extends Context.Service<
@@ -31,11 +38,19 @@ const attempt = <A>(run: () => Promise<A>) =>
     ),
   )
 
-const describeRevision = ({ name, revision, events, intents, grants }: WorkflowRevision) => ({
+const describeRevision = ({
+  name,
+  revision,
+  events,
+  intents,
+  schedules,
+  grants,
+}: WorkflowRevision) => ({
   name,
   revision,
   events,
   intents: intentNames(intents),
+  schedules,
   grants,
 })
 
@@ -51,8 +66,9 @@ export const workflowPublish = defineTool({
   name: 'discord_workflow_publish',
   title: 'Publish a workflow',
   description: [
-    "Publish discord.js code that runs as this bot on Gateway events, even while no agent is connected. Each publish stores the workflow's next immutable revision; it runs only once enabled with discord_workflow_enable.",
+    "Publish discord.js code that runs as this bot on Gateway events and cron schedules, even while no agent is connected. Each publish stores the workflow's next immutable revision; it runs only once enabled with discord_workflow_enable.",
     `\`source\` is a module that creates a discord.js Client at the top level and adds listeners, as an ordinary bot does; \`login()\` does nothing. It can listen for ${Object.keys(WORKFLOW_EVENTS).join(', ')}, and receives the events its Client's intents cover. Import only from discord.js and node:*, with no top-level await.`,
+    `To run on a schedule, list five-field cron expressions, in UTC and at least ${MIN_SCHEDULE_INTERVAL_MINUTES} minutes apart, in the Client's \`schedules\` option, and listen for \`${SCHEDULE_EVENT}\`: \`new Client({ intents: [], schedules: ['0 9 * * *'] })\`, then \`client.on('${SCHEDULE_EVENT}', async ({ cron, scheduledAt }) => { ... })\`. Each tick runs once. A tick missed while the bot host was down runs late, once per schedule, when it comes back; earlier missed ticks are skipped, and \`scheduledAt\` says when it was due.`,
     `Each event runs in a fresh isolate for at most ${EVENT_TIMEOUT_MS / 1000} seconds, so nothing in memory lasts between events: collectors and awaitMessages never fire, and caches start empty, so listeners may receive partial objects (check \`.partial\` and fetch). Without MessageContent, guild messages arrive without content unless they mention the bot. Events of one guild run in order. The bot's own messages are not delivered.`,
     'Every request the workflow makes is checked against `grants`, as for discord_script_run. Answering an interaction (reply, deferReply, editReply, followUp) needs the `interaction` and `webhook` families or those operations, and works only for the interaction being handled. setPresence needs no grant.',
     '`name` is unique per bot: lowercase letters, digits, and dashes. Publishing an existing name adds a revision and leaves the running one in place.',
@@ -79,7 +95,7 @@ export const workflowList = defineTool({
   name: 'discord_workflow_list',
   title: 'List workflows',
   description:
-    "List this bot's workflows: each one's latest revision, and the revision it runs with its events, intents, and grants. `changes` lists the 20 most recent publishes, enables, disables, and deletes, newest first, with the Discord user ID of the human who made each.",
+    "List this bot's workflows: each one's latest revision, and the revision it runs with its events, intents, schedules, and grants. `changes` lists the 20 most recent publishes, enables, disables, and deletes, newest first, with the Discord user ID of the human who made each.",
   toolset: 'api',
   risk: 'read',
   scopes: [],
@@ -103,7 +119,7 @@ export const workflowEnable = defineTool({
   name: 'discord_workflow_enable',
   title: 'Enable a workflow',
   description:
-    "Run a workflow revision, the latest by default, on this bot's Gateway events, replacing the revision it ran before. While any workflow is enabled the bot stays online without agent calls. Returns the grants and intents the revision runs with: show them to the human you act for. Privileged intents (MessageContent, GuildMembers, GuildPresences) must be turned on in the Discord Developer Portal first.",
+    "Run a workflow revision, the latest by default, on this bot's Gateway events and its schedules, replacing the revision it ran before. Schedules start from now. While any workflow is enabled the bot stays online without agent calls. Returns the grants, intents, and schedules the revision runs with: show them to the human you act for. Privileged intents (MessageContent, GuildMembers, GuildPresences) must be turned on in the Discord Developer Portal first.",
   toolset: 'api',
   risk: 'destructive',
   scopes: [],
