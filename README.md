@@ -76,6 +76,8 @@ Both paths require OAuth and bot credentials on every HTTP request.
 | `discord_guild_get` | Read a guild with a compact, typed result. |
 | `discord_permissions_explain` | Diagnose effective guild/channel permissions. |
 | `discord_script_run` | Run one-off discord.js code as the bot, checked against its grants. |
+| `discord_voice_join` | Join a voice channel to play audio there. [Bot hosting](#bot-hosting) only. |
+| `discord_voice_leave` | Leave a server's voice channel. Bot hosting only. |
 
 The catalog covers the vendored specification's 242 operations. The relay exposes
 bot-authenticated, non-credential operations. OAuth-only endpoints and operations
@@ -84,8 +86,8 @@ the supported operation and its input schema.
 
 Arguments are validated locally before execution. Destructive and admin calls act
 directly under the supplied bot's Discord permissions, with no preview-token
-sessions; only [scripts](#scripts) carry server-side grants. This relay does not
-receive voice audio or run agent conversations.
+sessions; only [scripts](#scripts) carry server-side grants. This relay plays audio
+in voice channels but does not receive it, or run agent conversations.
 
 Calls currently accept JSON payloads. Multipart file upload is not implemented.
 Discord rate limits and API errors are returned to the caller; the HTTP relay
@@ -247,6 +249,41 @@ Set `DATABASE_URL`, `TOKEN_VAULT_KEY` (generate it like `OAUTH_ENCRYPTION_KEY`),
 `DISCORD_OAUTH_ALLOWED_USER_IDS` list. Without that list, the server logs a warning and
 serves the plain relay. Back up the vault key apart from the database: without it, stored
 tokens cannot be decrypted.
+
+#### Voice
+
+With bot hosting on, an agent can play audio in a voice channel, as music bots do. Discord
+encrypts the audio end to end with DAVE. Sending needs no notice to the channel; the bot
+receives nothing.
+
+1. Call `discord_voice_join` with `guildId` and `channelId`. The bot needs View Channel,
+   Connect, and Speak. It returns the voice socket's URL, `wss://YOUR_HOST/voice?guild_id=…`.
+2. Open a WebSocket to that URL with the same `Authorization` and `X-Discord-Bot-Token`
+   headers as `/mcp`, adding the codec to the query:
+   - `codec=opus`: each binary message is one Opus packet of 20 ms, 48 kHz stereo audio.
+   - `codec=pcm16&sample_rate=R&channels=C`: little-endian 16-bit PCM, interleaved when stereo,
+     at `R` of 8000, 12000, 16000, 24000, or 48000 Hz and `C` of 1 (default) or 2. Messages may
+     split frames but not samples.
+3. Send audio as binary messages. The bot speaks while audio arrives and stops when it pauses for
+   more than 100 ms. Audio sent faster than real time waits: once a second of it is queued, the
+   bot host stops reading the socket until it plays.
+
+Before upgrading, the relay answers 401 or 403 for bad credentials, 400 for a bad query, and
+409 when the bot is not in a voice channel in that server. The socket closes with:
+
+| Code | Meaning |
+| --- | --- |
+| 1000 | The bot left the channel, through `discord_voice_leave` or because Discord disconnected it. |
+| 1001 | The bot went offline, or the server is shutting down. |
+| 1003 | A text message arrived; send audio as binary messages. |
+| 1007 | A message was not valid audio for the codec. |
+| 1009 | A message was larger than 256 KiB. |
+| 4000 | A newer socket for the same server replaced this one. |
+
+Closing the socket stops playback after any queued audio; the bot stays in the channel until it
+leaves. Joining another channel in the same server moves the bot and closes its socket. An open
+socket keeps the bot online past its 24-hour idle timeout. Voice outlasts a resumed Gateway
+connection, but not a new Gateway session or a server restart: join again after a 1001 close.
 
 For agent-operated clients, use the [curl example](./docs/operating.md#curl).
 For a developer-Team-derived access list, follow
