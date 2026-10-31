@@ -124,7 +124,7 @@ export const fakeGateway = async (
      * A `fetch` that answers `GET /gateway/bot` with this fake's URL, `shards` recommended
      * shards, and a fresh daily Identify budget, unless overridden. It posts channel messages,
      * unless `sendMessages` is false, when Discord refuses them as it does without Send Messages,
-     * and accepts interaction responses.
+     * and accepts interaction responses and edits to them.
      */
     discordFetch:
       ({
@@ -161,6 +161,9 @@ export const fakeGateway = async (
         }
         if (method === 'POST' && /^\/interactions\/\d+\/[^/]+\/callback$/.test(path)) {
           return new Response(null, { status: 204 })
+        }
+        if (method === 'PATCH' && /^\/webhooks\/\d+\/[^/]+\/messages\/@original$/.test(path)) {
+          return Response.json({ id: '111111111111111112' })
         }
         return new Response(null, { status: 404 })
       },

@@ -1,4 +1,4 @@
-import type { Storage } from '@discord-mcp/storage'
+import type { Storage, VoiceOptOutChange } from '@discord-mcp/storage'
 import type { Clock } from './clock.ts'
 import { createConsent } from './consent.ts'
 import { createIdentifyGate, type SessionStartLimit } from './identify.ts'
@@ -20,7 +20,7 @@ const VOICE_INTENTS = (1 << 0) | (1 << 7)
 export interface BotRuntimesOptions {
   readonly vault: TokenVault
   /** Where people's voice opt-outs are kept. */
-  readonly storage: Pick<Storage, 'setVoiceOptOut' | 'voiceOptedOut'>
+  readonly storage: Pick<Storage, 'setVoiceOptOut' | 'voiceOptedOut' | 'watchVoiceOptOuts'>
   readonly clock: Clock
   /** Operator-facing lifecycle messages and failures. Never receives a token. */
   readonly log: (message: string) => void
@@ -68,7 +68,7 @@ export interface BotRuntimes {
    * cannot move between processes, so bots leave their voice channels first. A shard whose leave
    * could not reach Discord keeps its session marked stale, so the next process brings it back
    * with a new session rather than one that still has the bot in a channel. Resolves once every
-   * pending storage write has settled.
+   * pending storage write has settled and opt-outs are no longer followed.
    */
   readonly close: () => Promise<void>
 }
@@ -115,21 +115,33 @@ export const createBotRuntimes = ({
   onDispatch,
 }: BotRuntimesOptions): BotRuntimes => {
   const running = new Map<string, Runtime>()
-  // An opt-out reaches this process's bots at once; other bot hosts' bots check again whenever
-  // the person next starts speaking.
+  const optOutChanged = ({ scope, userId, optedOut }: VoiceOptOutChange) => {
+    if ('everywhere' in scope) {
+      for (const runtime of running.values()) {
+        runtime.voice.optOutChanged(undefined, userId, optedOut)
+      }
+    } else {
+      running.get(scope.botId)?.voice.optOutChanged(scope.guildId, userId, optedOut)
+    }
+  }
+  // A click applies to this process's bots as soon as it is stored. Every bot host, this one
+  // included, hears it again from Postgres; should that connection drop, a bot checks storage
+  // whenever a person starts speaking.
   const consent = createConsent({
     storage,
     discordFetch,
     apiUrl: DISCORD_API_URL,
     log,
-    changed: (scope, userId) => {
-      if ('everywhere' in scope) {
-        for (const runtime of running.values()) runtime.voice.reconsider(undefined, userId)
-      } else {
-        running.get(scope.botId)?.voice.reconsider(scope.guildId, userId)
-      }
-    },
+    changed: optOutChanged,
   })
+  const watching = storage
+    .watchVoiceOptOuts(optOutChanged, (error) =>
+      log(`Lost the voice opt-out feed from Postgres; reconnecting: ${error.message}`),
+    )
+    .catch((cause) => {
+      log(`Could not follow voice opt-outs from other bot hosts: ${reason(cause)}`)
+      return async () => {}
+    })
   /**
    * Tokens Discord rejected, by bot, with the close code. Retrying them only spends Identifies,
    * until a workflow change may have fixed rejected intents.
@@ -439,6 +451,7 @@ export const createBotRuntimes = ({
       await Promise.all(writes.values())
       for (const { cancel } of retries.values()) cancel()
       retries.clear()
+      await (await watching)()
     },
   }
 }

@@ -1,4 +1,4 @@
-import type { Storage, VoiceOptOutScope } from '@discord-mcp/storage'
+import type { Storage, VoiceOptOutChange, VoiceOptOutScope } from '@discord-mcp/storage'
 
 /** Prefix of the custom IDs on Textile's own buttons. Clicks on them never reach workflows. */
 export const CONSENT_PREFIX = 'textile:voice:'
@@ -8,8 +8,9 @@ const ACTION_ROW = 1
 const SECONDARY = 2
 const MESSAGE_COMPONENT = 3
 const EPHEMERAL = 1 << 6
-const REPLY = 4
-const UPDATE_MESSAGE = 7
+/** Interaction callbacks: a new reply to come, or an edit to come of the clicked message. */
+const DEFERRED_REPLY = 5
+const DEFERRED_UPDATE = 6
 
 /** The notice's two buttons, and the undo that follows each. */
 const Buttons = {
@@ -42,6 +43,7 @@ const row = (...ids: ReadonlyArray<ButtonId>) => ({
 /** A click on a button, as `INTERACTION_CREATE` carries it. */
 interface Click {
   readonly id: string
+  readonly application_id: string
   readonly token: string
   readonly type: number
   readonly guild_id?: string
@@ -55,8 +57,8 @@ export interface ConsentOptions {
   readonly discordFetch: typeof fetch
   readonly apiUrl: string
   readonly log: (message: string) => void
-  /** A person's opt-out changed in `scope`: voices in it should check them again. */
-  readonly changed: (scope: VoiceOptOutScope, userId: string) => void
+  /** A person's opt-out changed: this process's voices apply it without waiting for storage. */
+  readonly changed: (change: VoiceOptOutChange) => void
 }
 
 export interface Consent {
@@ -68,8 +70,9 @@ export interface Consent {
   /** Whether a person opted out of relay by this bot in this server, or by every bot. */
   readonly optedOut: (botId: string, guildId: string, userId: string) => Promise<boolean>
   /**
-   * Answer a click on one of Textile's buttons, recording the opt-out or its undo before replying.
-   * False when the interaction isn't Textile's, so it goes on to the bot's workflows.
+   * Answer a click on one of Textile's buttons: acknowledge it at once, record the opt-out or its
+   * undo, then say so in the reply. False when the interaction isn't Textile's, so it goes on to
+   * the bot's workflows.
    */
   readonly answer: (botId: string, interaction: unknown) => boolean
 }
@@ -88,43 +91,46 @@ export const createConsent = ({
   /** Each person's clicks, chained so an undo never lands before the opt-out it undoes. */
   const clicks = new Map<string, Promise<void>>()
 
-  const reply = async (click: Click, body: unknown) => {
-    const response = await discordFetch(
-      `${apiUrl}/interactions/${click.id}/${click.token}/callback`,
-      {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-      },
-    )
+  /** An interaction's callback or follow-up, which its token authorizes. */
+  const call = async (method: string, path: string, body: unknown) => {
+    const response = await discordFetch(`${apiUrl}${path}`, {
+      method,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
     if (!response.ok) throw new Error(`Discord answered ${response.status}`)
   }
 
+  /** Record the click, then edit the acknowledged reply to say what happened. */
   const record = async (
     botId: string,
     click: Click,
     id: ButtonId,
     guildId: string,
     userId: string,
+    acknowledged: Promise<void>,
   ) => {
     const { optedOut, scope: kind } = Buttons[id]
     const scope: VoiceOptOutScope = kind === 'all' ? { everywhere: true } : { botId, guildId }
-    // The notice's buttons reply anew; an undo replaces the reply it sits on.
-    const type = optedOut ? REPLY : UPDATE_MESSAGE
+    let reply: { readonly content: string; readonly components: ReadonlyArray<unknown> }
     try {
       await storage.setVoiceOptOut(scope, userId, optedOut)
+      changed({ scope, userId, optedOut })
+      reply = {
+        content: Copy[id],
+        components: optedOut ? [row(kind === 'all' ? 'undo:all' : 'undo:bot')] : [],
+      }
     } catch (cause) {
       log(`Recording a voice opt-out for bot ${botId} failed: ${String(cause)}`)
       // A failed undo keeps its button; a failed opt-out leaves the notice's buttons to retry.
-      const retry = optedOut ? [] : [row(id)]
-      return reply(click, {
-        type,
-        data: { content: Copy.failed, flags: EPHEMERAL, components: retry },
-      })
+      reply = { content: Copy.failed, components: optedOut ? [] : [row(id)] }
     }
-    changed(scope, userId)
-    const undo = optedOut ? [row(kind === 'all' ? 'undo:all' : 'undo:bot')] : []
-    await reply(click, { type, data: { content: Copy[id], flags: EPHEMERAL, components: undo } })
+    await acknowledged
+    await call(
+      'PATCH',
+      `/webhooks/${click.application_id}/${click.token}/messages/@original`,
+      reply,
+    )
   }
 
   return {
@@ -154,8 +160,19 @@ export const createConsent = ({
       // Notices are only posted in servers, so a click without one isn't from a notice.
       if (!(id in Buttons) || click.guild_id === undefined || userId === undefined) return true
       const guildId = click.guild_id
+      // Discord drops an answer that takes over three seconds, so acknowledge at once: the
+      // notice's buttons get a new ephemeral reply, and an undo will edit the reply it sits on.
+      const acknowledged = call(
+        'POST',
+        `/interactions/${click.id}/${click.token}/callback`,
+        Buttons[id as ButtonId].optedOut
+          ? { type: DEFERRED_REPLY, data: { flags: EPHEMERAL } }
+          : { type: DEFERRED_UPDATE },
+      )
+      // Awaited by `record`, which still saves a click whose acknowledgement failed.
+      acknowledged.catch(() => {})
       const next = (clicks.get(userId) ?? Promise.resolve())
-        .then(() => record(botId, click, id as ButtonId, guildId, userId))
+        .then(() => record(botId, click, id as ButtonId, guildId, userId, acknowledged))
         .catch((cause) =>
           log(`Answering a voice opt-out for bot ${botId} failed: ${String(cause)}`),
         )

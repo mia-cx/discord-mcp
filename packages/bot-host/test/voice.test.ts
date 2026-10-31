@@ -37,6 +37,8 @@ const start = async ({
   members = [ALICE],
   sendMessages = true,
   onDispatch = (_botId: string, _event: string, _data: unknown) => {},
+  /** Stands between the bot and the fake Discord, as for slowing a request. */
+  through = (discordFetch: typeof fetch): typeof fetch => discordFetch,
 } = {}) => {
   const storage = await inMemoryStorage()
   const voiceServer = await fakeVoiceServer({ members })
@@ -51,7 +53,7 @@ const start = async ({
     storage,
     clock,
     log: () => {},
-    discordFetch: gateway.discordFetch({ shards, sendMessages }),
+    discordFetch: through(gateway.discordFetch({ shards, sendMessages })),
     onDispatch,
   })
   cleanup.push(storage.close, voiceServer.close, gateway.close, bots.close)
@@ -342,6 +344,7 @@ const click = (gateway: Awaited<ReturnType<typeof fakeGateway>>, userId: string,
     s: 1000 + ++clicks,
     d: {
       id: String(900000000000000000 + clicks),
+      application_id: BOT_ID,
       token: `interaction-token-${clicks}`,
       type: 3,
       guild_id: GUILD_ID,
@@ -351,6 +354,16 @@ const click = (gateway: Awaited<ReturnType<typeof fakeGateway>>, userId: string,
   })
 
 const NOTICE = `/channels/${FAKE_VOICE_CHANNEL_ID}/messages`
+const ELSEWHERE = '345678901234567891'
+
+/** A moderator drags the bot into another voice channel. */
+const moveBot = (gateway: Awaited<ReturnType<typeof fakeGateway>>, channelId: string) =>
+  gateway.connections[0]?.send({
+    op: 0,
+    t: 'VOICE_STATE_UPDATE',
+    s: 999,
+    d: { guild_id: GUILD_ID, channel_id: channelId, user_id: BOT_ID, session_id: 'moved' },
+  })
 const voiceStates = (gateway: Awaited<ReturnType<typeof fakeGateway>>) =>
   (gateway.connections[0]?.received ?? []).filter(({ op }) => op === 4)
 
@@ -473,23 +486,97 @@ describe('receiving voice', () => {
     voice.attach(GUILD_ID, socket, { codec: 'opus' })
     await vi.waitFor(() => expect(heard.events).toEqual([{ type: 'join', user_id: ALICE }]))
 
-    // A moderator drags the bot into another channel.
-    const elsewhere = '345678901234567891'
-    gateway.connections[0]?.send({
-      op: 0,
-      t: 'VOICE_STATE_UPDATE',
-      s: 999,
-      d: { guild_id: GUILD_ID, channel_id: elsewhere, user_id: BOT_ID, session_id: 'moved' },
-    })
+    moveBot(gateway, ELSEWHERE)
     await vi.waitFor(() => expect(heard.events.at(-1)).toEqual({ type: 'leave', user_id: ALICE }))
     await vi.waitFor(() =>
       expect(voiceStates(gateway).at(-1)).toMatchObject({
-        d: { channel_id: elsewhere, self_deaf: true },
+        d: { channel_id: ELSEWHERE, self_deaf: true },
       }),
     )
     await voiceServer.speak(ALICE, speech(3, 0xa0))
     await settle()
     expect(heard.audio).toEqual([])
+  })
+
+  it("forgets the old channel's people when the bot is moved while only sending", async () => {
+    const { voice, voiceServer, gateway } = await start()
+    await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID)
+    await daveReady(voiceServer)
+    const { agent, socket } = await agentSocket()
+    const heard = listen(agent)
+    voice.attach(GUILD_ID, socket, { codec: 'opus' })
+    moveBot(gateway, ELSEWHERE)
+    await settle()
+
+    expect(await voice.join(GUILD_ID, ELSEWHERE, true)).toEqual({ receiving: true })
+    expect(gateway.rest).toContainEqual(
+      expect.objectContaining({ path: `/channels/${ELSEWHERE}/messages` }),
+    )
+    await settle()
+    expect(heard.events).toEqual([])
+  })
+
+  it('lets the latest join decide while a notice is still being posted', async () => {
+    let release = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const notices: string[] = []
+    const { voice, voiceServer, gateway } = await start({
+      through: (discordFetch) => async (input, init) => {
+        const path = new URL(String(input)).pathname
+        if (path.endsWith('/messages')) {
+          notices.push(path)
+          await held
+        }
+        return discordFetch(input, init)
+      },
+    })
+    await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID)
+    await daveReady(voiceServer)
+
+    // Asked to receive, then to only send, before the notice is up: sending wins.
+    const receiving = voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID, true)
+    await vi.waitFor(() => expect(notices).toHaveLength(1))
+    expect(await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID)).toEqual({ receiving: false })
+    // Asked to receive again, then moved, before the notice is up: the new channel needs its own.
+    const stale = voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID, true)
+    moveBot(gateway, ELSEWHERE)
+    await settle()
+    const moved = voice.join(GUILD_ID, ELSEWHERE, true)
+    await vi.waitFor(() => expect(notices).toHaveLength(2))
+    expect(notices[1]).toBe(`/api/v10/channels/${ELSEWHERE}/messages`)
+
+    release()
+    expect(await receiving).toEqual({ receiving: false })
+    expect(await stale).toEqual({ receiving: false })
+    expect(await moved).toEqual({ receiving: true })
+    await vi.waitFor(() =>
+      expect(voiceStates(gateway).at(-1)).toMatchObject({
+        d: { channel_id: ELSEWHERE, self_deaf: false },
+      }),
+    )
+    expect(
+      voiceStates(gateway).filter(
+        ({ d }) => (d as { channel_id: string }).channel_id === FAKE_VOICE_CHANNEL_ID,
+      ),
+    ).toEqual([expect.objectContaining({ d: expect.objectContaining({ self_deaf: true }) })])
+  })
+
+  it("applies another bot host's opt-out and undo at once", async () => {
+    const { voice, voiceServer, storage } = await start()
+    await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID, true)
+    await daveReady(voiceServer)
+    const { agent, socket } = await agentSocket()
+    const heard = listen(agent)
+    voice.attach(GUILD_ID, socket, { codec: 'opus' })
+    await vi.waitFor(() => expect(heard.events).toEqual([{ type: 'join', user_id: ALICE }]))
+
+    // What another bot host stores when someone clicks its bot's notice.
+    await storage.setVoiceOptOut({ everywhere: true }, ALICE, true)
+    await vi.waitFor(() => expect(heard.events.at(-1)).toEqual({ type: 'leave', user_id: ALICE }))
+    await storage.setVoiceOptOut({ everywhere: true }, ALICE, false)
+    await vi.waitFor(() => expect(heard.events.at(-1)).toEqual({ type: 'join', user_id: ALICE }))
   })
 
   it('drops a speaker who opts out of this bot at once, never tells workflows, and undoes it', async () => {
@@ -504,16 +591,21 @@ describe('receiving voice', () => {
 
     click(gateway, ALICE, 'opt-out:bot')
     await vi.waitFor(() => expect(heard.events.at(-1)).toEqual({ type: 'leave', user_id: ALICE }))
-    expect(gateway.rest.at(-1)).toMatchObject({
-      path: expect.stringMatching(/^\/interactions\/\d+\/interaction-token-\d+\/callback$/),
-      body: {
-        type: 4,
-        data: {
-          flags: 64,
-          components: [{ components: [{ custom_id: 'textile:voice:undo:bot' }] }],
+    // Acknowledged privately at once, then the reply says what happened and offers an undo.
+    await vi.waitFor(() =>
+      expect(gateway.rest.slice(-2)).toMatchObject([
+        {
+          method: 'POST',
+          path: expect.stringMatching(/^\/interactions\/\d+\/interaction-token-\d+\/callback$/),
+          body: { type: 5, data: { flags: 64 } },
         },
-      },
-    })
+        {
+          method: 'PATCH',
+          path: `/webhooks/${BOT_ID}/interaction-token-${clicks}/messages/@original`,
+          body: { components: [{ components: [{ custom_id: 'textile:voice:undo:bot' }] }] },
+        },
+      ]),
+    )
     expect(await storage.voiceOptedOut(BOT_ID, GUILD_ID, ALICE)).toBe(true)
     expect(await storage.voiceOptedOut(BOT_ID, '234567890123456780', ALICE)).toBe(false)
     await voiceServer.speak(ALICE, speech(3, 0xa0))
@@ -522,7 +614,12 @@ describe('receiving voice', () => {
 
     click(gateway, ALICE, 'undo:bot')
     await vi.waitFor(() => expect(heard.events.at(-1)).toEqual({ type: 'join', user_id: ALICE }))
-    expect(gateway.rest.at(-1)).toMatchObject({ body: { type: 7, data: { components: [] } } })
+    await vi.waitFor(() =>
+      expect(gateway.rest.slice(-2)).toMatchObject([
+        { method: 'POST', body: { type: 6 } },
+        { method: 'PATCH', body: { components: [] } },
+      ]),
+    )
     expect(await storage.voiceOptedOut(BOT_ID, GUILD_ID, ALICE)).toBe(false)
     const after = speech(2, 0xa1)
     await voiceServer.speak(ALICE, after)

@@ -226,10 +226,10 @@ export interface Voice extends BotVoice {
   /** Whether an agent's voice socket is open, which keeps the bot online. */
   readonly streaming: () => boolean
   /**
-   * A person's opt-out changed, in one server or in every one: check them again, so the change
-   * reaches the agent at once.
+   * A person opted out in one server, or in every one when `guildId` is undefined, or undid it.
+   * An opt-out drops them at once; an undo checks storage again, since another opt-out may hold.
    */
-  readonly reconsider: (guildId: string | undefined, userId: string) => void
+  readonly optOutChanged: (guildId: string | undefined, userId: string, optedOut: boolean) => void
   /**
    * Leave every voice channel and close every socket, as the bot goes offline. Returns the shards
    * whose leaves could not reach Discord, whose sessions would keep the bot in those channels.
@@ -267,8 +267,10 @@ interface Session {
   relay: Relay | undefined
   /** The channel whose chat shows the notice, while the bot relays it. */
   receiving: string | undefined
-  /** The notice being posted, so concurrent joins post it once. */
-  noticing: Promise<string | undefined> | undefined
+  /** The channel the latest join asked to relay, if any. A stale notice never starts relaying. */
+  wanted: string | undefined
+  /** The notice being posted, so concurrent joins in its channel post it once. */
+  noticing: { readonly channelId: string; readonly posted: Promise<string | undefined> } | undefined
   /** People in the channel besides the bot, by user ID. */
   readonly people: Map<string, Person>
   /** How to close the socket once the connection is destroyed. */
@@ -443,17 +445,34 @@ export const createVoice = ({ botId, shardOf, send, consent, clock, log }: Voice
     for (const userId of session.people.keys()) sync(session, userId)
   }
 
+  /** Drop a person who just opted out, before storage could be asked again. */
+  const revoke = (session: Session, userId: string) => {
+    const person = session.people.get(userId)
+    if (person === undefined) return
+    // An answer still on its way predates the opt-out.
+    person.checks += 1
+    person.allowed = false
+    sync(session, userId)
+  }
+
   /** Post the notice, then relay everyone who hasn't opted out. */
   const listen = async (session: Session): Promise<Joined> => {
     const channelId = session.connection.joinConfig.channelId
+    session.wanted = channelId ?? undefined
     if (channelId === null) return { receiving: false }
     if (session.receiving === channelId) return { receiving: true }
-    session.noticing ??= consent.notice(channelId)
+    if (session.noticing?.channelId !== channelId) {
+      session.noticing = { channelId, posted: consent.notice(channelId) }
+    }
     const noticing = session.noticing
-    const refused = await noticing
+    const refused = await noticing.posted
     if (session.noticing === noticing) session.noticing = undefined
     if (refused !== undefined) return { receiving: false, reason: refused }
     if (sessions.get(session.guildId) !== session) throw new Error(LEFT.reason)
+    // Moved, or a later join asked to only send, while the notice was posted.
+    if (session.wanted !== channelId || session.connection.joinConfig.channelId !== channelId) {
+      return { receiving: session.receiving !== undefined }
+    }
     if (session.receiving !== channelId) {
       session.receiving = channelId
       // Joined deafened, so the bot is seen to listen only once the notice is up.
@@ -468,10 +487,12 @@ export const createVoice = ({ botId, shardOf, send, consent, clock, log }: Voice
     session: Session,
     channelId = session.connection.joinConfig.channelId,
   ): Joined => {
+    session.wanted = undefined
     if (session.receiving === undefined) return { receiving: false }
     session.receiving = undefined
-    if (channelId !== null)
+    if (channelId !== null) {
       session.connection.rejoin({ channelId, selfDeaf: true, selfMute: false })
+    }
     for (const userId of session.people.keys()) sync(session, userId)
     return { receiving: false }
   }
@@ -512,6 +533,7 @@ export const createVoice = ({ botId, shardOf, send, consent, clock, log }: Voice
       socket: undefined,
       relay: undefined,
       receiving: undefined,
+      wanted: undefined,
       noticing: undefined,
       people: new Map(),
       ending: LEFT,
@@ -640,8 +662,9 @@ export const createVoice = ({ botId, shardOf, send, consent, clock, log }: Voice
       const adapter = adapters.get(voice.guild_id)
       if (event === 'VOICE_STATE_UPDATE' && voice.user_id === botId) {
         const session = sessions.get(voice.guild_id)
-        // Moved to a channel whose chat has no notice: the agent must join it to receive again.
-        if (session?.receiving !== undefined && voice.channel_id !== session.receiving) {
+        // Moved, or disconnected, by someone else. The new channel's chat has no notice, so the
+        // agent must join it to receive again, and its people are yet to be named.
+        if (session !== undefined && voice.channel_id !== session.connection.joinConfig.channelId) {
           deafen(session, voice.channel_id ?? null)
           for (const userId of [...session.people.keys()]) depart(session, userId)
         }
@@ -678,9 +701,11 @@ export const createVoice = ({ botId, shardOf, send, consent, clock, log }: Voice
       return true
     },
     streaming: () => [...sessions.values()].some((session) => session.socket !== undefined),
-    reconsider: (guildId, userId) => {
+    optOutChanged: (guildId, userId, optedOut) => {
       for (const session of sessions.values()) {
-        if (guildId === undefined || session.guildId === guildId) check(session, userId)
+        if (guildId !== undefined && session.guildId !== guildId) continue
+        if (optedOut) revoke(session, userId)
+        else check(session, userId)
       }
     },
     close: () => {

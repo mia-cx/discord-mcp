@@ -3,7 +3,7 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import { Client, Pool } from 'pg'
 import { advisoryLocks } from './locks.ts'
 import * as schema from './schema.ts'
-import { createStorage, migrationsFolder, rootMessage } from './store.ts'
+import { createStorage, type Listen, migrationsFolder, rootMessage } from './store.ts'
 
 /** What a workflow revision may do: catalog operation IDs, operation families, outbound hosts. */
 export interface WorkflowGrants {
@@ -87,6 +87,13 @@ export interface WorkflowRunQuery {
 export type VoiceOptOutScope =
   | { readonly botId: string; readonly guildId: string }
   | { readonly everywhere: true }
+
+/** A person opting out of voice relay in `scope`, or back in. */
+export interface VoiceOptOutChange {
+  readonly scope: VoiceOptOutScope
+  readonly userId: string
+  readonly optedOut: boolean
+}
 
 export interface PublishWorkflow {
   readonly botId: string
@@ -203,6 +210,15 @@ export interface Storage {
   ) => Promise<void>
   /** Whether a person opted out of relay by this bot in this server, or by every bot. */
   readonly voiceOptedOut: (botId: string, guildId: string, userId: string) => Promise<boolean>
+  /**
+   * Hear every voice opt-out change any process sharing this database makes, this one included,
+   * once it commits. Resolves to a function that stops listening. A lost connection reconnects;
+   * changes made while it is down are missed, and `onError` hears why.
+   */
+  readonly watchVoiceOptOuts: (
+    listener: (change: VoiceOptOutChange) => void,
+    onError: (error: Error) => void,
+  ) => Promise<() => Promise<void>>
   readonly close: () => Promise<void>
 }
 
@@ -225,6 +241,64 @@ const KEEPALIVE_PROBES = 3
  * replaces the lost connection on next use. `url` must reach the primary directly, with no pooler:
  * the scheduler's session locks need a session of their own, which sets its own keepalives.
  */
+/** How long a lost listening connection waits before reconnecting. */
+const RELISTEN_MS = 1_000
+
+/**
+ * Listen on its own connection, since a pooled one goes back to other queries. A lost connection
+ * reconnects until stopped. Rejects only when the first connection fails.
+ */
+const listenOn =
+  (url: string): Listen =>
+  (channel, onPayload, onError) =>
+    new Promise((resolve, reject) => {
+      let stopped = false
+      let current: Client | undefined
+      let retry: ReturnType<typeof setTimeout> | undefined
+      const stop = async () => {
+        stopped = true
+        clearTimeout(retry)
+        await current?.end().catch(() => {})
+      }
+      const open = (first: boolean) => {
+        const client = new Client({
+          connectionString: url,
+          connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
+        })
+        current = client
+        let lost = false
+        const reopen = (error: Error) => {
+          if (lost || stopped) return
+          lost = true
+          onError(error)
+          void client.end().catch(() => {})
+          retry = setTimeout(() => open(false), RELISTEN_MS)
+        }
+        client.on('error', reopen)
+        client.on('end', () => reopen(new Error('The listening connection to Postgres ended.')))
+        client.on('notification', (message) => {
+          if (message.channel === channel && message.payload !== undefined) {
+            onPayload(message.payload)
+          }
+        })
+        client
+          .connect()
+          .then(() => client.query(`listen "${channel}"`))
+          .then(
+            () => {
+              if (first) resolve(stop)
+            },
+            (error: Error) => {
+              if (!first) return reopen(error)
+              stopped = true
+              void client.end().catch(() => {})
+              reject(error)
+            },
+          )
+      }
+      open(true)
+    })
+
 export const connectStorage = async (
   url: string,
   onError: (error: Error) => void,
@@ -273,5 +347,5 @@ export const connectStorage = async (
       close: () => client.end(),
     }
   })
-  return createStorage(db, locks, () => pool.end())
+  return createStorage(db, locks, () => pool.end(), listenOn(url))
 }

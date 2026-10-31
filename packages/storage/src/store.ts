@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url'
 import { and, desc, eq, gte, isNotNull, lt, lte, ne, sql } from 'drizzle-orm'
 import type { PgDatabase, PgQueryResultHKT } from 'drizzle-orm/pg-core'
-import type { Storage, WorkflowChange, WorkflowRevision } from './index.ts'
+import type { Storage, VoiceOptOutChange, WorkflowChange, WorkflowRevision } from './index.ts'
 import type { AdvisoryLocks } from './locks.ts'
 import * as schema from './schema.ts'
 
@@ -58,10 +58,24 @@ const record = (
 /** Advisory lock names, so other locks can never collide with the scheduler's. */
 const scheduleLock = (botId: string) => `textile-schedules:${botId}`
 
+/** The Postgres notification channel that carries voice opt-out changes between processes. */
+const VOICE_OPT_OUTS_CHANNEL = 'voice_opt_outs'
+
+/**
+ * Listen on a Postgres notification channel through the driver, hearing each payload. Resolves to
+ * a function that stops listening.
+ */
+export type Listen = (
+  channel: string,
+  onPayload: (payload: string) => void,
+  onError: (error: Error) => void,
+) => Promise<() => Promise<void>>
+
 export const createStorage = (
   db: Db,
   locks: AdvisoryLocks,
   close: () => Promise<void>,
+  listen: Listen,
 ): Storage => ({
   storeSealedToken: async (botId, sealedToken) => {
     try {
@@ -397,26 +411,30 @@ export const createStorage = (
     return deleted.length
   },
 
-  setVoiceOptOut: async (scope, userId, optedOut) => {
-    if ('everywhere' in scope) {
-      await (optedOut
-        ? db.insert(voiceGlobalOptOuts).values({ userId }).onConflictDoNothing()
-        : db.delete(voiceGlobalOptOuts).where(eq(voiceGlobalOptOuts.userId, userId)))
-      return
-    }
-    const { botId, guildId } = scope
-    await (optedOut
-      ? db.insert(voiceOptOuts).values({ botId, guildId, userId }).onConflictDoNothing()
-      : db
-          .delete(voiceOptOuts)
-          .where(
-            and(
-              eq(voiceOptOuts.botId, botId),
-              eq(voiceOptOuts.guildId, guildId),
-              eq(voiceOptOuts.userId, userId),
-            ),
-          ))
-  },
+  setVoiceOptOut: (scope, userId, optedOut) =>
+    db.transaction(async (tx) => {
+      if ('everywhere' in scope) {
+        await (optedOut
+          ? tx.insert(voiceGlobalOptOuts).values({ userId }).onConflictDoNothing()
+          : tx.delete(voiceGlobalOptOuts).where(eq(voiceGlobalOptOuts.userId, userId)))
+      } else {
+        const { botId, guildId } = scope
+        await (optedOut
+          ? tx.insert(voiceOptOuts).values({ botId, guildId, userId }).onConflictDoNothing()
+          : tx
+              .delete(voiceOptOuts)
+              .where(
+                and(
+                  eq(voiceOptOuts.botId, botId),
+                  eq(voiceOptOuts.guildId, guildId),
+                  eq(voiceOptOuts.userId, userId),
+                ),
+              ))
+      }
+      // Delivered to every listening process when the transaction commits.
+      const change = JSON.stringify({ scope, userId, optedOut })
+      await tx.execute(sql`select pg_notify(${VOICE_OPT_OUTS_CHANNEL}, ${change})`)
+    }),
 
   voiceOptedOut: async (botId, guildId, userId) => {
     const found = await db
@@ -438,6 +456,13 @@ export const createStorage = (
       .limit(1)
     return found.length > 0
   },
+
+  watchVoiceOptOuts: (listener, onError) =>
+    listen(
+      VOICE_OPT_OUTS_CHANNEL,
+      (payload) => listener(JSON.parse(payload) as VoiceOptOutChange),
+      onError,
+    ),
 
   close: async () => {
     await locks.close()
