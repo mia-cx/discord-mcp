@@ -6,7 +6,8 @@ import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createRelay } from '../src/relay.ts'
 import { ownerOf } from '../src/router.ts'
-import { createBotHost, forwardToBotHosts } from '../src/tiers.ts'
+import type { ServeRoute } from '../src/routes.ts'
+import { createBotHost, forwardRoutesToBotHosts, forwardToBotHosts } from '../src/tiers.ts'
 import { botToken, config, discordOAuth, executor, login } from './login-fixture.ts'
 
 const BIN = fileURLToPath(new URL('../src/bin.ts', import.meta.url))
@@ -334,5 +335,66 @@ describe('forwarding to a bot host', () => {
       }),
     )
     expect(execute).toHaveBeenCalledWith(expect.any(Request), botToken(botId), botId, human)
+  })
+
+  it("runs a workflow route on the bot's owner with the caller's own headers, never the secret", async () => {
+    const botId = '345678901234567890'
+    const serve = vi.fn<ServeRoute>(
+      async () =>
+        new Response('accepted', {
+          status: 202,
+          headers: { 'content-type': 'text/plain', 'set-cookie': 'relay-session=forged' },
+        }),
+    )
+    let botHost: ReturnType<typeof createBotHost> | undefined
+    const host = createServer(async (request, response) => {
+      let body = ''
+      for await (const chunk of request) body += String(chunk)
+      const answer = await botHost?.fetch(
+        new Request(`http://127.0.0.1${request.url}`, {
+          method: request.method ?? 'GET',
+          headers: request.headers as Record<string, string>,
+          ...(body === '' ? {} : { body }),
+        }),
+      )
+      response.writeHead(answer?.status ?? 500, Object.fromEntries(answer?.headers ?? []))
+      response.end(await answer?.text())
+    }).listen(0, '127.0.0.1')
+    await once(host, 'listening')
+    const url = `http://127.0.0.1:${(host.address() as AddressInfo).port}`
+    botHost = createBotHost({ hosts: [url], secret: SECRET, self: url }, executor(), {
+      route: serve,
+    })
+    const relay = createRelay(config, forwardToBotHosts({ hosts: [url], secret: SECRET }), fetch, {
+      route: forwardRoutesToBotHosts({ hosts: [url], secret: SECRET }),
+    })
+
+    const response = await relay.fetch(
+      new Request(`https://relay.test/workflows/${botId}/deploys/github?delivery=1`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer webhook-secret', cookie: 'relay-session=private' },
+        body: 'payload',
+      }),
+    )
+    const skipped = await fetch(`${url}/workflows/${botId}/deploys`, {
+      method: 'POST',
+      body: '{}',
+    })
+    host.close()
+
+    expect(response.status).toBe(202)
+    expect(await response.text()).toBe('accepted')
+    expect(response.headers.get('set-cookie')).toBeNull()
+    expect(serve).toHaveBeenCalledOnce()
+    const [servedBot, name, request] = serve.mock.calls[0] ?? []
+    expect([servedBot, name]).toEqual([botId, 'deploys'])
+    expect(request).toMatchObject({
+      method: 'POST',
+      url: `https://relay.test/workflows/${botId}/deploys/github?delivery=1`,
+      body: Buffer.from('payload').toString('base64'),
+    })
+    expect(request?.headers).toContainEqual(['authorization', 'Bearer webhook-secret'])
+    expect(request?.headers.map(([header]) => header)).not.toContain('cookie')
+    expect(skipped.status).toBe(401)
   })
 })

@@ -33,6 +33,24 @@ export interface GatewayEvent {
   readonly d: Record<string, unknown>
 }
 
+/** An inbound HTTP request for a workflow's fetch handler. */
+export interface RouteRequest {
+  readonly method: string
+  /** The public URL the caller requested. */
+  readonly url: string
+  readonly headers: ReadonlyArray<readonly [string, string]>
+  /** The exact bytes the caller sent, in base64. */
+  readonly body: string
+}
+
+/** What a fetch handler answered, as its run reports it: untrusted agent output. */
+export interface RouteResult {
+  readonly status: number
+  readonly contentType: string | null
+  /** In base64. */
+  readonly body: string
+}
+
 /** One firing of a workflow's cron schedule. */
 export interface ScheduleTick {
   readonly cron: string
@@ -68,12 +86,14 @@ export interface ScriptExecution {
   readonly modules: ReadonlyArray<ScriptModule>
   /**
    * What to run. Omitted, the script's default export; `event`, a workflow's listeners for one
-   * Gateway dispatch; `tick`, its `schedule` listeners for one firing of a cron schedule; `probe`,
-   * a report of the events, intents, and schedules a workflow's clients declare.
+   * Gateway dispatch; `tick`, its `schedule` listeners for one firing of a cron schedule;
+   * `request`, its fetch handler, answering with a `RouteResult`; `probe`, a report of the events,
+   * intents, and schedules a workflow's clients declare and whether it has a fetch handler.
    */
   readonly input?:
     | { readonly event: GatewayEvent }
     | { readonly tick: ScheduleTick }
+    | { readonly request: RouteRequest }
     | { readonly probe: true }
   /**
    * Takes a slot set aside for interactions, which Discord expects answered within three seconds,
@@ -239,6 +259,9 @@ const execute = async (execution: ScriptExecution): Promise<ScriptOutcome> => {
       join(dir, 'config.capnp'),
       configFor(workerd, execution.modules, brokerSocket, runSocket),
     )
+    // Abandoned during setup: reject as the abort listener below would, rather than spawn a
+    // process the signal kills at once and report it as a crash.
+    execution.signal?.throwIfAborted()
     const child = spawn(workerd.default, ['serve', 'config.capnp'], {
       cwd: dir,
       env: {},
@@ -329,7 +352,8 @@ const slots = (size: number) => {
     }
   }
   return {
-    acquire: (botId: string, withinMs?: number) => {
+    /** Wait for a slot, giving up after `withinMs` or once `signal` aborts. */
+    acquire: (botId: string, withinMs?: number, signal?: AbortSignal) => {
       // A bot's runs start in order, so one with a line joins its end.
       if (!waiting.has(botId) && canTake(botId)) {
         take(botId)
@@ -338,17 +362,26 @@ const slots = (size: number) => {
       return new Promise<void>((resolve, reject) => {
         const admit = () => {
           clearTimeout(timer)
+          signal?.removeEventListener('abort', abandon)
           resolve()
         }
+        const withdraw = (reason: unknown) => {
+          clearTimeout(timer)
+          signal?.removeEventListener('abort', abandon)
+          const rest = (waiting.get(botId) ?? []).filter((waiter) => waiter !== admit)
+          if (rest.length > 0) waiting.set(botId, rest)
+          else waiting.delete(botId)
+          reject(reason)
+        }
+        const abandon = () => withdraw(signal?.reason)
         const timer =
           withinMs === undefined
             ? undefined
-            : setTimeout(() => {
-                const rest = (waiting.get(botId) ?? []).filter((waiter) => waiter !== admit)
-                if (rest.length > 0) waiting.set(botId, rest)
-                else waiting.delete(botId)
-                reject(new Error(`No process slot freed within ${withinMs} ms.`))
-              }, withinMs)
+            : setTimeout(
+                () => withdraw(new Error(`No process slot freed within ${withinMs} ms.`)),
+                withinMs,
+              )
+        signal?.addEventListener('abort', abandon, { once: true })
         waiting.set(botId, [...(waiting.get(botId) ?? []), admit])
       })
     },
@@ -384,7 +417,7 @@ export const makeIsolateHost = (
       const pool = execution.urgent ? urgent : ordinary
       const current = previous.then(async () => {
         execution.signal?.throwIfAborted()
-        await pool.acquire(execution.botId, execution.admitWithinMs)
+        await pool.acquire(execution.botId, execution.admitWithinMs, execution.signal)
         try {
           execution.signal?.throwIfAborted()
           return await execute(execution)

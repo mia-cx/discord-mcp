@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { McpRequestContext, type Principal, ValidationError } from '@discord-mcp/core'
 import type { DiscordRest } from '@discord-mcp/discord-api/relay'
 import type {
@@ -14,7 +15,14 @@ import { type KvStore, makeBroker, type Presence } from './broker.ts'
 import { bundleWorkflow, ScriptBuildError, type ScriptModule, withRuntime } from './bundle.ts'
 import { checkScheduleFloor, MIN_SCHEDULE_INTERVAL_MINUTES, parseCron } from './cron.ts'
 import { type Dependencies, DependencyError, withDependencies } from './dependencies.ts'
-import type { GatewayEvent, IsolateHost, ScheduleTick, ScriptOutcome } from './isolate-host.ts'
+import type { ForwardedInteraction } from './grants.ts'
+import type {
+  GatewayEvent,
+  IsolateHost,
+  RouteRequest,
+  ScheduleTick,
+  ScriptOutcome,
+} from './isolate-host.ts'
 import { makeScheduler, type SchedulerClock } from './schedules.ts'
 import { unsupportedUses } from './unsupported.ts'
 
@@ -98,13 +106,34 @@ const PRIVILEGED: ReadonlyArray<readonly [string, number, number]> = [
   ['MessageContent', 1 << 15, (1 << 18) | (1 << 19)],
 ]
 
-const NAME = /^[a-z0-9][a-z0-9-]{0,62}$/
+/** A workflow's name, unique per bot. */
+export const WORKFLOW_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/
 const SOURCE_LIMIT_BYTES = 256 * 1024
 const PROBE_TIMEOUT_MS = 10_000
 /** How long an interaction may wait for a process slot and still be answered in time. */
 const INTERACTION_ADMISSION_MS = 2_000
 /** How long one workflow may take over one event. */
 export const EVENT_TIMEOUT_MS = 30_000
+/** How long a fetch handler may take. Webhook senders give up after about ten seconds. */
+export const ROUTE_TIMEOUT_MS = 10_000
+/** The largest request body a route accepts. Webhook payloads are small. */
+export const ROUTE_BODY_LIMIT_BYTES = 1024 * 1024
+/** How long a route request may wait for a process slot before it is turned away. */
+const ROUTE_ADMISSION_MS = 2_000
+/**
+ * Route requests one bot may have waiting or running. Callers are anonymous, so more are turned
+ * away rather than queued.
+ */
+const ROUTE_REQUESTS_PER_BOT = 8
+
+/**
+ * Inbound HTTP routes live under this prefix, which no built-in endpoint uses, so a route can
+ * never shadow one.
+ */
+export const ROUTE_PREFIX = '/workflows/'
+/** A workflow's route, namespaced by its bot. Any path below it reaches the same workflow. */
+export const routePath = (botId: string, name: string) => `${ROUTE_PREFIX}${botId}/${name}`
+
 /** What a workflow's KV keys and values may take together. */
 export const KV_LIMIT_BYTES = 1024 * 1024
 export const KV_KEY_LIMIT_BYTES = 512
@@ -132,7 +161,10 @@ export interface WorkflowEvent {
 export interface WorkflowBots {
   readonly hold: (botId: string, intents: number | undefined) => Promise<void>
   readonly updatePresence: (botId: string, presence: Presence) => void
+  /** The token of a bot running on this host, which route requests act with. */
   readonly tokenOf: (botId: string) => string | undefined
+  /** Whether enabled workflows hold this bot here, even while Discord has it offline. */
+  readonly holds: (botId: string) => boolean
 }
 
 export interface WorkflowHostOptions {
@@ -175,6 +207,8 @@ export interface WorkflowListing {
       readonly revision: number
       readonly events: ReadonlyArray<string>
       readonly intents: ReadonlyArray<string>
+      /** The path of its inbound HTTP route, or null when it has no fetch handler. */
+      readonly route: string | null
       readonly schedules: ReadonlyArray<string>
       readonly grants: WorkflowGrants
       readonly packages: ReadonlyArray<string>
@@ -220,6 +254,19 @@ export interface WorkflowHost {
   ) => Promise<ReadonlyArray<RecordedWorkflowRun>>
   /** Run every enabled workflow that listens for this event. Events of one guild run in order. */
   readonly dispatch: (event: WorkflowEvent) => void
+  /**
+   * Answer a request to an enabled workflow's route with its fetch handler, abandoning it once
+   * `signal` aborts. Every failure is a bare status: 404 for a bot this host doesn't hold or a
+   * workflow that isn't enabled or has no route, 503 while busy, while an enabled route's bot is
+   * offline, or when its revision stops mid-request, 504 past a deadline, and 502 when the
+   * handler fails. Details go to the operator log only.
+   */
+  readonly serve: (
+    botId: string,
+    name: string,
+    request: RouteRequest,
+    signal: AbortSignal,
+  ) => Promise<Response>
   /**
    * Keep every bot with enabled workflows that `owns` accepts online, fire their schedules, and
    * delete expired run records. Called once at startup, before the bot host resumes stored
@@ -330,6 +377,42 @@ const buildRevision = async (
 /** Identifies a revision across a delete and a republish under the same name. */
 const revisionKey = ({ name, revision, publishedAt }: WorkflowRevision) =>
   `${name}:${revision}:${publishedAt.getTime()}`
+
+/** Names a revision in operator logs. */
+const labelOf = ({ botId, name, revision }: WorkflowRevision) =>
+  `Workflow ${name} (revision ${revision}) of bot ${botId}`
+
+/** A bare error status for a route's anonymous caller. */
+const refuse = (status: number, error: string, headers: Record<string, string> = {}) =>
+  Response.json({ error }, { status, headers })
+
+/** `promise`, or a rejection with `signal`'s reason once it aborts first. */
+const until = <A>(promise: Promise<A>, signal: AbortSignal) =>
+  Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      signal.throwIfAborted()
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+    }),
+  ])
+
+/** A fetch handler's answer, rebuilt from its untrusted result, or undefined when malformed. */
+const answer = (result: unknown) => {
+  if (typeof result !== 'object' || result === null) return undefined
+  const { status, contentType, body } = result as Record<string, unknown>
+  if (typeof status !== 'number' || typeof body !== 'string') return undefined
+  if (contentType !== null && typeof contentType !== 'string') return undefined
+  const bytes = Buffer.from(body, 'base64')
+  try {
+    // Throws on a status outside 200–599, a body on a bodyless status, or a malformed type.
+    return new Response(bytes.length === 0 ? null : new Uint8Array(bytes), {
+      status,
+      headers: contentType === null ? {} : { 'content-type': contentType },
+    })
+  } catch {
+    return undefined
+  }
+}
 
 /** Who a workflow's Discord calls run as, for the REST client's request context. */
 const WORKFLOW_PRINCIPAL: Principal = { id: 'workflow', kind: 'discord-bot', scopes: new Set() }
@@ -509,6 +592,17 @@ export const makeWorkflowHost = ({
     return user
   }
 
+  /** A revision's compiled modules, or undefined once it has logged why they did not compile. */
+  const modulesOf = (workflow: Enabled) =>
+    workflow.modules.catch((error: unknown) => {
+      log(`${labelOf(workflow.revision)} did not compile: ${String(error)}`)
+      workflow.modules = compile(workflow.revision)
+      return undefined
+    })
+
+  /** Route requests each bot has waiting or running. */
+  const serving = new Map<string, number>()
+
   /** A workflow's own KV store, whichever revision runs. Its failures reach the operator. */
   const kvFor = (workflowId: string, label: string, redact: (text: string) => string): KvStore => {
     const reported = <A>(operation: Promise<A>) =>
@@ -545,6 +639,71 @@ export const makeWorkflowHost = ({
   }
 
   /**
+   * The broker for one run: the revision's grants over the bot's REST client, presence, and the
+   * workflow's KV store. `trigger` names what started the run, in its Discord calls' request
+   * context; `redact` keeps the run's secrets out of KV failures.
+   */
+  const brokerFor = (
+    revision: WorkflowRevision,
+    client: DiscordRest['Service'],
+    trigger: string,
+    redact: (text: string) => string,
+    interaction?: ForwardedInteraction,
+  ) => {
+    const label = labelOf(revision)
+    return makeBroker({
+      operations,
+      grants: revision.grants,
+      discord: (call, signal) =>
+        client.request(call).pipe(
+          // DiscordRest aborts its HTTP request with the request context's signal.
+          Effect.provideService(McpRequestContext, {
+            requestId: `${label}: ${trigger}`,
+            signal,
+            progressToken: undefined,
+            notify: undefined,
+            principal: WORKFLOW_PRINCIPAL,
+          }),
+        ),
+      ...(interaction === undefined ? {} : { interaction }),
+      updatePresence: async (presence) => bots.updatePresence(revision.botId, presence),
+      kv: kvFor(revision.workflowId, label, redact),
+      // The URL can hold an interaction token, so only the reason is logged.
+      onDenied: ({ method, reason }) => log(`${label}: refused ${method}: ${reason}`),
+    })
+  }
+
+  /**
+   * Records one run of `revision` on `event`, received at `receivedAt`. `error` arrives redacted
+   * and clipped; logs are redacted and cut here.
+   */
+  const recorder =
+    (
+      revision: WorkflowRevision,
+      event: string,
+      receivedAt: Date,
+      redact: (text: string) => string,
+    ) =>
+    (outcome: WorkflowRunOutcome, error: string | null, logs: ReadonlyArray<string>) =>
+      storage
+        .recordWorkflowRun(
+          {
+            workflowId: revision.workflowId,
+            revision: revision.revision,
+            event,
+            outcome,
+            error: error === null ? null : storable(error),
+            logs: storedLogs(logs.map((line) => storable(redact(line)))),
+            receivedAt,
+            finishedAt: new Date(now()),
+          },
+          RUNS_KEPT,
+        )
+        .then(prune, (error: unknown) =>
+          log(`${labelOf(revision)}: its run was not recorded: ${String(error)}`),
+        )
+
+  /**
    * Queue one workflow's run of one Gateway event or schedule tick. Enqueues before returning, so
    * callers keep order.
    */
@@ -559,39 +718,16 @@ export const makeWorkflowHost = ({
     const { client, release } = rest(botId, Redacted.make(token))
     const dispatch = 'event' in trigger ? trigger.event : undefined
     const d = dispatch?.d ?? {}
-    const { workflowId, name, revision, grants } = workflow.revision
-    const label = `Workflow ${name} (revision ${revision}) of bot ${botId}`
+    const { name } = workflow.revision
+    const label = labelOf(workflow.revision)
     /** What it ran for, as its logs and run record name it. */
     const cause = dispatch?.t ?? `schedule ${'tick' in trigger ? trigger.tick.cron : ''}`
     const isInteraction = dispatch?.t === 'INTERACTION_CREATE'
-    const receivedAt = new Date(now())
     const redact = redactor([
       token,
       ...(isInteraction && typeof d.token === 'string' && d.token !== '' ? [d.token] : []),
     ])
-    /** Record this run. `error` arrives redacted and clipped; logs are redacted and cut here. */
-    const record = (
-      outcome: WorkflowRunOutcome,
-      error: string | null,
-      logs: ReadonlyArray<string>,
-    ) =>
-      storage
-        .recordWorkflowRun(
-          {
-            workflowId,
-            revision,
-            event: cause,
-            outcome,
-            error: error === null ? null : storable(error),
-            logs: storedLogs(logs.map((line) => storable(redact(line)))),
-            receivedAt,
-            finishedAt: new Date(now()),
-          },
-          RUNS_KEPT,
-        )
-        .then(prune, (error: unknown) =>
-          log(`${label}: its run was not recorded: ${String(error)}`),
-        )
+    const record = recorder(workflow.revision, cause, new Date(now()), redact)
     return isolates
       .run({
         // Each workflow sees a guild's events, and a direct message channel's, in order, and never
@@ -613,34 +749,15 @@ export const makeWorkflowHost = ({
         urgent: isInteraction,
         // Discord drops an interaction not answered within three seconds of the event.
         ...(isInteraction ? { admitWithinMs: INTERACTION_ADMISSION_MS } : {}),
-        broker: makeBroker({
-          operations,
-          grants,
-          discord: (call, signal) =>
-            client.request(call).pipe(
-              // DiscordRest aborts its HTTP request with the request context's signal.
-              Effect.provideService(McpRequestContext, {
-                requestId: `${label}: ${cause}`,
-                signal,
-                progressToken: undefined,
-                notify: undefined,
-                principal: WORKFLOW_PRINCIPAL,
-              }),
-            ),
-          ...(isInteraction
-            ? {
-                interaction: {
-                  id: String(d.id),
-                  applicationId: String(d.application_id),
-                  token: String(d.token),
-                },
-              }
-            : {}),
-          updatePresence: async (presence) => bots.updatePresence(botId, presence),
-          kv: kvFor(workflowId, label, redact),
-          // The URL can hold an interaction token, so only the reason is logged.
-          onDenied: ({ method, reason }) => log(`${label}: refused ${method}: ${reason}`),
-        }),
+        broker: brokerFor(
+          workflow.revision,
+          client,
+          cause,
+          redact,
+          isInteraction
+            ? { id: String(d.id), applicationId: String(d.application_id), token: String(d.token) }
+            : undefined,
+        ),
       })
       .then(
         (outcome) => {
@@ -660,16 +777,83 @@ export const makeWorkflowHost = ({
       .finally(release)
   }
 
-  /** A revision's compiled modules, or undefined after logging why it did not compile. */
-  const modulesOf = (botId: string, workflow: Enabled) =>
-    workflow.modules.catch((error: unknown) => {
-      const { name, revision } = workflow.revision
-      log(
-        `Workflow ${name} (revision ${revision}) of bot ${botId} did not compile: ${String(error)}`,
-      )
-      workflow.modules = compile(workflow.revision)
-      return undefined
-    })
+  /** The bot's enabled revision of workflow `name` that has a route. */
+  const enabledRoute = async (botId: string, name: string, signal: AbortSignal) =>
+    (await until(enabledFor(botId), signal)).find(
+      ({ revision }) => revision.name === name && revision.route,
+    )
+
+  /**
+   * The answer for a bot with no running session. Any snowflake can be named, so only a bot its
+   * workflows hold here reaches storage, and it is retried only while this route is enabled.
+   */
+  const offline = async (botId: string, name: string, signal: AbortSignal) => {
+    if (!bots.holds(botId)) return refuse(404, 'not_found')
+    try {
+      return (await enabledRoute(botId, name, signal)) === undefined
+        ? refuse(404, 'not_found')
+        : refuse(503, 'unavailable', { 'retry-after': '1' })
+    } catch {
+      return signal.aborted
+        ? refuse(504, 'workflow_timed_out')
+        : refuse(503, 'unavailable', { 'retry-after': '1' })
+    }
+  }
+
+  /**
+   * Run `workflow`'s fetch handler for one request, record the run, and answer with its response
+   * or a bare failure status. Rejects when the run never reached an outcome: stopped, abandoned
+   * at `signal`, or not admitted.
+   */
+  const runRoute = async (
+    workflow: Enabled,
+    token: string,
+    request: RouteRequest,
+    signal: AbortSignal,
+    record: ReturnType<typeof recorder>,
+    redact: (text: string) => string,
+  ) => {
+    const { botId, name } = workflow.revision
+    const label = labelOf(workflow.revision)
+    const event = `HTTP ${request.method}`
+    const [botUser, modules] = await until(
+      Promise.all([userFor(botId, token), modulesOf(workflow)]),
+      signal,
+    )
+    if (modules === undefined) return refuse(502, 'workflow_failed')
+    const { client, release } = rest(botId, Redacted.make(token))
+    const outcome = await isolates
+      .run({
+        botId,
+        // Requests wait only for a process slot, never for each other.
+        queue: `${botId}:${name}:route:${randomUUID()}`,
+        botUser,
+        modules,
+        timeoutMs: ROUTE_TIMEOUT_MS,
+        input: { request },
+        signal: AbortSignal.any([workflow.stop.signal, signal]),
+        admitWithinMs: ROUTE_ADMISSION_MS,
+        broker: brokerFor(workflow.revision, client, event, redact),
+      })
+      .finally(release)
+    if (outcome.outcome !== 'completed') {
+      const reason = clippedError(redact(failure(outcome)))
+      log(`${label} failed on ${event}: ${reason}`)
+      void record(outcome.outcome, reason, 'logs' in outcome ? outcome.logs : [])
+      return outcome.outcome === 'timed_out'
+        ? refuse(504, 'workflow_timed_out')
+        : refuse(502, 'workflow_failed')
+    }
+    const response = answer(outcome.result)
+    if (response !== undefined) {
+      void record('completed', null, outcome.logs)
+      return response
+    }
+    const malformed = 'The fetch handler answered with a malformed response.'
+    log(`${label} failed on ${event}: ${malformed}`)
+    void record('crashed', malformed, outcome.logs)
+    return refuse(502, 'workflow_failed')
+  }
 
   const route = async (event: WorkflowEvent) => {
     const kind = EVENT_FOR_DISPATCH.get(event.dispatch.t)
@@ -685,7 +869,7 @@ export const makeWorkflowHost = ({
     if (matching.length === 0) return
     const [botUser, modules] = await Promise.all([
       userFor(event.botId, event.token),
-      Promise.all(matching.map(({ workflow }) => modulesOf(event.botId, workflow))),
+      Promise.all(matching.map(({ workflow }) => modulesOf(workflow))),
     ])
     // Enqueued together, in order, so every workflow sees a guild's events in the order they came.
     matching.forEach(({ workflow, dispatch }, index) => {
@@ -713,10 +897,7 @@ export const makeWorkflowHost = ({
       log(`${label} skipped its ${tick.cron} tick: it no longer runs here.`)
       return
     }
-    const [botUser, modules] = await Promise.all([
-      userFor(botId, token),
-      modulesOf(botId, workflow),
-    ])
+    const [botUser, modules] = await Promise.all([userFor(botId, token), modulesOf(workflow)])
     if (modules !== undefined) await run(botId, token, { tick }, workflow, botUser, modules)
   }
 
@@ -749,13 +930,14 @@ export const makeWorkflowHost = ({
     return outcome.result as {
       readonly events: ReadonlyArray<string>
       readonly intents: number
+      readonly route: boolean
       readonly schedules: ReadonlyArray<unknown>
     }
   }
 
   return {
     publish: async (caller, { name, source, grants, dependencies = {}, lockfile }) => {
-      if (!NAME.test(name)) {
+      if (!WORKFLOW_NAME.test(name)) {
         throw invalid(
           'The name is not valid.',
           'name: use 1 to 63 lowercase letters, digits, and dashes, starting with a letter or digit.',
@@ -791,10 +973,10 @@ export const makeWorkflowHost = ({
       const events = declared.events.filter(
         (event) => event in WORKFLOW_EVENTS || event === SCHEDULE_EVENT,
       )
-      if (events.length === 0) {
+      if (events.length === 0 && !declared.route) {
         throw invalid(
-          'The workflow listens for no Gateway events or schedules.',
-          `source: add a listener with client.on(), for one of ${Object.keys(WORKFLOW_EVENTS).join(', ')}, or ${SCHEDULE_EVENT}.`,
+          'The workflow listens for no Gateway events or schedules, and has no fetch handler.',
+          `source: add a listener with client.on(), for one of ${Object.keys(WORKFLOW_EVENTS).join(', ')}, or ${SCHEDULE_EVENT}; or answer HTTP requests with export default { fetch(request) { ... } }.`,
         )
       }
       return storage.publishWorkflow({
@@ -806,6 +988,7 @@ export const makeWorkflowHost = ({
         grants,
         events,
         intents: declared.intents,
+        route: declared.route,
         schedules,
         actorId: caller.actorId,
       })
@@ -830,6 +1013,7 @@ export const makeWorkflowHost = ({
                     revision: revision.revision,
                     events: revision.events,
                     intents: intentNames(revision.intents),
+                    route: revision.route ? routePath(botId, name) : null,
                     schedules: revision.schedules,
                     grants: revision.grants,
                     packages: revision.packages,
@@ -903,6 +1087,44 @@ export const makeWorkflowHost = ({
           log(`Bot ${event.botId}'s ${event.dispatch.t} reached no workflow: ${String(error)}`),
         )
       routing.set(event.botId, next)
+    },
+
+    serve: async (botId, name, request, signal) => {
+      const token = bots.tokenOf(botId)
+      if (token === undefined) return offline(botId, name, signal)
+      const waiting = serving.get(botId) ?? 0
+      if (waiting >= ROUTE_REQUESTS_PER_BOT) {
+        return refuse(503, 'unavailable', { 'retry-after': '1' })
+      }
+      serving.set(botId, waiting + 1)
+      let workflow: Enabled | undefined
+      let record: ReturnType<typeof recorder> | undefined
+      const event = `HTTP ${request.method}`
+      const redact = redactor([token])
+      try {
+        workflow = await enabledRoute(botId, name, signal)
+        if (workflow === undefined) return refuse(404, 'not_found')
+        record = recorder(workflow.revision, event, new Date(now()), redact)
+        return await runRoute(workflow, token, request, signal, record, redact)
+      } catch (error) {
+        // Replaced, disabled, or deleted while waiting or running: a retry reaches the revision
+        // that runs now, or a 404 once none does.
+        if (workflow?.stop.signal.aborted && !signal.aborted) {
+          return refuse(503, 'unavailable', { 'retry-after': '1' })
+        }
+        const reason = signal.aborted
+          ? 'Its caller stopped waiting.'
+          : clippedError(redact(String(error)))
+        log(`Bot ${botId}'s workflow ${name} did not answer ${event}: ${reason}`)
+        void record?.(signal.aborted ? 'timed_out' : 'skipped', reason, [])
+        return signal.aborted
+          ? refuse(504, 'workflow_timed_out')
+          : refuse(503, 'unavailable', { 'retry-after': '1' })
+      } finally {
+        const left = (serving.get(botId) ?? 1) - 1
+        if (left === 0) serving.delete(botId)
+        else serving.set(botId, left)
+      }
     },
 
     restore: async (owns = () => true) => {

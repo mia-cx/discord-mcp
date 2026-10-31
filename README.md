@@ -77,9 +77,9 @@ Both paths require OAuth and bot credentials on every HTTP request.
 | `discord_guild_get` | Read a guild with a compact, typed result. |
 | `discord_permissions_explain` | Diagnose effective guild/channel permissions. |
 | `discord_script_run` | Run one-off discord.js code as the bot, checked against its grants. |
-| `discord_workflow_publish` | Store a new revision of a workflow: discord.js code that runs on Gateway events. |
+| `discord_workflow_publish` | Store a new revision of a workflow: discord.js code that runs on Gateway events and HTTP requests. |
 | `discord_workflow_list` | List the bot's workflows, what each runs with, and who changed them. |
-| `discord_workflow_enable` | Run a workflow revision on the bot's events and show its grants. |
+| `discord_workflow_enable` | Run a workflow revision on the bot's events and route, and show its grants. |
 | `discord_workflow_disable` | Stop running a workflow. |
 | `discord_workflow_delete` | Delete a workflow, its revisions, its state, and its logs. |
 | `discord_workflow_logs` | Read the bot's recent workflow runs: outcomes, errors, and console output. |
@@ -138,8 +138,8 @@ macOS, and Windows.
 
 ## Workflows
 
-A workflow is discord.js code that runs as the bot on Gateway events and cron schedules,
-while no agent is connected. It is written like an ordinary bot:
+A workflow is discord.js code that runs as the bot on Gateway events, cron schedules, and
+inbound HTTP requests, while no agent is connected. It is written like an ordinary bot:
 
 ```ts
 import { Client, Events, GatewayIntentBits } from 'discord.js'
@@ -203,7 +203,35 @@ A tick missed while the bot's host was down, or the bot was offline, runs once, 
 bot is back online: each schedule runs its most recent missed tick and skips the earlier ones,
 and `scheduledAt` says when it was due.
 
-A workflow keeps state between events in its own key-value store:
+A workflow answers webhooks when it default-exports a fetch handler. It needs no Gateway
+listeners, but calls Discord through a client created at the top level:
+
+```ts
+import { Client } from 'discord.js'
+
+const client = new Client({ intents: [] })
+
+export default {
+  async fetch(request: Request) {
+    const { text } = await request.json()
+    await client.rest.post('/channels/123456789012345678/messages', { body: { content: text } })
+    return new Response('ok')
+  },
+}
+```
+
+Once enabled, any request to `/workflows/<bot ID>/<name>` on the relay, or to a path below it,
+runs the handler in a fresh workerd process for at most 10 seconds. Built-in endpoints never
+live under `/workflows/`, so a route can't shadow one. Routes need no login, so a handler
+should verify its sender, for example by a signature over the exact body bytes it receives.
+Request bodies are limited to 1 MiB, and a response body over about 700 KiB fails. The
+response keeps only its status, body, and `Content-Type`, and is served with a sandbox
+content security policy, since routes share the relay's origin. A disabled or deleted
+workflow's route answers 404. While Discord has the bot offline, its routes answer 503 with
+`Retry-After: 1`. Each bot may have eight route requests waiting or running; more get 503
+too.
+
+A workflow keeps state between runs in its own key-value store:
 
 ```ts
 import { kv } from 'textile'
@@ -213,14 +241,14 @@ await kv.set('count', count)
 ```
 
 Values are anything JSON can hold. State belongs to the workflow, not a revision: it lasts
-across events, revisions, and restarts, and goes when the workflow is deleted. A workflow's
+across runs, revisions, and restarts, and goes when the workflow is deleted. A workflow's
 keys and values take at most 1 MiB together, and a key at most 512 bytes; a `set` past
 either throws and stores nothing. Only one guild's non-interaction events run in order:
-interactions, direct messages from different channels, and other guilds' events run at the
-same time, so their writes to one key can interleave, and the last one wins.
+interactions, route requests, direct messages from different channels, and other guilds'
+events run at the same time, so their writes to one key can interleave, and the last one wins.
 
-`discord_workflow_logs` shows the bot's recent runs, newest first: each run's event (or
-`schedule <cron>` for a tick), outcome, error, and console output, filtered by workflow or to failures only. A run keeps up
+`discord_workflow_logs` shows the bot's recent runs, newest first: each run's event
+(`schedule <cron>` for a tick, `HTTP` and the method for a route request), outcome, error, and console output, filtered by workflow or to failures only. A run keeps up
 to 16,384 characters of output; one that timed out or crashed keeps none. Bot and interaction tokens in
 logs and errors read `[redacted]`. Runs stay readable for 7 days, up to the newest 1,000 per
 workflow. Bot hosts delete expired runs at startup, and at most hourly while workflows run.
@@ -405,9 +433,10 @@ connection, but not a new Gateway session or a server restart: join again after 
 The relay runs as one process by default. To scale, split it into two tiers, each with
 as many replicas as it needs:
 
-- **Central** serves MCP and OAuth. It checks the login and the allowlist, reads the bot ID
-  from the first segment of the bot token, and forwards the request to the bot host that
-  owns that bot. It relays each [voice socket](#voice) to that bot host the same way. It
+- **Central** serves MCP, OAuth, and workflow routes. It checks the login and the allowlist,
+  reads the bot ID from the first segment of the bot token, and forwards the request to the
+  bot host that owns that bot. It relays each [voice socket](#voice) to that bot host the same
+  way. A workflow route names its bot in its path and is forwarded without a login. Central
   holds no bot tokens and calls Discord only to check logins.
 - **Bot hosts** check each bot token with Discord and run its requests. All requests for one
   bot share one rate limiter, whichever central replica received them. `DATABASE_URL` and

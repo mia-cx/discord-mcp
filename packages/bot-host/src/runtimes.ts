@@ -47,6 +47,8 @@ export interface BotRuntimes {
    * replaced. Failures are logged rather than thrown.
    */
   readonly hold: (botId: string, intents: number | undefined) => Promise<void>
+  /** Whether enabled workflows hold this bot, online or not. */
+  readonly holds: (botId: string) => boolean
   /** Set an online bot's presence on every shard. Throws when the bot is offline. */
   readonly updatePresence: (botId: string, presence: Presence) => void
   /** The token an online bot runs with. */
@@ -385,6 +387,7 @@ export const createBotRuntimes = ({
       if (shards.length === 0) throw new Error(`Bot ${botId} is offline.`)
       for (const shard of shards) shard.updatePresence(presence)
     },
+    holds: (botId) => held.has(botId),
     tokenOf: (botId) => running.get(botId)?.token,
     voice: (botId) => running.get(botId)?.voice,
     close: async () => {

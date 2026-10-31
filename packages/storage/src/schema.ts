@@ -1,5 +1,6 @@
 import {
   bigint,
+  boolean,
   index,
   integer,
   jsonb,
@@ -78,6 +79,8 @@ export const workflowRevisions = pgTable(
     events: jsonb('events').$type<ReadonlyArray<string>>().notNull(),
     /** The Gateway intents its clients declare, as a bitfield. */
     intents: integer('intents').notNull(),
+    /** Whether its default export has a fetch handler, which answers its inbound HTTP route. */
+    route: boolean('route').notNull().default(false),
     /** The cron expressions its clients declare, in UTC. */
     schedules: jsonb('schedules').$type<ReadonlyArray<string>>().notNull().default([]),
     publishedBy: text('published_by').notNull(),

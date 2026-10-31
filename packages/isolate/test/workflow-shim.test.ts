@@ -146,6 +146,7 @@ describe('the discord.js shim', () => {
         // Guilds, GuildMessages, and MessageContent.
         intents: 1 | 512 | 32768,
         schedules: ['0 9 * * *', '30 17 * * 5', '0 0 * * *'],
+        route: false,
       },
       logs: [],
     })
@@ -344,5 +345,85 @@ client.on('messageReactionAdd', (reaction) => reaction.message.channel.fetch())
 
     expect(outcome.outcome).toBe('completed')
     expect(requests).toEqual([request])
+  })
+})
+
+describe("a workflow's fetch handler", () => {
+  /** A webhook relay with no Gateway listeners: it posts what it receives and echoes it back. */
+  const WEBHOOK = `
+import { Client } from 'discord.js'
+const client = new Client({ intents: [] })
+
+export default {
+  async fetch(request) {
+    const body = new Uint8Array(await request.arrayBuffer())
+    const channel = await client.channels.fetch('${CHANNEL}')
+    const from = new URL(request.url).searchParams.get('from')
+    await channel.send(\`\${body.length} bytes from \${from}, signed \${request.headers.get('x-signature')}, as \${client.user.username}\`)
+    return new Response(body, { status: 201, headers: { 'content-type': 'application/octet-stream' } })
+  },
+}
+`
+
+  it('is reported by the probe, with no listeners needed', async () => {
+    const outcome = await makeIsolateHost().run({
+      botId: BOT.id,
+      queue: BOT.id,
+      botUser: BOT,
+      modules: await prepareScript(WEBHOOK),
+      timeoutMs: 10_000,
+      input: { probe: true },
+      broker: async () => new Response(null, { status: 403 }),
+    })
+
+    expect(outcome).toEqual({
+      outcome: 'completed',
+      result: { schedules: [], events: [], intents: 0, route: true },
+      logs: [],
+    })
+  })
+
+  it('receives the exact bytes sent, calls Discord, and answers with its status and body', async () => {
+    // Not valid UTF-8, so a text round trip would change it.
+    const bytes = Buffer.from([0xff, 0x00, 0xfe, 0x7b])
+    const requests: string[] = []
+    const outcome = await makeIsolateHost().run({
+      botId: BOT.id,
+      queue: BOT.id,
+      botUser: BOT,
+      modules: await prepareScript(WEBHOOK),
+      timeoutMs: 10_000,
+      input: {
+        request: {
+          method: 'POST',
+          url: `https://relay.test/workflows/${BOT.id}/webhook?from=ci`,
+          headers: [['x-signature', 'sig']],
+          body: bytes.toString('base64'),
+        },
+      },
+      broker: async (incoming) => {
+        const body = incoming.method === 'POST' ? await incoming.text() : ''
+        requests.push(`${incoming.method} ${incoming.url} ${body}`)
+        return incoming.method === 'GET'
+          ? Response.json({ id: CHANNEL, type: 0, guild_id: GUILD })
+          : Response.json(sentMessage('ok'))
+      },
+    })
+
+    expect(outcome).toEqual({
+      outcome: 'completed',
+      result: {
+        status: 201,
+        contentType: 'application/octet-stream',
+        body: bytes.toString('base64'),
+      },
+      logs: [],
+    })
+    expect(requests).toEqual([
+      `GET https://discord.com/api/v10/channels/${CHANNEL} `,
+      expect.stringContaining(
+        `POST https://discord.com/api/v10/channels/${CHANNEL}/messages {"content":"4 bytes from ci, signed sig, as textile"`,
+      ),
+    ])
   })
 })
