@@ -115,17 +115,34 @@ const closureOf = (roots: ReadonlyArray<string>, schemas: Record<string, unknown
   return [...seen].sort()
 }
 
-/** Rewrite `#/components/schemas/X` to `#/$defs/X` so the map is a self-contained JSON Schema. */
-const rewriteRefs = (node: unknown): unknown => {
-  if (Array.isArray(node)) return node.map(rewriteRefs)
+/** Request fields holding a permission bitfield, which Discord sends and accepts as a string. */
+const BITFIELD_FIELDS = new Set(['allow', 'deny', 'permissions'])
+
+/**
+ * Rewrite `#/components/schemas/X` to `#/$defs/X` so the map is a self-contained JSON Schema, and
+ * correct two spec errors that would reject valid bodies: an empty `enum`, which no validator
+ * compiles, and permission bitfields typed only as integers.
+ */
+const rewriteRefs = (node: unknown, field?: string): unknown => {
+  if (Array.isArray(node)) return node.map((item) => rewriteRefs(item))
   if (node === null || typeof node !== 'object') return node
 
   const out: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    if (key === 'enum' && Array.isArray(value) && value.length === 0) continue
     out[key] =
       key === '$ref' && typeof value === 'string' && value.startsWith('#/components/schemas/')
         ? `#/$defs/${value.slice('#/components/schemas/'.length)}`
-        : rewriteRefs(value)
+        : key === 'properties' && value !== null && typeof value === 'object'
+          ? Object.fromEntries(
+              Object.entries(value).map(([name, schema]) => [name, rewriteRefs(schema, name)]),
+            )
+          : rewriteRefs(value)
+  }
+  const types = [out.type].flat()
+  if (BITFIELD_FIELDS.has(field ?? '') && types.includes('integer') && !types.includes('string')) {
+    out.type = [...types, 'string']
+    out.pattern = '^[0-9]+$'
   }
   return out
 }
