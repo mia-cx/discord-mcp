@@ -451,7 +451,6 @@ const registerRoutes = (input: {
     // Defensive `?? []`: the manifest arrives as JSON from the supervisor, so a version skew shows
     // up as a missing field rather than a type error. Treating that as "declares nothing" is safe;
     // crashing the enable is not.
-    const now = yield* Effect.clockWith((clock) => clock.currentTimeMillis)
     for (const schedule of manifest.schedules ?? []) {
       const parsed = parseCron(schedule.expression)
       if ('reason' in parsed) {
@@ -463,7 +462,7 @@ const registerRoutes = (input: {
         )
       }
 
-      const tooFrequent = checkScheduleFloor(parsed, new Date(now))
+      const tooFrequent = checkScheduleFloor(parsed)
       if (tooFrequent !== undefined) {
         return yield* Effect.fail(
           new ValidationError({

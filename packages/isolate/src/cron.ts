@@ -203,31 +203,27 @@ const matchesDate = (schedule: CronSchedule, at: Date): boolean => {
   return dayOfMonth || dayOfWeek
 }
 
+const MINUTES_PER_DAY = 24 * 60
+
 /**
  * Reject a schedule that would fire more often than the floor allows.
  *
- * Checked by looking at actual firings rather than by pattern-matching the expression: `*​/1` and
- * `0,1,2,...` are the same schedule, and only one of them looks suspicious.
+ * Checked on every firing time of a day rather than by pattern-matching the expression: `*​/1` and
+ * `0,1,2,...` are the same schedule, and only one of them looks suspicious. The gap across midnight
+ * counts as if the next day fired too, which errs toward refusing.
  */
-export const checkScheduleFloor = (
-  schedule: CronSchedule,
-  from: Date,
-): CronRejection | undefined => {
-  let previous = nextFiring(schedule, from)
-  if (previous === undefined) return undefined
-
-  for (let count = 0; count < 10; count += 1) {
-    const next = nextFiring(schedule, previous)
-    if (next === undefined) return undefined
-
-    const gapMinutes = (next.getTime() - previous.getTime()) / 60_000
-    if (gapMinutes < MIN_SCHEDULE_INTERVAL_MINUTES) {
-      return {
-        reason: `This schedule fires every ${gapMinutes} minutes, under the ${MIN_SCHEDULE_INTERVAL_MINUTES}-minute floor. A workflow that runs this often will exhaust its action budget rather than keep up.`,
-      }
-    }
-    previous = next
+export const checkScheduleFloor = (schedule: CronSchedule): CronRejection | undefined => {
+  const times = [...schedule.hours]
+    .flatMap((hour) => [...schedule.minutes].map((minute) => hour * 60 + minute))
+    .sort((a, b) => a - b)
+  const [first, last] = [times[0], times.at(-1)]
+  if (first === undefined || last === undefined) return undefined
+  const gapMinutes = Math.min(
+    first + MINUTES_PER_DAY - last,
+    ...times.slice(1).map((time, index) => time - (times[index] ?? time)),
+  )
+  if (gapMinutes >= MIN_SCHEDULE_INTERVAL_MINUTES) return undefined
+  return {
+    reason: `This schedule fires ${gapMinutes} minutes apart, under the ${MIN_SCHEDULE_INTERVAL_MINUTES}-minute floor. A workflow that runs this often will exhaust its action budget rather than keep up.`,
   }
-
-  return undefined
 }

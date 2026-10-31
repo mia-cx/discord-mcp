@@ -292,16 +292,21 @@ const visibleMessage = (
 const SCHEDULES_HINT =
   "source: list five-field cron expressions, in UTC, in the Client's schedules option, as in new Client({ intents: [], schedules: ['0 9 * * *'] })."
 
+/** Each schedule is searched for its next firing every minute, so a workflow declares few. */
+export const MAX_SCHEDULES = 10
+
 /**
- * The cron schedules a revision's clients declare, deduplicated, if each parses and fires at most
+ * The cron schedules a revision's clients declare, if there are few, each parses and fires at most
  * every few minutes, and a `schedule` listener hears them.
  */
 const checkSchedules = (
   declared: ReadonlyArray<unknown>,
   listening: boolean,
-  now: Date,
 ): ReadonlyArray<string> => {
-  const schedules = [...new Set(declared)].map((cron) => {
+  if (declared.length > MAX_SCHEDULES) {
+    throw invalid(`The workflow declares more than ${MAX_SCHEDULES} schedules.`, SCHEDULES_HINT)
+  }
+  const schedules = declared.map((cron) => {
     if (typeof cron !== 'string') {
       throw invalid(`Schedule ${String(cron)} is not a string.`, SCHEDULES_HINT)
     }
@@ -309,7 +314,7 @@ const checkSchedules = (
     if ('reason' in schedule) {
       throw invalid(`Schedule "${cron}" is not valid: ${schedule.reason}`, SCHEDULES_HINT)
     }
-    if (checkScheduleFloor(schedule, now) !== undefined) {
+    if (checkScheduleFloor(schedule) !== undefined) {
       throw invalid(
         `Schedule "${cron}" fires more often than every ${MIN_SCHEDULE_INTERVAL_MINUTES} minutes.`,
         SCHEDULES_HINT,
@@ -548,9 +553,12 @@ export const makeWorkflowHost = ({
       log(`${label} skipped its ${tick.cron} tick: the bot is offline.`)
       return
     }
-    const workflow = (await enabledFor(botId)).find(
-      (entry) => entry.revision.name === name && entry.revision.revision === revision,
-    )
+    const find = async () =>
+      (await enabledFor(botId)).find(
+        (entry) => entry.revision.name === name && entry.revision.revision === revision,
+      )
+    // Another bot host enabled the revision, so this one's list is stale.
+    const workflow = (await find()) ?? (await refresh(botId).then(find))
     if (workflow === undefined) {
       log(`${label} skipped its ${tick.cron} tick: it no longer runs here.`)
       return
@@ -565,6 +573,7 @@ export const makeWorkflowHost = ({
   const scheduler = makeScheduler({
     storage,
     clock,
+    online: (botId) => bots.tokenOf(botId) !== undefined,
     log,
     fire: (workflow, next) =>
       void tick(workflow, next).catch((error: unknown) =>
@@ -626,11 +635,7 @@ export const makeWorkflowHost = ({
           'source: use GatewayIntentBits names in the Client options.',
         )
       }
-      const schedules = checkSchedules(
-        declared.schedules,
-        declared.events.includes(SCHEDULE_EVENT),
-        new Date(clock.date()),
-      )
+      const schedules = checkSchedules(declared.schedules, declared.events.includes(SCHEDULE_EVENT))
       const events = declared.events.filter(
         (event) => event in WORKFLOW_EVENTS || event === SCHEDULE_EVENT,
       )
@@ -700,19 +705,27 @@ export const makeWorkflowHost = ({
           `Turn on ${refused.join(' and ')} under Bot → Privileged Gateway Intents in the Discord Developer Portal, then enable the workflow again.`,
         )
       }
-      if (
-        !(await storage.setEnabledRevision(caller.botId, name, revision.revision, caller.actorId))
-      ) {
-        throw invalid(`No workflow is named ${name}.`)
-      }
+      const enabled = await storage.setEnabledRevision(
+        caller.botId,
+        name,
+        revision.revision,
+        caller.actorId,
+        new Date(clock.date()),
+      )
+      if (!enabled) throw invalid(`No workflow is named ${name}.`)
       await refresh(caller.botId)
-      // Its schedules start now, not at the next minute's sync, which could miss a tick.
-      await scheduler.sync()
       return revision
     },
 
     disable: async (caller, name) => {
-      if (!(await storage.setEnabledRevision(caller.botId, name, null, caller.actorId))) {
+      const disabled = await storage.setEnabledRevision(
+        caller.botId,
+        name,
+        null,
+        caller.actorId,
+        new Date(clock.date()),
+      )
+      if (!disabled) {
         throw invalid(`No workflow is named ${name}.`)
       }
       await refresh(caller.botId)

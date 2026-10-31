@@ -371,6 +371,7 @@ describe('workflows', () => {
 
     // Two days pass in one step, as if the host had stalled: the missed ticks run once, late.
     await pass(48 * HOUR)
+    await pass()
     await vi.waitFor(() =>
       expect(digests()).toEqual([
         [TOKEN, 'Digest for 2026-11-02'],

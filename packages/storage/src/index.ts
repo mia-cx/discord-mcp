@@ -62,8 +62,8 @@ export interface ScheduledWorkflow {
   readonly name: string
   readonly revision: number
   readonly schedules: ReadonlyArray<string>
-  /** Every tick up to this instant has fired; null until the scheduler first sees the revision. */
-  readonly cursor: Date | null
+  /** Every tick up to this instant has fired, or fell before the revision was enabled. */
+  readonly cursor: Date
 }
 
 /**
@@ -93,14 +93,15 @@ export interface Storage {
     revision?: number,
   ) => Promise<WorkflowRevision | undefined>
   /**
-   * Run `revision`, or nothing when null, and restart its schedules from the next tick. False when
-   * the workflow or revision does not exist.
+   * Run `revision`, or nothing when null, with its schedules owing every tick after `at`, the
+   * time of the change. False when the workflow or revision does not exist.
    */
   readonly setEnabledRevision: (
     botId: string,
     name: string,
     revision: number | null,
     actorId: string,
+    at: Date,
   ) => Promise<boolean>
   /** Delete a workflow and its revisions. False when it does not exist. */
   readonly deleteWorkflow: (botId: string, name: string, actorId: string) => Promise<boolean>
@@ -108,15 +109,15 @@ export interface Storage {
   readonly enabledRevisions: (botId?: string) => Promise<ReadonlyArray<WorkflowRevision>>
   /** A bot's most recent workflow changes, newest first, deleted workflows included. */
   readonly workflowChanges: (botId: string, limit: number) => Promise<ReadonlyArray<WorkflowChange>>
-  /** Every enabled revision with schedules, for one bot or for all of them. */
-  readonly scheduledWorkflows: (botId?: string) => Promise<ReadonlyArray<ScheduledWorkflow>>
+  /** Every bot's enabled revisions with schedules. */
+  readonly scheduledWorkflows: () => Promise<ReadonlyArray<ScheduledWorkflow>>
   /**
    * Move a scheduled workflow's cursor from `from` to `to`. False, changing nothing, when its
    * cursor is no longer `from` or another revision runs: someone else fired those ticks.
    */
   readonly advanceScheduleCursor: (
     workflow: Pick<ScheduledWorkflow, 'botId' | 'name' | 'revision'>,
-    from: Date | null,
+    from: Date,
     to: Date,
   ) => Promise<boolean>
   /**

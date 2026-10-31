@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url'
-import { and, desc, eq, isNotNull, isNull, sql } from 'drizzle-orm'
+import { and, desc, eq, isNotNull, sql } from 'drizzle-orm'
 import type { PgDatabase, PgQueryResultHKT } from 'drizzle-orm/pg-core'
 import type { Storage, WorkflowChange, WorkflowRevision } from './index.ts'
 import type { AdvisoryLocks } from './locks.ts'
@@ -155,12 +155,16 @@ export const createStorage = (
     return row
   },
 
-  setEnabledRevision: (botId, name, revision, actorId) =>
+  setEnabledRevision: (botId, name, revision, actorId, at) =>
     db.transaction(async (tx) => {
       const workflow = and(eq(workflows.botId, botId), eq(workflows.name, name))
       const [updated] = await tx
         .update(workflows)
-        .set({ enabledRevision: revision, scheduleCursor: null, updatedAt: sql`now()` })
+        .set({
+          enabledRevision: revision,
+          scheduleCursor: revision === null ? null : at,
+          updatedAt: sql`now()`,
+        })
         .where(
           revision === null
             ? workflow
@@ -218,7 +222,7 @@ export const createStorage = (
       .orderBy(desc(changes.id))
       .limit(limit),
 
-  scheduledWorkflows: (botId) =>
+  scheduledWorkflows: () =>
     db
       .select({
         botId: workflows.botId,
@@ -235,13 +239,12 @@ export const createStorage = (
           eq(workflows.enabledRevision, revisions.revision),
         ),
       )
-      .where(
-        and(
-          sql`jsonb_array_length(${revisions.schedules}) > 0`,
-          botId === undefined ? undefined : eq(workflows.botId, botId),
-        ),
-      )
-      .orderBy(workflows.botId, workflows.name),
+      .where(sql`jsonb_array_length(${revisions.schedules}) > 0`)
+      .orderBy(workflows.botId, workflows.name)
+      // Enabling a revision always sets its cursor.
+      .then((rows) =>
+        rows.flatMap(({ cursor, ...row }) => (cursor === null ? [] : [{ ...row, cursor }])),
+      ),
 
   advanceScheduleCursor: async ({ botId, name, revision }, from, to) => {
     const [advanced] = await db
@@ -252,7 +255,7 @@ export const createStorage = (
           eq(workflows.botId, botId),
           eq(workflows.name, name),
           eq(workflows.enabledRevision, revision),
-          from === null ? isNull(workflows.scheduleCursor) : eq(workflows.scheduleCursor, from),
+          eq(workflows.scheduleCursor, from),
         ),
       )
       .returning({ id: workflows.id })

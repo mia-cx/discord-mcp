@@ -48,8 +48,8 @@ export const workflows = pgTable(
     /** The revision the dispatcher runs, or null while disabled. */
     enabledRevision: integer('enabled_revision'),
     /**
-     * The instant the enabled revision's schedules have fired up to. Null until the scheduler first
-     * sees the revision, so enabling one never fires ticks from before.
+     * The instant the enabled revision's schedules have fired up to, starting when it was enabled.
+     * Null while disabled.
      */
     scheduleCursor: timestamp('schedule_cursor', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

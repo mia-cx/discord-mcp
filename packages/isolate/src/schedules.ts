@@ -13,6 +13,8 @@ export interface SchedulerClock {
 export interface SchedulerOptions {
   readonly storage: Storage
   readonly clock: SchedulerClock
+  /** Whether a bot is online to run ticks. An offline bot's ticks wait, and catch up once it is. */
+  readonly online: (botId: string) => boolean
   /** Run one tick of a workflow revision. Called once per tick across every process. */
   readonly fire: (workflow: ScheduledWorkflow, tick: ScheduleTick) => void
   readonly log: (message: string) => void
@@ -21,8 +23,6 @@ export interface SchedulerOptions {
 export interface Scheduler {
   /** Fire the schedules of the bots `owns` accepts, from now until `close`. */
   readonly start: (owns: (botId: string) => boolean) => void
-  /** Fire what is due now, and start the schedules of newly enabled revisions from now. */
-  readonly sync: () => Promise<void>
   readonly close: () => Promise<void>
 }
 
@@ -30,8 +30,8 @@ const MINUTE_MS = 60_000
 
 /**
  * The ticks a workflow owes for the window (`from`, `to`]: each schedule's latest firing in it.
- * Earlier firings in the same window were missed while no process fired the bot's schedules, and
- * are skipped, so a schedule catches up once however long it was down.
+ * Earlier firings in the same window were missed while no process fired the bot's schedules, or
+ * the bot was offline, and are skipped, so a schedule catches up once however long it was down.
  */
 const dueTicks = (
   schedules: ReadonlyArray<string>,
@@ -63,13 +63,19 @@ const dueTicks = (
  * to now and fires the ticks between, in that order: a crash in between loses those ticks rather
  * than firing them twice.
  */
-export const makeScheduler = ({ storage, clock, fire, log }: SchedulerOptions): Scheduler => {
+export const makeScheduler = ({
+  storage,
+  clock,
+  online,
+  fire,
+  log,
+}: SchedulerOptions): Scheduler => {
   let owns: (botId: string) => boolean = () => false
   let closed = false
   let cancel = () => {}
   /** Bots whose lock this process holds. */
   const locked = new Set<string>()
-  /** Syncs run one at a time, so locks and cursors move in order. */
+  /** The sync in flight. Each starts after the last, so locks and cursors move in order. */
   let syncing = Promise.resolve()
 
   const syncOnce = async () => {
@@ -86,33 +92,27 @@ export const makeScheduler = ({ storage, clock, fire, log }: SchedulerOptions): 
       else locked.delete(botId)
     }
     for (const workflow of workflows) {
-      const { cursor } = workflow
-      if (!locked.has(workflow.botId) || (cursor !== null && now <= cursor)) continue
-      // A newly enabled revision starts from now, owing nothing.
-      if (!(await storage.advanceScheduleCursor(workflow, cursor, now)) || cursor === null) continue
+      const { botId, cursor } = workflow
+      if (!locked.has(botId) || !online(botId) || now <= cursor) continue
+      if (!(await storage.advanceScheduleCursor(workflow, cursor, now))) continue
       for (const tick of dueTicks(workflow.schedules, cursor, now)) fire(workflow, tick)
     }
   }
 
+  /** Sync now, then again at the start of every minute, when cron ticks fall due. */
   const sync = () => {
-    syncing = syncing
-      .then(syncOnce)
+    syncing = syncOnce()
       .catch((error: unknown) => log(`Firing workflow schedules failed: ${String(error)}`))
-    return syncing
-  }
-
-  /** Sync at the start of every minute, when cron ticks fall due. */
-  const wake = () => {
-    if (closed) return
-    cancel = clock.schedule(() => void sync().then(wake), MINUTE_MS - (clock.date() % MINUTE_MS))
+      .then(() => {
+        if (!closed) cancel = clock.schedule(sync, MINUTE_MS - (clock.date() % MINUTE_MS))
+      })
   }
 
   return {
     start: (accept) => {
       owns = accept
-      void sync().then(wake)
+      sync()
     },
-    sync,
     close: async () => {
       closed = true
       cancel()

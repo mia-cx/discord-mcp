@@ -44,13 +44,14 @@ const botHost = (
     },
   }
   let armed = 0
+  let online = true
   const host = makeWorkflowHost({
     storage,
     isolates: isolates ?? recording,
     bots: {
       hold: async () => {},
       updatePresence: () => {},
-      tokenOf: () => 'private-bot-token',
+      tokenOf: () => (online ? 'private-bot-token' : undefined),
     },
     clock: {
       date: clock.date,
@@ -73,6 +74,10 @@ const botHost = (
   return {
     host,
     clock,
+    /** Whether the bot is online, as when its stored session has resumed. */
+    setOnline: (value: boolean) => {
+      online = value
+    },
     /** Start the host as the server does, and wait for its first sync. */
     start: async () => {
       await host.restore()
@@ -161,10 +166,62 @@ describe('workflow schedules', () => {
     )
   })
 
+  it('fire a tick that fell before the first sync or while the bot was offline, once it is online', async () => {
+    const storage = await inMemoryStorage()
+    cleanup.push(() => storage.close())
+    const host = botHost(storage)
+    // Enabled at 08:58:30, before the host's first sync, as when that sync fails, or before
+    // startup resumes the bot's session.
+    await enableSchedules(storage, host.host, ['0 9 * * *'])
+    host.setOnline(false)
+    host.clock.advance(150_000)
+    await host.start()
+    await host.nextMinute()
+    host.setOnline(true)
+    await host.nextMinute()
+
+    // Offline at 09:01 and 09:02, online at 09:03.
+    await vi.waitFor(() =>
+      expect(host.ticks()).toEqual([tick('0 9 * * *', '2026-11-02T09:00:00.000Z')]),
+    )
+  })
+
+  it('run the revision another bot host enabled', async () => {
+    const storage = await inMemoryStorage()
+    cleanup.push(() => storage.close())
+    const host = botHost(storage)
+    await host.start()
+    await enableSchedules(storage, host.host, ['0 9 * * *'])
+    // Revision 2, published and enabled through a host that also believes it owns the bot.
+    await storage.publishWorkflow({
+      botId: BOT.id,
+      name: 'digest',
+      source: '',
+      grants,
+      events: ['schedule'],
+      intents: 0,
+      schedules: ['0 9 * * *'],
+      actorId: HUMAN,
+    })
+    await storage.setEnabledRevision(BOT.id, 'digest', 2, HUMAN, new Date(host.clock.date()))
+    await host.nextMinute()
+    await host.nextMinute()
+
+    await vi.waitFor(() =>
+      expect(host.ticks()).toEqual([tick('0 9 * * *', '2026-11-02T09:00:00.000Z')]),
+    )
+  })
+
   it.each([
     ['a malformed cron', "schedules: ['0 9 * *']", 'has 4'],
     ['a cron under five minutes apart', "schedules: ['*/2 * * * *']", 'more often than every 5'],
     ['schedules nobody hears', "schedules: ['0 9 * * *']", 'nothing listens', 'messageCreate'],
+    // Each takes a search for its next firing, every minute.
+    [
+      'more than ten schedules',
+      "schedules: Array.from({ length: 11 }, (_, i) => '0 0 31 2 *' + ' '.repeat(i))",
+      'more than 10',
+    ],
   ])('refuse to publish %s', async (_case, options, error, event = 'schedule') => {
     const storage = await inMemoryStorage()
     cleanup.push(() => storage.close())
@@ -195,11 +252,13 @@ describe('workflow schedules', () => {
       const b = botHost(storageB)
       await a.start()
       await enableSchedules(storageA, a.host, ['*/5 * * * *'])
+      // A's 08:59 sync takes the bot's lock.
+      await a.nextMinute()
       await b.start()
 
       // B reaches 09:00 first, but A holds the bot's lock.
       for (let minute = 0; minute < 3; minute += 1) await b.nextMinute()
-      for (let minute = 0; minute < 3; minute += 1) await a.nextMinute()
+      for (let minute = 0; minute < 2; minute += 1) await a.nextMinute()
       await vi.waitFor(() =>
         expect(a.ticks()).toEqual([tick('*/5 * * * *', '2026-11-02T09:00:00.000Z')]),
       )

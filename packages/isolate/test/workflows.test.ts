@@ -219,7 +219,7 @@ describe('the workflow dispatcher', () => {
         schedules: [],
         actorId: HUMAN,
       })
-      await storage.setEnabledRevision(botId, 'ping', 1, HUMAN)
+      await storage.setEnabledRevision(botId, 'ping', 1, HUMAN, new Date())
     }
 
     await host.restore((botId) => botId === BOT.id)

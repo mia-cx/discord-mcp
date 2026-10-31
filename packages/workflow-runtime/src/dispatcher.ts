@@ -335,7 +335,7 @@ const compileSchedules = (manifest: CompiledManifest): ActiveWorkflow['schedules
   for (const schedule of manifest.schedules ?? []) {
     const parsed = parseCron(schedule.expression)
     if ('reason' in parsed) continue
-    if (checkScheduleFloor(parsed, new Date(0)) !== undefined) continue
+    if (checkScheduleFloor(parsed) !== undefined) continue
     compiled.push({ parsed, triggerIndex: schedule.triggerIndex })
   }
 
