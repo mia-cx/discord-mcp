@@ -96,6 +96,8 @@ export const unsupportedUses = async (source: string): Promise<ReadonlyArray<str
   const compiled = await transform(source, {
     loader: 'ts',
     format: 'cjs',
+    // The bundle's target, which lowers syntax acorn can't read yet, such as decorators.
+    target: 'es2023',
     logLevel: 'silent',
   }).catch(() => undefined)
   if (compiled === undefined) return []

@@ -17,6 +17,11 @@ describe('finding what a fresh isolate per event cannot run', () => {
       "import * as Discord from 'discord.js'; new Discord.InteractionCollector(client)",
       [COLLECTOR],
     ],
+    [
+      'a collector beside a decorator, which esbuild accepts and acorn alone would not',
+      'const log = (c: unknown) => c\n@log class Bot {}\nm.channel.createMessageCollector()',
+      [COLLECTOR],
+    ],
     ['a computed collector method', "m.channel['createMessageCollector']()", [COLLECTOR]],
     [
       'a URL in files',
