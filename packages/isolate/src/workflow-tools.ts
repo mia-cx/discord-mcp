@@ -3,7 +3,16 @@ import { DiscordRest } from '@discord-mcp/discord-api/relay'
 import type { WorkflowRevision } from '@discord-mcp/storage'
 import { Context, Effect, Schema } from 'effect'
 import { GrantsInput, resolveGrants } from './tool.ts'
-import { EVENT_TIMEOUT_MS, intentNames, WORKFLOW_EVENTS, type WorkflowHost } from './workflows.ts'
+import {
+  EVENT_TIMEOUT_MS,
+  intentNames,
+  KV_KEY_LIMIT_BYTES,
+  KV_LIMIT_BYTES,
+  RUN_RETENTION_MS,
+  RUNS_KEPT,
+  WORKFLOW_EVENTS,
+  type WorkflowHost,
+} from './workflows.ts'
 
 /** The process's workflow host, and the Discord user whose relay login made this request. */
 export class Workflows extends Context.Service<
@@ -52,8 +61,9 @@ export const workflowPublish = defineTool({
   title: 'Publish a workflow',
   description: [
     "Publish discord.js code that runs as this bot on Gateway events, even while no agent is connected. Each publish stores the workflow's next immutable revision; it runs only once enabled with discord_workflow_enable.",
-    `\`source\` is a module that creates a discord.js Client at the top level and adds listeners, as an ordinary bot does; \`login()\` does nothing. It can listen for ${Object.keys(WORKFLOW_EVENTS).join(', ')}, and receives the events its Client's intents cover. Import only from discord.js and node:*, with no top-level await.`,
+    `\`source\` is a module that creates a discord.js Client at the top level and adds listeners, as an ordinary bot does; \`login()\` does nothing. It can listen for ${Object.keys(WORKFLOW_EVENTS).join(', ')}, and receives the events its Client's intents cover. Import only from discord.js, textile, and node:*, with no top-level await.`,
     `Each event runs in a fresh isolate for at most ${EVENT_TIMEOUT_MS / 1000} seconds, so nothing in memory lasts between events: collectors and awaitMessages never fire, and caches start empty, so listeners may receive partial objects (check \`.partial\` and fetch). Without MessageContent, guild messages arrive without content unless they mention the bot. Events of one guild run in order. The bot's own messages are not delivered.`,
+    `To remember things between events, \`import { kv } from 'textile'\`: \`await kv.get(key)\` returns the stored value or undefined, \`await kv.set(key, value)\` stores any JSON value, and \`await kv.delete(key)\` removes it. State belongs to the workflow: it lasts across events, revisions, and restarts, and goes when the workflow is deleted. Keys and values together take at most ${KV_LIMIT_BYTES / 1024} KiB, and a key at most ${KV_KEY_LIMIT_BYTES} bytes; a set past either throws and stores nothing. Only one guild's non-interaction events run in order: interactions, direct messages from different channels, and other guilds' events run at the same time, so their writes to one key can interleave and the last one wins. Read console output and failures with discord_workflow_logs.`,
     'Every request the workflow makes is checked against `grants`, as for discord_script_run. Answering an interaction (reply, deferReply, editReply, followUp) needs the `interaction` and `webhook` families or those operations, and works only for the interaction being handled. setPresence needs no grant.',
     '`name` is unique per bot: lowercase letters, digits, and dashes. Publishing an existing name adds a revision and leaves the running one in place.',
   ].join('\n\n'),
@@ -148,7 +158,7 @@ export const workflowDelete = defineTool({
   name: 'discord_workflow_delete',
   title: 'Delete a workflow',
   description:
-    'Stop a workflow and delete every revision of it. Its entries in the change log stay. This cannot be undone.',
+    'Stop a workflow and delete every revision of it, its KV state, and its run logs. Its entries in the change log stay. This cannot be undone.',
   toolset: 'api',
   risk: 'destructive',
   scopes: [],
@@ -162,10 +172,50 @@ export const workflowDelete = defineTool({
     }),
 })
 
+const LOGS_LIMIT = 20
+const LOGS_LIMIT_MAX = 100
+
+const LogsInput = Schema.Struct({
+  name: Schema.optionalKey(Name.annotate({ description: "One workflow's runs. Defaults to all." })),
+  failed: Schema.optionalKey(
+    Schema.Boolean.annotate({
+      description: 'Only runs that threw, timed out, crashed, or never started.',
+    }),
+  ),
+  limit: Schema.optionalKey(
+    Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: LOGS_LIMIT_MAX })).annotate({
+      description: `How many runs to return, newest first. Defaults to ${LOGS_LIMIT}.`,
+    }),
+  ),
+})
+
+export const workflowLogs = defineTool({
+  name: 'discord_workflow_logs',
+  title: 'Read workflow logs',
+  description: [
+    `This bot's recent workflow runs, newest first: the workflow and revision, the Gateway event, the outcome (completed, threw, timed_out, crashed, or skipped when it never started), the error, and what it logged with console. Runs stay readable for ${RUN_RETENTION_MS / (24 * 60 * 60 * 1000)} days, up to the newest ${RUNS_KEPT} per workflow.`,
+    'Each run keeps up to 16,384 characters of console output. A run that timed out or crashed keeps none. Bot and interaction tokens in logs and errors read [redacted].',
+  ].join('\n\n'),
+  toolset: 'api',
+  risk: 'read',
+  scopes: [],
+  annotations: { readOnlyHint: true, openWorldHint: false },
+  input: LogsInput,
+  handler: (args: typeof LogsInput.Type) =>
+    Effect.gen(function* () {
+      const { host, caller } = yield* access
+      const runs = yield* attempt(() =>
+        host.runs(caller.botId, { ...args, limit: args.limit ?? LOGS_LIMIT }),
+      )
+      return { runs }
+    }),
+})
+
 export const workflowTools = [
   workflowPublish,
   workflowList,
   workflowEnable,
   workflowDisable,
   workflowDelete,
+  workflowLogs,
 ] as const
