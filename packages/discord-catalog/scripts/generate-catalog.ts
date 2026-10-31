@@ -116,7 +116,7 @@ const closureOf = (roots: ReadonlyArray<string>, schemas: Record<string, unknown
 }
 
 /** Request fields holding a permission bitfield, which Discord sends and accepts as a string. */
-const BITFIELD_FIELDS = new Set(['allow', 'deny', 'permissions'])
+const BITFIELD_FIELDS = new Set(['allow', 'deny', 'permissions', 'default_member_permissions'])
 
 /**
  * Rewrite `#/components/schemas/X` to `#/$defs/X` so the map is a self-contained JSON Schema, and
