@@ -25,14 +25,20 @@ for (const [network, prefix] of [
 ] as const) {
   nonPublic.addSubnet(network, prefix, 'ipv4')
 }
+// IPv4-compatible, IPv4-translated, NAT64, Teredo, and 6to4 addresses embed an IPv4 address that
+// a gateway on the path may deliver to, so they are blocked whole rather than decoded.
 for (const [network, prefix] of [
-  ['::', 128],
-  ['::1', 128],
+  ['::', 96],
+  ['::ffff:0:0:0', 96],
   ['64:ff9b::', 96],
+  ['64:ff9b:1::', 48],
   ['100::', 64],
+  ['2001::', 32],
   ['2001:db8::', 32],
+  ['2002::', 16],
   ['fc00::', 7],
   ['fe80::', 10],
+  ['fec0::', 10],
   ['ff00::', 8],
 ] as const) {
   nonPublic.addSubnet(network, prefix, 'ipv6')
@@ -49,11 +55,9 @@ export const isPublicAddress = (address: string): boolean => {
   return false
 }
 
+/** The destination could not be shown to be public, so nothing was sent. */
 export class EgressBlockedError extends Error {
-  constructor(host: string, address: string) {
-    super(`${host} resolves to ${address}, which is not a public address.`)
-    this.name = 'EgressBlockedError'
-  }
+  override name = 'EgressBlockedError'
 }
 
 export interface EgressOptions {
@@ -80,8 +84,9 @@ const HOP_BY_HOP = new Set([
 /**
  * Fetch a URL on the public internet only. Every address the hostname resolves to is checked, and
  * the connection goes to the checked address, so a DNS answer cannot change between the check and
- * the connect. Redirects come back to the caller unfollowed; the isolate's next request for the
- * `Location` arrives here again and is checked again.
+ * the connect. A name that fails to resolve is refused too. Redirects come back to the caller
+ * unfollowed: workerd follows them through its outbound service, so each `Location` arrives at the
+ * broker as a new request and is checked against the grants and resolved again.
  */
 export const fetchPublic = async (
   request: Request,
@@ -92,12 +97,19 @@ export const fetchPublic = async (
   const resolve = options.resolve ?? resolveAll
   const host = url.hostname.replace(/^\[(.*)\]$/, '$1')
 
-  const addresses = isIP(host) === 0 ? await resolve(host) : [host]
+  const addresses =
+    isIP(host) === 0
+      ? await resolve(host).catch((error: unknown) => {
+          const code = (error as NodeJS.ErrnoException).code ?? String(error)
+          throw new EgressBlockedError(`${host} did not resolve (${code}).`)
+        })
+      : [host]
   const blocked = addresses.find((address) => !isPublic(address))
-  if (addresses.length === 0 || blocked !== undefined) {
-    throw new EgressBlockedError(host, blocked ?? 'nothing')
+  if (blocked !== undefined) {
+    throw new EgressBlockedError(`${host} resolves to ${blocked}, which is not a public address.`)
   }
-  const [address = host] = addresses
+  const [address] = addresses
+  if (address === undefined) throw new EgressBlockedError(`${host} resolves to no address.`)
   // Pins the connection to the address checked above. TLS still verifies the hostname.
   const pinned: LookupFunction = (_hostname, lookupOptions, callback) => {
     const family = isIP(address)
