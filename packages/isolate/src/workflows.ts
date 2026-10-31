@@ -199,7 +199,7 @@ const WORKFLOW_PRINCIPAL: Principal = { id: 'workflow', kind: 'discord-bot', sco
 
 /**
  * What a revision may see of an event: nothing outside its own intents, and in a guild, no
- * message content without MessageContent unless the message mentions the bot, as Discord does.
+ * message content without MessageContent, as Discord applies it.
  */
 const visibleTo = (revision: WorkflowRevision, kind: WorkflowEventKind, event: WorkflowEvent) => {
   const { d } = event.dispatch
@@ -207,41 +207,44 @@ const visibleTo = (revision: WorkflowRevision, kind: WorkflowEventKind, event: W
   const needed = inGuild ? kind.guild : kind.direct
   if ((revision.intents & needed) !== needed) return undefined
   const isMessage = kind.t === 'MESSAGE_CREATE' || kind.t === 'MESSAGE_UPDATE'
-  const mentioned = ((d.mentions ?? []) as ReadonlyArray<{ id?: unknown }>).some(
-    (user) => user.id === event.botId,
-  )
-  if (!isMessage || !inGuild || mentioned || (revision.intents & MESSAGE_CONTENT) !== 0) {
-    return event.dispatch
-  }
-  return { t: kind.t, d: withoutContent(d) }
+  if (!isMessage || !inGuild || (revision.intents & MESSAGE_CONTENT) !== 0) return event.dispatch
+  return { t: kind.t, d: visibleMessage(d, event.botId) }
 }
 
 type Message = Record<string, unknown>
 
-/** A message as an app without MessageContent sees it, including the ones it quotes or forwards. */
-const withoutContent = ({
-  poll: _,
-  referenced_message,
-  message_snapshots,
-  ...rest
-}: Message): Message => ({
-  ...rest,
-  content: '',
-  embeds: [],
-  attachments: [],
-  components: [],
-  ...(referenced_message == null
-    ? { referenced_message }
-    : { referenced_message: withoutContent(referenced_message as Message) }),
-  ...(Array.isArray(message_snapshots)
-    ? {
-        message_snapshots: message_snapshots.map((snapshot: { message?: Message }) => ({
-          ...snapshot,
-          ...(snapshot.message === undefined ? {} : { message: withoutContent(snapshot.message) }),
-        })),
-      }
-    : {}),
-})
+/**
+ * A message as an app without MessageContent sees it. Each message, including the ones it quotes
+ * or forwards, keeps its content only if the app wrote it or it mentions the app.
+ */
+const visibleMessage = (
+  { referenced_message, message_snapshots, ...message }: Message,
+  botId: string,
+): Message => {
+  const { poll: _, ...rest } = message
+  const author = message.author as { id?: unknown } | undefined
+  const mentioned = ((message.mentions ?? []) as ReadonlyArray<{ id?: unknown }>).some(
+    (user) => user.id === botId,
+  )
+  return {
+    ...(author?.id === botId || mentioned
+      ? message
+      : { ...rest, content: '', embeds: [], attachments: [], components: [] }),
+    ...(referenced_message == null
+      ? { referenced_message }
+      : { referenced_message: visibleMessage(referenced_message as Message, botId) }),
+    ...(Array.isArray(message_snapshots)
+      ? {
+          message_snapshots: message_snapshots.map((snapshot: { message?: Message }) => ({
+            ...snapshot,
+            ...(snapshot.message === undefined
+              ? {}
+              : { message: visibleMessage(snapshot.message, botId) }),
+          })),
+        }
+      : {}),
+  }
+}
 
 export const makeWorkflowHost = ({
   storage,

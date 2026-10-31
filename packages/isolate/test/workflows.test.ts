@@ -108,23 +108,39 @@ describe('the workflow dispatcher', () => {
   it('hands each workflow only the events and message content its own intents cover', async () => {
     const { runs, host: isolates } = recordingIsolates()
     const { host, enable } = await setup(isolates)
-    await enable('content', GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT)
-    await enable('no-content', GUILDS | GUILD_MESSAGES)
-    await enable('guilds-only', GUILDS)
+    await enable('content', GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT, [
+      'messageCreate',
+      'messageUpdate',
+    ])
+    await enable('no-content', GUILDS | GUILD_MESSAGES, ['messageCreate', 'messageUpdate'])
+    await enable('guilds-only', GUILDS, ['messageCreate', 'messageUpdate'])
 
     host.dispatch(message('secret'))
-    host.dispatch(message('hey bot', { mentions: [{ id: BOT.id }] }))
-    host.dispatch(message('reply', { referenced_message: { content: 'quoted' } }))
+    // A mention exempts only the message that makes it, not the one it quotes.
+    host.dispatch(
+      message('hey bot', {
+        mentions: [{ id: BOT.id }],
+        referenced_message: { author: { id: HUMAN }, content: 'quoted' },
+      }),
+    )
+    // The app always sees its own messages.
+    host.dispatch({
+      ...message('my edit', { author: { id: BOT.id } }),
+      dispatch: {
+        t: 'MESSAGE_UPDATE',
+        d: message('my edit', { author: { id: BOT.id } }).dispatch.d,
+      },
+    })
 
     await vi.waitFor(() => expect(runs).toHaveLength(6))
     // Workflows run in name order: content, then no-content.
-    expect(handed(runs)).toEqual(['secret', '', 'hey bot', 'hey bot', 'reply', ''])
+    expect(handed(runs)).toEqual(['secret', '', 'hey bot', 'hey bot', 'my edit', 'my edit'])
     const quoted = runs.map(
       (run) =>
         (run.execution.input as { event: { d: { referenced_message?: { content: string } } } })
           .event.d.referenced_message?.content,
     )
-    expect(quoted.slice(4)).toEqual(['quoted', ''])
+    expect(quoted.slice(2, 4)).toEqual(['quoted', ''])
   })
 
   it("runs each workflow's guild events in order, never waiting on another workflow or for interactions", async () => {
