@@ -69,6 +69,11 @@ interface Placement {
     readonly bots: BotRuntimes
     readonly workflows: WorkflowHost
   }) => (event: WorkflowEvent) => void
+  /**
+   * Whether a bot's REST calls stop once this host loses the bot's REST lease. Bot hosts fence
+   * them; one process serving every bot has nobody to hand a bot to.
+   */
+  readonly fenced: boolean
 }
 
 /**
@@ -120,7 +125,13 @@ const startBotHosting = (
     )
     const catalog = yield* Effect.provide(OperationCatalog, OperationCatalog.layer)
     // A bot's agent requests and workflows share its one rate limiter.
-    const limiters = createBotLimiters(rest)
+    // The limiters ask the runtimes, created next, whether this host still serves a bot.
+    let serving: BotRuntimes | undefined
+    const limiters = createBotLimiters(
+      rest,
+      fetch,
+      placement.fenced ? (botId) => serving?.serves(botId) ?? false : undefined,
+    )
     // The runtimes hand events to the workflow host, which needs the runtimes in turn.
     let workflows: WorkflowHost | undefined
     let route: ((event: WorkflowEvent) => void) | undefined
@@ -141,6 +152,7 @@ const startBotHosting = (
             route({ botId, token, dispatch: { t, d: d as Record<string, unknown> } })
           },
         })
+        serving = bots
         workflows = makeWorkflowHost({
           storage,
           isolates: makeIsolateHost(),
@@ -344,6 +356,7 @@ const main = Effect.gen(function* () {
       hostCount: members.hosts.length,
       owns: (botId) => ownerOf(members.hosts, botId) === self,
       route: (local) => routeDispatches({ ...members, self }, local, log),
+      fenced: true,
     })
     return yield* listen({
       ...createBotHost({ ...members, self }, createExecutor({ rest, scripts, ...hosting }), {
@@ -379,6 +392,7 @@ const main = Effect.gen(function* () {
           hostCount: 1,
           owns: () => true,
           route: ({ workflows }) => workflows.dispatch,
+          fenced: false,
         })
       : undefined
   const execute =

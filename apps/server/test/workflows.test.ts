@@ -736,4 +736,32 @@ describe("a bot's shared limiter", () => {
     expect((await call(current))._tag).toBe('Success')
     expect(reached.at(-1)).toBe(current)
   })
+
+  it('sends nothing more for a bot once another bot host serves it', async () => {
+    const token = botToken(BOT.id, 'current')
+    const reached = vi.fn(async () => Response.json({ id: CHANNEL }))
+    let serving = true
+    const limiters = createBotLimiters(
+      { timeoutMs: 1000, retries: 0, maxRateLimitWaitMs: 0 },
+      reached,
+      () => serving,
+    )
+    // A workflow run admitted while this host held the bot.
+    const { client, release } = limiters.lend(BOT.id, Redacted.make(token))
+    const call = () =>
+      Effect.runPromiseExit(
+        client.request({
+          method: 'GET',
+          route: `/channels/${CHANNEL}`,
+          operationFamily: 'channel',
+        }),
+      )
+
+    expect((await call())._tag).toBe('Success')
+    // This host lost the bot's REST lease, and another took it.
+    serving = false
+    expect((await call())._tag).toBe('Failure')
+    release()
+    expect(reached).toHaveBeenCalledTimes(1)
+  })
 })
