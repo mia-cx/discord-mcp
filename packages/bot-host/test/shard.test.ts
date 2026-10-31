@@ -9,20 +9,24 @@ afterEach(async () => {
   for (const step of cleanup.splice(0).reverse()) await step()
 })
 
-const start = async () => {
+/** Start a shard against a fake Gateway, resuming `saved` from the fake's `/resume` path if given. */
+const start = async (saved?: { sessionId: string; sequence: number }) => {
   const gateway = await fakeGateway()
   const clock = manualClock()
   const onFatal = vi.fn()
+  const onSession = vi.fn()
   const shard = startShard({
     token: TOKEN,
     gatewayUrl: gateway.url,
     clock,
+    ...(saved && { session: { ...saved, resumeGatewayUrl: `${gateway.url}/resume` } }),
+    onSession,
     onReady: () => {},
     onFatal,
     onIdentifyBudgetSpent: () => {},
   })
   cleanup.push(gateway.close, shard.stop)
-  return { gateway, clock, onFatal, shard }
+  return { gateway, clock, onFatal, onSession, shard }
 }
 
 const identified = (gateway: Awaited<ReturnType<typeof fakeGateway>>, count: number) =>
@@ -50,8 +54,8 @@ describe('the shard supervisor', () => {
     expect(gateway.connections).toHaveLength(1)
   })
 
-  it('reconnects with a fresh identify after a zombie connection or a dropped one', async () => {
-    const { gateway, clock } = await start()
+  it('resumes after a zombie connection or a dropped one, so Discord replays what it missed', async () => {
+    const { gateway, clock, onSession } = await start()
     await identified(gateway, 1)
     const zombie = gateway.connections[0]
     if (zombie === undefined) throw new Error('no connection')
@@ -64,16 +68,57 @@ describe('the shard supervisor', () => {
     await vi.waitFor(() => expect(zombie.closeCode).toBe(4000))
     // Backoff is 1s × random() for the first attempt.
     clock.advance(500)
-    await identified(gateway, 2)
+    await vi.waitFor(() =>
+      expect(gateway.connections[1]?.received[0]).toEqual({
+        op: 6,
+        d: { token: TOKEN, session_id: 'fake-session', seq: 1 },
+      }),
+    )
+    gateway.connections[1]?.send({ op: 0, t: 'MESSAGE_CREATE', s: 2, d: {} })
+    gateway.connections[1]?.send({ op: 0, t: 'RESUMED', s: 3, d: {} })
+    await vi.waitFor(() =>
+      expect(onSession).toHaveBeenLastCalledWith({
+        sessionId: 'fake-session',
+        resumeGatewayUrl: gateway.url,
+        sequence: 3,
+      }),
+    )
 
-    // A drop right after an Identify waits out Discord's five-second Identify window.
+    // A later drop resumes again, from the replayed sequence, without spending an Identify.
     gateway.connections[1]?.close(4000)
     await vi.waitFor(() => expect(gateway.connections[1]?.closeCode).toBe(4000))
-    clock.advance(4_000)
+    clock.advance(500)
+    await vi.waitFor(() =>
+      expect(gateway.connections[2]?.received[0]).toMatchObject({ op: 6, d: { seq: 3 } }),
+    )
+    await identified(gateway, 1)
+  })
+
+  it('identifies afresh, within Identify limits, when Discord rejects a saved session', async () => {
+    const { gateway, clock, onSession } = await start({ sessionId: 'expired', sequence: 7 })
+    await vi.waitFor(() =>
+      expect(gateway.connections[0]?.received[0]).toEqual({
+        op: 6,
+        d: { token: TOKEN, session_id: 'expired', seq: 7 },
+      }),
+    )
+    expect(gateway.connections[0]?.path).toBe('/resume/?v=10&encoding=json')
+
+    gateway.connections[0]?.send({ op: 9, d: false })
+    await vi.waitFor(() => expect(onSession).toHaveBeenLastCalledWith(undefined))
+    // Discord asks for a random 1–5 second wait; random() is 0.5.
+    clock.advance(3_000)
+    await identified(gateway, 1)
+    expect(gateway.connections[1]?.path).toBe('/?v=10&encoding=json')
+
+    // Rejected again straight away: the next Identify waits out Discord's five-second window.
+    gateway.connections[1]?.send({ op: 9, d: false })
+    await vi.waitFor(() => expect(gateway.connections[1]?.closeCode).toBe(4000))
+    clock.advance(3_000)
     await new Promise((resolve) => setTimeout(resolve, 100))
     expect(gateway.connections).toHaveLength(2)
-    clock.advance(1_000)
-    await identified(gateway, 3)
+    clock.advance(2_000)
+    await identified(gateway, 2)
   })
 
   it('stops for good when Discord rejects the token', async () => {

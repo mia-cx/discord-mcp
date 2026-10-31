@@ -4,6 +4,7 @@ const Op = {
   Dispatch: 0,
   Heartbeat: 1,
   Identify: 2,
+  Resume: 6,
   Reconnect: 7,
   InvalidSession: 9,
   Hello: 10,
@@ -12,9 +13,11 @@ const Op = {
 
 /** Discord refuses a new session after these too, so reconnecting cannot help. */
 const FATAL_CLOSE_CODES = new Set([4004, 4010, 4011, 4012, 4013, 4014])
+/** An invalid sequence number or a timed-out session: reconnecting needs a new session. */
+const SESSION_ENDED_CLOSE_CODES = new Set([4007, 4009])
 /** Ends the session, so Discord shows the bot offline at once. */
 const NORMAL_CLOSURE = 1000
-/** Closes a connection we are about to replace. */
+/** Closes a connection we are about to replace; any code but 1000 and 1001 keeps the session. */
 const RECONNECT_CLOSURE = 4000
 /** Discord allows one Identify per five seconds for a bot without large-bot sharding. */
 const IDENTIFY_INTERVAL_MS = 5_000
@@ -63,6 +66,13 @@ export interface ShardOptions {
   readonly token: string
   readonly gatewayUrl: string
   readonly clock: Clock
+  /** A session to resume instead of identifying, such as one a previous process saved. */
+  readonly session?: ShardSession
+  /**
+   * The resumable session changed: a new session, a later sequence number, or `undefined` once
+   * the session can no longer be resumed. Called in order, once per change.
+   */
+  readonly onSession: (session: ShardSession | undefined) => void
   readonly onReady: () => void
   /** Discord rejected the session for good; the shard has stopped. */
   readonly onFatal: (code: number) => void
@@ -71,24 +81,29 @@ export interface ShardOptions {
 }
 
 export interface Shard {
-  /** Close the connection and stop reconnecting. */
+  /** End the session, so Discord shows the bot offline, and stop reconnecting. */
   readonly stop: () => void
+  /** Disconnect and stop reconnecting, but leave the session resumable for the next process. */
+  readonly suspend: () => void
 }
 
 /**
- * One Gateway shard that identifies with an online presence, heartbeats, and reconnects with a
- * fresh identify after any drop. Shard 0 of 1, no intents, no resume.
+ * One Gateway shard that identifies with an online presence and heartbeats. After a drop it
+ * resumes its session, so Discord replays the dispatches it missed, and identifies afresh only
+ * once Discord says the session is gone. Shard 0 of 1, no intents.
  */
 export const startShard = ({
   token,
   gatewayUrl,
   clock,
+  session: saved,
+  onSession,
   onReady,
   onFatal,
   onIdentifyBudgetSpent,
 }: ShardOptions): Shard => {
   let socket: WebSocket | undefined
-  let sequence: number | null = null
+  let session = saved
   let acknowledged = true
   let attempts = 0
   const identifiedAt: number[] = []
@@ -104,8 +119,18 @@ export const startShard = ({
     current?.close(code)
   }
 
-  // Every connection identifies right after Hello, so Identify limits gate connecting.
+  const forget = () => {
+    if (session === undefined) return
+    session = undefined
+    onSession(undefined)
+  }
+
+  // A connection without a session identifies right after Hello, so Identify limits gate it.
   const connectAfter = (ms: number) => {
+    if (session !== undefined) {
+      cancelTimer = clock.schedule(connect, ms)
+      return
+    }
     const now = clock.now()
     while (identifiedAt[0] !== undefined && identifiedAt[0] <= now - DAY_MS) identifiedAt.shift()
     const limitWait = nextIdentifyAt(identifiedAt, now) - now
@@ -123,17 +148,43 @@ export const startShard = ({
     // No ACK since the last beat: the connection is a zombie.
     if (!acknowledged) return reconnect()
     acknowledged = false
-    send({ op: Op.Heartbeat, d: sequence })
+    send({ op: Op.Heartbeat, d: session?.sequence ?? null })
     cancelTimer = clock.schedule(() => heartbeat(interval), interval)
   }
 
+  const dispatch = ({ t, d, s }: Payload) => {
+    // Discord numbers every dispatch.
+    const sequence = s as number
+    if (t === 'READY') {
+      const ready = d as { session_id: string; resume_gateway_url: string }
+      session = {
+        sessionId: ready.session_id,
+        resumeGatewayUrl: ready.resume_gateway_url,
+        sequence,
+      }
+    } else if (session !== undefined) {
+      session = { ...session, sequence }
+    }
+    if (session !== undefined) onSession(session)
+    if (t === 'READY' || t === 'RESUMED') {
+      attempts = 0
+      onReady()
+    }
+  }
+
   const receive = (payload: Payload) => {
-    if (typeof payload.s === 'number') sequence = payload.s
     switch (payload.op) {
       case Op.Hello: {
         const { heartbeat_interval: interval } = payload.d as { heartbeat_interval: number }
         cancelTimer()
         cancelTimer = clock.schedule(() => heartbeat(interval), interval * clock.random())
+        if (session !== undefined) {
+          send({
+            op: Op.Resume,
+            d: { token, session_id: session.sessionId, seq: session.sequence },
+          })
+          return
+        }
         identifiedAt.push(clock.now())
         send({
           op: Op.Identify,
@@ -150,25 +201,23 @@ export const startShard = ({
         acknowledged = true
         return
       case Op.Heartbeat:
-        send({ op: Op.Heartbeat, d: sequence })
+        send({ op: Op.Heartbeat, d: session?.sequence ?? null })
         return
       case Op.Reconnect:
         return reconnect()
       case Op.InvalidSession:
+        // `d` says whether the session may still be resumed.
+        if (payload.d !== true) forget()
         drop(RECONNECT_CLOSURE)
         return connectAfter(INVALID_SESSION_MIN_MS + INVALID_SESSION_SPREAD_MS * clock.random())
       case Op.Dispatch:
-        if (payload.t === 'READY') {
-          attempts = 0
-          onReady()
-        }
+        return dispatch(payload)
     }
   }
 
   function connect() {
-    const ws = new WebSocket(`${gatewayUrl}/?v=10&encoding=json`)
+    const ws = new WebSocket(`${session?.resumeGatewayUrl ?? gatewayUrl}/?v=10&encoding=json`)
     socket = ws
-    sequence = null
     acknowledged = true
     // Events from a socket we already dropped are stale.
     ws.addEventListener('message', (event) => {
@@ -178,12 +227,20 @@ export const startShard = ({
       if (ws !== socket) return
       if (FATAL_CLOSE_CODES.has(code)) {
         drop(code)
+        forget()
         return onFatal(code)
       }
+      if (SESSION_ENDED_CLOSE_CODES.has(code)) forget()
       reconnect()
     })
   }
 
   connect()
-  return { stop: () => drop(NORMAL_CLOSURE) }
+  return {
+    stop: () => {
+      drop(NORMAL_CLOSURE)
+      forget()
+    },
+    suspend: () => drop(RECONNECT_CLOSURE),
+  }
 }

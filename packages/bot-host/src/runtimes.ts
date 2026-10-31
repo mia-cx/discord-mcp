@@ -73,6 +73,7 @@ export const createBotRuntimes = ({
       token: runtime.token,
       gatewayUrl,
       clock,
+      onSession: () => {},
       onReady: () => log(`Bot ${botId} is online.`),
       onIdentifyBudgetSpent: (waitMs) =>
         log(
