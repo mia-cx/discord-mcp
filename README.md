@@ -226,10 +226,12 @@ as many replicas as it needs:
 Give both tiers the same `BOT_HOSTS` and `BOT_HOST_SECRET`. Ownership comes from rendezvous
 hashing over `BOT_HOSTS`, so every replica agrees on it, and adding or removing a host moves
 only the bots that host gains or loses. A host answers 503 with `Retry-After: 1` for a bot
-its own list says it does not own. While a rollout leaves hosts on different lists, a bot that
-moved can still reach both its old and its new host, each with its own rate limiter, until the
-old host restarts on the new list. Keep bot hosts off the public network: the hop from central
-is plain HTTP and carries bot tokens.
+its list says it does not own, so a central still on an old list costs a retry, not a second
+owner. Two hosts on different lists can both own a bot that moved, each with its own rate
+limiter, so change `BOT_HOSTS` by stopping every bot host and then starting them all on the new
+list. Centrals can update in any order. Restarting a host takes its bots offline until their
+next call. Keep bot hosts off the public network: the hop from central is plain HTTP and
+carries bot tokens.
 
 A login must finish on the central replica that started it, because each replica tracks its
 own login flows and spent authorization codes. Route `/authorize`, `/auth/discord/callback`,
