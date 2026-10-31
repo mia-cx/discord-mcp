@@ -4,11 +4,12 @@ import { DiscordRest } from '@discord-mcp/discord-api'
 import { Effect, Layer, Redacted } from 'effect'
 import { describe, expect, it } from 'vitest'
 import { createRelay } from '../src/relay.ts'
-import { config, discordOAuth, login } from './login-fixture.ts'
+import { botToken, config, discordOAuth, executor, login } from './login-fixture.ts'
 
 const GUILD = '223456789012345678'
 const CHANNEL = '123456789012345678'
 const BOT = { id: '345678901234567890', username: 'textile', discriminator: '0', bot: true }
+const TOKEN = botToken(BOT.id, 'private-token-a')
 
 /** Fakes Discord behind the relay's REST seam, recording which token each call carried. */
 const relayWithFakeDiscord = () => {
@@ -17,39 +18,42 @@ const relayWithFakeDiscord = () => {
   const oauth = discordOAuth()
   const relay = createRelay(
     { ...config, login: { ...config.login, allowedUserIds: [oauth.state.userId] } },
-    (credential) =>
-      Layer.succeed(DiscordRest)({
-        raw: undefined as never,
-        request: (call) =>
-          Effect.sync(() => {
-            calls.push({
-              token: Redacted.value(credential),
-              method: call.method,
-              route: call.route,
-              ...(call.body === undefined ? {} : { body: call.body }),
-            })
-            if (call.route === '/users/@me') return BOT
-            if (call.method === 'GET')
-              return { id: CHANNEL, type: 0, name: 'general', guild_id: GUILD }
-            messages += 1
-            return {
-              id: String(900000000000000000n + BigInt(messages)),
-              channel_id: CHANNEL,
-              author: BOT,
-              content: '',
-              timestamp: '2026-10-31T00:00:00.000Z',
-              edited_timestamp: null,
-              tts: false,
-              mention_everyone: false,
-              mentions: [],
-              mention_roles: [],
-              attachments: [],
-              embeds: [],
-              pinned: false,
-              type: 0,
-            }
-          }),
-      }),
+    executor(
+      (credential) =>
+        Layer.succeed(DiscordRest)({
+          raw: undefined as never,
+          request: (call) =>
+            Effect.sync(() => {
+              calls.push({
+                token: Redacted.value(credential),
+                method: call.method,
+                route: call.route,
+                ...(call.body === undefined ? {} : { body: call.body }),
+              })
+              if (call.route === '/users/@me') return BOT
+              if (call.method === 'GET')
+                return { id: CHANNEL, type: 0, name: 'general', guild_id: GUILD }
+              messages += 1
+              return {
+                id: String(900000000000000000n + BigInt(messages)),
+                channel_id: CHANNEL,
+                author: BOT,
+                content: '',
+                timestamp: '2026-10-31T00:00:00.000Z',
+                edited_timestamp: null,
+                tts: false,
+                mention_everyone: false,
+                mentions: [],
+                mention_roles: [],
+                attachments: [],
+                embeds: [],
+                pinned: false,
+                type: 0,
+              }
+            }),
+        }),
+      { scripts: true },
+    ),
     oauth.fetch,
   )
   return { relay, calls }
@@ -70,7 +74,7 @@ const runScript = async (
         'mcp-name': 'discord_script_run',
         'mcp-protocol-version': '2026-07-28',
         authorization: `Bearer ${tokens.access_token}`,
-        'x-discord-bot-token': 'private-token-a',
+        'x-discord-bot-token': TOKEN,
       },
       body: JSON.stringify({
         jsonrpc: '2.0',
@@ -122,12 +126,12 @@ describe('discord_script_run', () => {
     ])
     const replayed = calls.filter((call) => call.route.startsWith('/channels/'))
     expect(replayed).toHaveLength(22)
-    expect(replayed.every((call) => call.token === 'private-token-a')).toBe(true)
+    expect(replayed.every((call) => call.token === TOKEN)).toBe(true)
     expect(replayed.some((call) => call.method === 'DELETE')).toBe(false)
     expect(replayed[1]?.body).toMatchObject({ embeds: [{ title: 'Report 0' }] })
     // A bodyless write reaches Discord with no body.
     expect(replayed.at(-1)).toEqual({
-      token: 'private-token-a',
+      token: TOKEN,
       method: 'PUT',
       route: expect.stringMatching(/\/reactions\/%F0%9F%91%8D\/@me$/),
     })

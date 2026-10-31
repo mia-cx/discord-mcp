@@ -7,10 +7,9 @@ import { inMemoryStorage } from '@discord-mcp/storage/testing'
 import { Effect, Layer } from 'effect'
 import { describe, expect, it, vi } from 'vitest'
 import { createRelay } from '../src/relay.ts'
-import { config, discordOAuth, login } from './login-fixture.ts'
+import { BOT_ID, botToken, config, discordOAuth, executor, login } from './login-fixture.ts'
 
-const BOT_ID = '345678901234567890'
-const TOKEN = 'private-bot-token'
+const TOKEN = botToken()
 const HOUR = 60 * 60 * 1000
 
 const listTools = (accessToken: string) =>
@@ -48,13 +47,15 @@ describe('bot hosting', () => {
     const bots = createBotRuntimes({ vault, clock, log, gatewayUrl: gateway.url })
     const relay = createRelay(
       config,
-      () =>
-        Layer.succeed(DiscordRest)({
-          raw: undefined as never,
-          request: () => Effect.succeed({ id: BOT_ID, bot: true }),
-        }),
+      executor(
+        () =>
+          Layer.succeed(DiscordRest)({
+            raw: undefined as never,
+            request: () => Effect.succeed({ id: BOT_ID, bot: true }),
+          }),
+        { bots },
+      ),
       discordOAuth().fetch,
-      bots,
     )
     const { tokens } = await login(relay)
 

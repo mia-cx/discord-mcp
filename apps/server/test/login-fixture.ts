@@ -1,12 +1,11 @@
 import { createHash } from 'node:crypto'
 import { Redacted } from 'effect'
 import { expect } from 'vitest'
-import type { RelayConfig } from '../src/relay.ts'
+import { createExecutor, type ExecutorOptions, type RelayConfig } from '../src/relay.ts'
 
 export const config: RelayConfig = {
   allowedHosts: ['relay.test'],
   allowedOrigins: ['https://relay.test'],
-  rest: { timeoutMs: 1000, retries: 0, maxRateLimitWaitMs: 1000 },
   login: {
     publicBaseUrl: 'https://relay.test',
     clientId: '123456789012345678',
@@ -14,6 +13,23 @@ export const config: RelayConfig = {
     encryptionKey: Redacted.make(Buffer.alloc(32, 7).toString('base64')),
   },
 }
+
+export const BOT_ID = '345678901234567890'
+
+/** A bot token in Discord's shape: its first segment is the bot's ID in base64. */
+export const botToken = (botId = BOT_ID, secret = 'private-bot-secret') =>
+  `${Buffer.from(botId).toString('base64url')}.${secret}`
+
+/** Run requests in this process, with Discord REST replaced by `restLayer`. */
+export const executor = (
+  restLayer?: ExecutorOptions['restLayer'],
+  options: Omit<ExecutorOptions, 'rest' | 'restLayer'> = {},
+) =>
+  createExecutor({
+    rest: { timeoutMs: 1000, retries: 0, maxRateLimitWaitMs: 1000 },
+    ...(restLayer === undefined ? {} : { restLayer }),
+    ...options,
+  })
 
 /**
  * Fake only Discord's external OAuth endpoints; the issuer, crypto, browser checks and MCP are real.
