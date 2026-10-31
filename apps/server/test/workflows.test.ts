@@ -168,6 +168,7 @@ const platform = async (shards = 1) => {
   let workflows: WorkflowHost | undefined
   const bots: BotRuntimes = createBotRuntimes({
     vault: createTokenVault(Buffer.alloc(32, 1), storage),
+    storage,
     clock,
     log,
     discordFetch: gateway.discordFetch({ shards, maxConcurrency: shards }),

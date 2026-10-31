@@ -1,4 +1,6 @@
+import type { Storage } from '@discord-mcp/storage'
 import type { Clock } from './clock.ts'
+import { createConsent } from './consent.ts'
 import { createIdentifyGate, type SessionStartLimit } from './identify.ts'
 import { type Presence, type Shard, type ShardSession, startShard } from './shard.ts'
 import type { TokenVault } from './vault.ts'
@@ -17,12 +19,20 @@ const VOICE_INTENTS = (1 << 0) | (1 << 7)
 
 export interface BotRuntimesOptions {
   readonly vault: TokenVault
+  /** Where people's voice opt-outs are kept. */
+  readonly storage: Pick<Storage, 'setVoiceOptOut' | 'voiceOptedOut'>
   readonly clock: Clock
   /** Operator-facing lifecycle messages and failures. Never receives a token. */
   readonly log: (message: string) => void
-  /** Reaches Discord's REST API for each bot's Gateway URL, shard count, and Identify limits. */
+  /**
+   * Reaches Discord's REST API for each bot's Gateway URL, shard count, and Identify limits, its
+   * voice notices, and the answers to their buttons.
+   */
   readonly discordFetch?: typeof fetch
-  /** Hears every dispatch from every shard of every bot, replayed ones included. */
+  /**
+   * Hears every dispatch from every shard of every bot, replayed ones included, except clicks on
+   * Textile's own voice notice buttons.
+   */
   readonly onDispatch?: (botId: string, event: string, data: unknown) => void
 }
 
@@ -98,12 +108,28 @@ const reason = (cause: unknown) => (cause instanceof Error ? cause.message : Str
 /** The bots this process keeps online, one runtime per bot, each running all its shards. */
 export const createBotRuntimes = ({
   vault,
+  storage,
   clock,
   log,
   discordFetch = fetch,
   onDispatch,
 }: BotRuntimesOptions): BotRuntimes => {
   const running = new Map<string, Runtime>()
+  // An opt-out reaches this process's bots at once; other bot hosts' bots check again whenever
+  // the person next starts speaking.
+  const consent = createConsent({
+    storage,
+    discordFetch,
+    apiUrl: DISCORD_API_URL,
+    log,
+    changed: (scope, userId) => {
+      if ('everywhere' in scope) {
+        for (const runtime of running.values()) runtime.voice.reconsider(undefined, userId)
+      } else {
+        running.get(scope.botId)?.voice.reconsider(scope.guildId, userId)
+      }
+    },
+  })
   /**
    * Tokens Discord rejected, by bot, with the close code. Retrying them only spends Identifies,
    * until a workflow change may have fixed rejected intents.
@@ -205,6 +231,10 @@ export const createBotRuntimes = ({
             ? undefined
             : Number((BigInt(guildId) >> 22n) % BigInt(runtime.shards.length)),
         send: (shardId, payload) => runtime.shards[shardId]?.send(payload) ?? false,
+        consent: {
+          notice: (channelId) => consent.notice(runtime.token, channelId),
+          optedOut: (guildId, userId) => consent.optedOut(botId, guildId, userId),
+        },
         clock,
         log,
       }),
@@ -258,6 +288,7 @@ export const createBotRuntimes = ({
         onReady: () => log(`Bot ${botId} is online on shard ${shardId} of ${shardCount}.`),
         onDispatch: (event, data) => {
           runtime.voice.dispatch(shardId, event, data)
+          if (event === 'INTERACTION_CREATE' && consent.answer(botId, data)) return
           onDispatch?.(botId, event, data)
         },
         onDrop: () => runtime.voice.dropped(shardId),

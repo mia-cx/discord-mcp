@@ -38,12 +38,16 @@ export const voiceTools = (voice: () => BotVoice | undefined) => [
     name: 'discord_voice_join',
     title: 'Join a voice channel',
     description: [
-      'Join this bot to a voice channel so it can play audio there. The bot needs View Channel, Connect, and Speak.',
-      'Joining another channel in the same server moves the bot and closes its open voice socket.',
+      'Join this bot to a voice channel so it can play audio there, and with receive: true, hear it. The bot needs View Channel, Connect, and Speak.',
+      'Joining another channel in the same server moves the bot and closes its open voice socket. Joining the same channel again switches receiving on or off.',
       '',
       `Then open a WebSocket to the returned socket path, on the same host as /mcp (wss: for https:), with the same Authorization and X-Discord-Bot-Token headers, adding codec=opus, or codec=pcm16&sample_rate=<${PCM_SAMPLE_RATES.join('|')}>&channels=<1|2>.`,
       'Send audio as binary messages: one 20 ms, 48 kHz stereo Opus packet per message, or little-endian 16-bit PCM, interleaved when stereo.',
-      'The bot speaks while audio arrives and stops when it pauses. The socket only sends audio; it receives none.',
+      'The bot speaks while audio arrives and stops when it pauses.',
+      '',
+      "With receive: true, the bot first posts a notice in the voice channel's chat whose buttons let anyone opt out of being relayed; it needs Send Messages there. The result's receiving says whether it worked, and reason why not.",
+      'While receiving, each binary message the socket sends is one speaker: their user ID as 8 bytes, big-endian, then one packet in your codec. Text messages are JSON events: {"type":"join"|"leave","user_id"} and {"type":"speaking","user_id","speaking":true|false}.',
+      'People who opted out never appear. Receiving is unsupported by Discord and best-effort: packets may be lost or arrive out of order, and a speaker is heard only once Discord names them.',
     ].join('\n'),
     toolset: 'api',
     risk: 'write',
@@ -52,20 +56,31 @@ export const voiceTools = (voice: () => BotVoice | undefined) => [
     input: Schema.Struct({
       guildId: GuildId,
       channelId: Snowflake.annotate({ description: 'The voice channel to join.' }),
+      receive: Schema.optional(Schema.Boolean).annotate({
+        description: 'Relay what people say to the voice socket, after posting a notice.',
+      }),
     }),
-    handler: ({ guildId, channelId }: { guildId: string; channelId: string }) =>
+    handler: ({
+      guildId,
+      channelId,
+      receive = false,
+    }: {
+      guildId: string
+      channelId: string
+      receive?: boolean | undefined
+    }) =>
       Effect.gen(function* () {
         const bot = voice()
         if (bot === undefined) return yield* Effect.fail(offline())
-        yield* Effect.tryPromise({
-          try: () => bot.join(guildId, channelId),
+        const joined = yield* Effect.tryPromise({
+          try: () => bot.join(guildId, channelId, receive),
           catch: (cause) =>
             new DiscordGatewayError({
               message: cause instanceof Error ? cause.message : String(cause),
               suggestion: 'Call discord_permissions_explain for the channel, then try again.',
             }),
         })
-        return { socket: `${VOICE_PATH}?guild_id=${guildId}` }
+        return { socket: `${VOICE_PATH}?guild_id=${guildId}`, ...joined }
       }),
   }),
   defineTool({
