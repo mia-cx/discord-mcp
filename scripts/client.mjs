@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import { randomBytes } from 'node:crypto'
-import { link, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
-import { setTimeout as delay } from 'node:timers/promises'
+import { locked } from './lock.mjs'
 
 // A private, per-user stdio connection to the hosted relay. No credentials in agent configs.
 const directory = process.env.DISCORD_MCP_CONFIG_DIR ?? join(homedir(), '.config', 'discord-mcp')
@@ -12,8 +12,6 @@ const loginFile = join(directory, 'login.json')
 const REFRESH_EARLY_SECONDS = 24 * 3600
 // Longer than the relay's 15-second Discord call, so the bridge never abandons a rotation.
 const REFRESH_TIMEOUT_MS = 30_000
-// A refresh request gives up after REFRESH_TIMEOUT_MS, so an older lock belongs to a crashed bridge.
-const LOCK_STALE_MS = 60_000
 const LOOPBACK = ['127.0.0.1', 'localhost', '[::1]']
 // A 2026-07-28 request names its own protocol version here; older clients negotiate it once.
 const VERSION_META_KEY = 'io.modelcontextprotocol/protocolVersion'
@@ -72,53 +70,12 @@ const credentials = async () => {
   }
 }
 
-/** Run `task` while holding a lock file shared by every bridge using this login. */
-const locked = async (task) => {
-  const lock = `${loginFile}.lock`
-  const owner = randomBytes(16).toString('hex')
-  const age = (path) =>
-    stat(path).then(
-      (lockStat) => Date.now() - lockStat.mtimeMs,
-      () => 0,
-    )
-  for (;;) {
-    try {
-      await writeFile(lock, owner, { flag: 'wx', mode: 0o600 })
-      break
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error
-      if ((await age(lock)) <= LOCK_STALE_MS) {
-        await delay(50)
-        continue
-      }
-      // Move the stale lock aside before deleting it. Another bridge may have reclaimed it first;
-      // a moved lock that turns out fresh is that bridge's, so put it back.
-      const aside = `${lock}.${owner}`
-      if (
-        !(await rename(lock, aside).then(
-          () => true,
-          () => false,
-        ))
-      )
-        continue
-      if ((await age(aside)) <= LOCK_STALE_MS) await link(aside, lock).catch(() => {})
-      await rm(aside, { force: true })
-    }
-  }
-  try {
-    return await task()
-  } finally {
-    // Release only this bridge's lock; a crash-reclaimed one may belong to another.
-    if ((await readFile(lock, 'utf8').catch(() => '')) === owner) await rm(lock, { force: true })
-  }
-}
-
 /**
  * Replace `stale` with a rotated login. A refresh revokes the previous tokens, so bridges
- * take turns: whoever finds login.json already rotated uses that result instead.
+ * take turns: whoever finds login.json already rotated, or replaced, uses that login instead.
  */
 const refresh = (stale) =>
-  locked(async () => {
+  locked(loginFile, async () => {
     const current = await readLogin()
     if (current.refresh_token !== stale.refresh_token) return current
     const response = await fetch(new URL('/token', current.resource), {
@@ -137,9 +94,6 @@ const refresh = (stale) =>
       const error = await response.json().catch(() => undefined)
       if (error?.error !== 'invalid_grant')
         throw new Error(`Discord login refresh failed (HTTP ${response.status}).`)
-      // A sign-in with --replace does not take the lock and may have rotated the file meanwhile.
-      const latest = await readLogin()
-      if (latest.refresh_token !== current.refresh_token) return latest
       throw new Error('Discord login expired. Run the login helper again.')
     }
     const tokens = await response.json()
@@ -156,9 +110,6 @@ const refresh = (stale) =>
       refresh_token: tokens.refresh_token,
       expires_at: now() + tokens.expires_in,
     }
-    // A sign-in with --replace may have written a new login while this refresh ran; keep it.
-    const latest = await readLogin()
-    if (latest.refresh_token !== current.refresh_token) return latest
     const temporary = `${loginFile}.${randomBytes(16).toString('hex')}.tmp`
     await writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600, flag: 'wx' })
     await rename(temporary, loginFile)
