@@ -300,6 +300,9 @@ importers:
       '@discord-mcp/discord-api':
         specifier: workspace:*
         version: link:../discord-api
+      '@discord-mcp/isolate':
+        specifier: workspace:*
+        version: link:../isolate
       '@discord-mcp/persistence':
         specifier: workspace:*
         version: link:../persistence

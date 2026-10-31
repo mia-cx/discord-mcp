@@ -20,6 +20,9 @@
     },
     {
       "path": "../auth"
+    },
+    {
+      "path": "../isolate"
     }
   ]
 }
