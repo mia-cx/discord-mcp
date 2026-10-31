@@ -31,7 +31,9 @@ the server executable no longer starts them. `PLAN.md` describes that historical
 
 The project is being renamed Textile. It is growing from a stateless relay into a platform where
 agents run their bots: online presence, automations, voice, and one-off scripts. Textile hosts no
-inference; it relays Discord to agents and runs agent-written code. v1 serves allowlisted friends.
+inference; it relays Discord to agents and runs agent-written code. v1 serves allowlisted friends:
+the platform features (stored tokens, workflows, voice) require a configured allowlist, and an
+unset list never opens them to every Discord user.
 
 - **Tiers.** A stateless, load-balanceable central tier checks OAuth and the allowlist, then
   routes by bot ID (decoded from the token). Trusted bot hosts each own a set of bots: the
@@ -44,7 +46,8 @@ inference; it relays Discord to agents and runs agent-written code. v1 serves al
   pinned npm dependencies bundled at publish. Triggers are Gateway events (interactions
   included), cron schedules, and inbound HTTP routes. Each workflow declares grants: catalog
   operations and reachable hosts, shown at enable time; destructive operations need an explicit
-  grant. Egress goes through a broker proxy that blocks private ranges. Anyone holding relay
+  grant. Egress goes through a broker proxy that checks every resolved address and redirect target,
+  not just the hostname, and blocks private, loopback, and link-local ranges. Anyone holding relay
   OAuth and the bot's token manages its workflows; the acting human is recorded.
 - **Voice.** A bidirectional voice WebSocket relays Discord voice, per speaker. Agents bring their
   own speech-to-speech or local models; Textile never runs them. Receiving voice always posts a
@@ -76,7 +79,9 @@ repository's docs and helper defaults; the login helper requires an explicit rel
 
 ## Deployment boundary
 
-The public OAuth relay runs in native k3s. Namespace `discord-mcp` has a
+Today's public OAuth relay, the stateless one described above, runs on the olympus k3s cluster and
+serves real users. Textile's staging will be a separate deployment there, in its own `textile`
+namespace; production moves to the managed provider. Namespace `discord-mcp` has a
 single-replica, read-only Deployment pinned to a tested OAuth relay image and a
 `discord-mcp-relay` Service. The generated encryption key lives in `discord-mcp-crypto`.
 The existing Discord application's ID and secret are saved in `discord-mcp-oauth`.
