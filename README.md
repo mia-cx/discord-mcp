@@ -225,13 +225,15 @@ as many replicas as it needs:
 
 Give both tiers the same `BOT_HOSTS` and `BOT_HOST_SECRET`. Ownership comes from rendezvous
 hashing over `BOT_HOSTS`, so every replica agrees on it, and adding or removing a host moves
-only the bots that host gains or loses. While a rollout leaves the lists different, a host
-answers 503 with `Retry-After: 1` for a bot it does not own. Keep bot hosts off the public
-network: the hop from central is plain HTTP and carries bot tokens.
+only the bots that host gains or loses. A host answers 503 with `Retry-After: 1` for a bot
+its own list says it does not own. While a rollout leaves hosts on different lists, a bot that
+moved can still reach both its old and its new host, each with its own rate limiter, until the
+old host restarts on the new list. Keep bot hosts off the public network: the hop from central
+is plain HTTP and carries bot tokens.
 
-Each central replica remembers spent authorization codes on its own, so with several
-replicas a code can be redeemed once per replica within its minute. PKCE still binds it to
-the client that started the login.
+A login must finish on the central replica that started it, because each replica tracks its
+own login flows and spent authorization codes. Route `/authorize`, `/auth/discord/callback`,
+and `/token` to one replica. Refreshes and MCP requests work on any replica.
 
 For agent-operated clients, use the [curl example](./docs/operating.md#curl).
 For a developer-Team-derived access list, follow
