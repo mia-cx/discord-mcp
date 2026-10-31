@@ -9,8 +9,10 @@ import type {
 } from '@discord-mcp/storage'
 import type { OperationEntry } from '@mia-cx/discord-catalog'
 import { Effect, Redacted } from 'effect'
+import { transform } from 'esbuild'
 import { type KvStore, makeBroker, type Presence } from './broker.ts'
 import { bundleWorkflow, ScriptBuildError, type ScriptModule, withRuntime } from './bundle.ts'
+import { type Dependencies, DependencyError, withDependencies } from './dependencies.ts'
 import type { GatewayEvent, IsolateHost, ScriptOutcome } from './isolate-host.ts'
 
 const GUILD_MEMBERS = 1 << 1
@@ -129,6 +131,8 @@ export interface WorkflowHostOptions {
   readonly isolates: IsolateHost
   readonly bots: WorkflowBots
   readonly operations: ReadonlyArray<OperationEntry>
+  /** The npm registry workflow dependencies install from; npm's public one by default. */
+  readonly registry?: string
   /**
    * Borrow the REST client a bot's workflows call Discord through, acting with `token`. The bot
    * host lends the bot's own rate limiter, so workflows and agent calls share its limits.
@@ -172,7 +176,15 @@ export interface WorkflowHost {
   /** Load the source in an isolate to find its events and intents, then store a new revision. */
   readonly publish: (
     caller: WorkflowCaller,
-    input: { readonly name: string; readonly source: string; readonly grants: WorkflowGrants },
+    input: {
+      readonly name: string
+      readonly source: string
+      readonly grants: WorkflowGrants
+      /** npm packages the source imports, by version, range, or tag. */
+      readonly dependencies?: Readonly<Record<string, string>>
+      /** A package-lock.json pinning every version `dependencies` installs. */
+      readonly lockfile?: string
+    },
   ) => Promise<WorkflowRevision>
   readonly list: (botId: string) => Promise<WorkflowListing>
   /**
@@ -272,6 +284,52 @@ const compile = ({ source, bundle }: WorkflowRevision) => {
   return modules
 }
 
+/**
+ * discord.js features that need state lasting across events, or uploads, which a fresh isolate
+ * per event can't serve. Matched in the source as written, comments removed, so a call built at
+ * runtime still gets past them.
+ */
+const UNSUPPORTED: ReadonlyArray<readonly [RegExp, string]> = [
+  [
+    /\.(?:create(?:Message|Reaction|MessageComponent)Collector|await(?:Messages|Reactions|MessageComponent|ModalSubmit))\s*\(|\bnew\s+(?:Message|Reaction|Interaction)Collector\b/,
+    'source: collectors and awaitMessages wait for later events, but each event runs in a fresh isolate, so they never fire. Handle the later event in its own listener.',
+  ],
+  [
+    /\bfiles\s*:\s*\[[^\]]*?["'`]https?:\/\/|\battachment\s*:\s*["'`]https?:\/\/|\bnew\s+AttachmentBuilder\s*\(\s*["'`]https?:\/\//,
+    "source: discord.js uploads a URL attachment as a file, and workflows can't upload files. Put the URL in the message content or an embed.",
+  ],
+]
+
+/**
+ * Check a workflow for what can't run in an isolate, then bundle it with its dependencies. Every
+ * failure is the agent's to fix, so each becomes a validation error.
+ */
+const buildRevision = async (
+  source: string,
+  dependencies: Dependencies,
+): Promise<{ readonly value: string; readonly packages: ReadonlyArray<string> }> => {
+  const misuses = await transform(source, { loader: 'ts', logLevel: 'silent' }).then(
+    ({ code }) => UNSUPPORTED.filter(([pattern]) => pattern.test(code)).map(([, issue]) => issue),
+    // Bundling reports the syntax error.
+    () => [],
+  )
+  if (misuses.length > 0) {
+    throw invalid("The workflow uses discord.js features workflows can't run.", ...misuses)
+  }
+  const none =
+    Object.keys(dependencies.dependencies).length === 0 && dependencies.lockfile === undefined
+  try {
+    return none
+      ? { value: await bundleWorkflow(source), packages: [] }
+      : await withDependencies(dependencies, (root) => bundleWorkflow(source, root))
+  } catch (error) {
+    if (error instanceof ScriptBuildError || error instanceof DependencyError) {
+      throw invalid(error.message, ...error.issues)
+    }
+    throw error
+  }
+}
+
 /** Identifies a revision across a delete and a republish under the same name. */
 const revisionKey = ({ name, revision, publishedAt }: WorkflowRevision) =>
   `${name}:${revision}:${publishedAt.getTime()}`
@@ -333,6 +391,7 @@ export const makeWorkflowHost = ({
   isolates,
   bots,
   operations,
+  registry,
   rest,
   log,
   now = Date.now,
@@ -613,7 +672,7 @@ export const makeWorkflowHost = ({
   }
 
   return {
-    publish: async (caller, { name, source, grants }) => {
+    publish: async (caller, { name, source, grants, dependencies = {}, lockfile }) => {
       if (!NAME.test(name)) {
         throw invalid(
           'The name is not valid.',
@@ -623,8 +682,10 @@ export const makeWorkflowHost = ({
       if (Buffer.byteLength(source) > SOURCE_LIMIT_BYTES) {
         throw invalid(`The source exceeds ${SOURCE_LIMIT_BYTES} bytes.`)
       }
-      const bundle = await bundleWorkflow(source).catch((error: unknown) => {
-        throw error instanceof ScriptBuildError ? invalid(error.message, ...error.issues) : error
+      const { value: bundle, packages } = await buildRevision(source, {
+        dependencies,
+        ...(lockfile === undefined ? {} : { lockfile }),
+        ...(registry === undefined ? {} : { registry }),
       })
       const declared = await probe(caller, await withRuntime(bundle))
       const unsupported = declared.events.filter(
@@ -655,7 +716,7 @@ export const makeWorkflowHost = ({
         name,
         source,
         bundle,
-        packages: [],
+        packages,
         grants,
         events,
         intents: declared.intents,
