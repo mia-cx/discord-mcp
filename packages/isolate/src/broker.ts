@@ -60,10 +60,18 @@ const decodeSegment = (segment: string) => {
 const GATEWAY_HOST = 'gateway.textile.internal'
 const PRESENCE_UPDATE = 3
 const STATUSES = new Set(['online', 'idle', 'dnd', 'invisible'])
+/** Playing, Streaming, Listening, Watching, Custom, Competing. */
+const MAX_ACTIVITY_TYPE = 5
+/** Far below the Gateway's 4096-byte payload limit, and above any presence a bot can show. */
+const PRESENCE_LIMIT_BYTES = 2048
 
-/** A malformed presence makes Discord drop the bot's whole Gateway connection, so check its shape. */
+/**
+ * A malformed or oversized presence makes Discord drop the bot's whole Gateway connection, and
+ * every workflow's events with it, so check its shape and size.
+ */
 const isPresence = (value: unknown): value is Presence => {
   if (typeof value !== 'object' || value === null) return false
+  if (Buffer.byteLength(JSON.stringify(value)) > PRESENCE_LIMIT_BYTES) return false
   const { since, activities, status, afk } = value as Record<string, unknown>
   return (
     (since === null || typeof since === 'number') &&
@@ -76,7 +84,9 @@ const isPresence = (value: unknown): value is Presence => {
         typeof activity === 'object' &&
         activity !== null &&
         typeof (activity as { name?: unknown }).name === 'string' &&
-        typeof (activity as { type?: unknown }).type === 'number',
+        Number.isInteger((activity as { type?: unknown }).type) &&
+        (activity as { type: number }).type >= 0 &&
+        (activity as { type: number }).type <= MAX_ACTIVITY_TYPE,
     )
   )
 }
