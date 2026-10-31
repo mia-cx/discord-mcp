@@ -234,6 +234,7 @@ export const createBotRuntimes = ({
   const consent = createConsent({
     storage,
     discordFetch,
+    owns: (botId) => own(botId),
     apiUrl: DISCORD_API_URL,
     log,
     changed: optOutChanged,
@@ -850,10 +851,12 @@ export const createBotRuntimes = ({
       await bringOnline(botId, latest)
     }).catch((cause) => log(`Bot ${botId} stays offline: ${reason(cause)}`))
 
+  const own = async (botId: string) =>
+    !closed && (leases.holds(restLease(botId)) || leases.claim(restLease(botId)))
+
   return {
     use,
-    own: async (botId) =>
-      !closed && (leases.holds(restLease(botId)) || leases.claim(restLease(botId))),
+    own,
     serves: (botId) => !closed && leases.holds(restLease(botId)),
     hold: async (botId, intents) => {
       if (closed) return
@@ -911,7 +914,7 @@ export const createBotRuntimes = ({
             const token = known.get(botId)?.token
             return token === undefined
               ? Promise.resolve('The bot is offline.')
-              : consent.notice(token, channelId)
+              : consent.notice(botId, token, channelId)
           },
           // Without the feed, everyone counts as opted out.
           optedOut: async (guildId, userId) =>

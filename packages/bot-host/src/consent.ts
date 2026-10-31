@@ -55,6 +55,11 @@ export interface ConsentOptions {
   readonly storage: Pick<Storage, 'setVoiceOptOut' | 'voiceOptedOut'>
   /** Reaches Discord's REST API. */
   readonly discordFetch: typeof fetch
+  /**
+   * Whether this process may call Discord as the bot, asked before each such call: one process at
+   * a time may, and it can change while a notice waits on Discord.
+   */
+  readonly owns: (botId: string) => Promise<boolean>
   readonly apiUrl: string
   readonly log: (message: string) => void
   /** A person's opt-out changed: this process's voices apply it without waiting for storage. */
@@ -66,7 +71,7 @@ export interface Consent {
    * Post the notice in a voice channel's chat, as the bot. Resolves to why it could not be posted,
    * or `undefined` once it is up.
    */
-  readonly notice: (token: string, channelId: string) => Promise<string | undefined>
+  readonly notice: (botId: string, token: string, channelId: string) => Promise<string | undefined>
   /** Whether a person opted out of relay by this bot in this server, or by every bot. */
   readonly optedOut: (botId: string, guildId: string, userId: string) => Promise<boolean>
   /**
@@ -84,10 +89,16 @@ export interface Consent {
 export const createConsent = ({
   storage,
   discordFetch,
+  owns,
   apiUrl,
   log,
   changed,
 }: ConsentOptions): Consent => {
+  /** A call authorized by the bot's token, which only the process that owns the bot makes. */
+  const asBot = async (botId: string, path: string, init: RequestInit) => {
+    if (!(await owns(botId))) throw new Error(`This process no longer serves bot ${botId}.`)
+    return discordFetch(`${apiUrl}${path}`, init)
+  }
   /** Each person's opt-out writes, chained so an undo never lands before the opt-out it undoes. */
   const clicks = new Map<string, Promise<unknown>>()
 
@@ -120,10 +131,10 @@ export const createConsent = ({
   }
 
   return {
-    notice: async (token, channelId) => {
+    notice: async (botId, token, channelId) => {
       // With an Interactions Endpoint URL, Discord sends clicks there, not over the Gateway, so
       // nobody could opt out.
-      const application = await discordFetch(`${apiUrl}/applications/@me`, {
+      const application = await asBot(botId, '/applications/@me', {
         headers: { authorization: `Bot ${token}` },
       }).catch(() => undefined)
       if (!application?.ok) {
@@ -138,7 +149,7 @@ export const createConsent = ({
       if (body.interactions_endpoint_url) {
         return "The bot's application has an Interactions Endpoint URL, so Discord sends clicks on the notice's opt-out buttons there and nobody could opt out. It only sends audio; remove the URL in the Developer Portal to receive."
       }
-      const response = await discordFetch(`${apiUrl}/channels/${channelId}/messages`, {
+      const response = await asBot(botId, `/channels/${channelId}/messages`, {
         method: 'POST',
         headers: { authorization: `Bot ${token}`, 'content-type': 'application/json' },
         body: JSON.stringify({

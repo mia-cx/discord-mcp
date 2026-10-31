@@ -787,6 +787,38 @@ describe('receiving voice', () => {
     expect(heard.events).toEqual([])
   })
 
+  it('posts no notice once another host took the bot while Discord was answering', async () => {
+    const asked: string[] = []
+    let answer = () => {}
+    const { voice, voiceServer, storage, clock, cutRenewals } = await start({
+      leaseTtlMs: 15_000,
+      through: (discordFetch) => async (input, init) => {
+        const path = new URL(String(input)).pathname
+        asked.push(path)
+        if (path.endsWith('/applications/@me')) {
+          await new Promise<void>((resolve) => {
+            answer = resolve
+          })
+        }
+        return discordFetch(input, init)
+      },
+    })
+    await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID)
+    await daveReady(voiceServer)
+    const receiving = voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID, true).catch(() => undefined)
+    await vi.waitFor(() => expect(asked).toContain('/api/v10/applications/@me'))
+
+    // This host loses Postgres, its REST lease expires, and another host takes the bot.
+    cutRenewals()
+    clock.advance(15_000)
+    const successor = await storage.claimLease(`bot:${BOT_ID}`, 'host-b', clock.date(), 15_000)
+    expect(successor.holder).toBe('host-b')
+    answer()
+    await receiving
+
+    expect(asked.filter((path) => path.endsWith('/messages'))).toEqual([])
+  })
+
   it('lets the latest join decide while a notice is still being posted', async () => {
     // Each notice waits until the test releases it.
     const notices: Array<{ readonly path: string; readonly release: () => void }> = []
