@@ -150,6 +150,7 @@ export const createBotRuntimes = ({
       onSession: (next) => saveSession(botId, next),
       onReady: () => log(`Bot ${botId} is online.`),
       onDispatch: runtime.voice.dispatch,
+      onDrop: runtime.voice.dropped,
       onIdentifyBudgetSpent: (waitMs) =>
         log(
           `Bot ${botId} is offline: it spent its daily Gateway Identify budget. Reconnecting in ${Math.ceil(waitMs / 60_000)} minutes.`,

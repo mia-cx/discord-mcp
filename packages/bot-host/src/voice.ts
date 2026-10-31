@@ -151,6 +151,8 @@ export interface BotVoice {
 export interface Voice extends BotVoice {
   /** Feed every Gateway dispatch the bot's shard receives. */
   readonly dispatch: (event: string, data: unknown) => void
+  /** The shard lost its connection: joins wait for the next `READY`. */
+  readonly dropped: () => void
   /** Whether an agent's voice socket is open, which keeps the bot online. */
   readonly streaming: () => boolean
   /** Leave every voice channel and close every socket, as the bot goes offline. */
@@ -339,6 +341,9 @@ export const createVoice = ({ botId, send, clock, log }: VoiceOptions): Voice =>
       if (event === 'VOICE_SERVER_UPDATE') {
         adapter?.onVoiceServerUpdate(data as Parameters<typeof adapter.onVoiceServerUpdate>[0])
       }
+    },
+    dropped: () => {
+      online = false
     },
     join: async (guildId, channelId) => {
       await untilOnline()

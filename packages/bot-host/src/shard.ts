@@ -86,6 +86,8 @@ export interface ShardOptions {
   readonly onIdentifyBudgetSpent: (waitMs: number) => void
   /** Hears every dispatch, `READY` and `RESUMED` included. */
   readonly onDispatch?: (event: string, data: unknown) => void
+  /** The connection is gone; nothing can be sent until the next `READY`. */
+  readonly onDrop?: () => void
 }
 
 export interface Shard {
@@ -112,6 +114,7 @@ export const startShard = ({
   onFatal,
   onIdentifyBudgetSpent,
   onDispatch,
+  onDrop,
 }: ShardOptions): Shard => {
   let socket: WebSocket | undefined
   let session = saved
@@ -132,6 +135,7 @@ export const startShard = ({
     const current = socket
     socket = undefined
     current?.close(code)
+    onDrop?.()
   }
 
   // Discord invalidated the session: identify afresh. The stored copy stays until the next READY
