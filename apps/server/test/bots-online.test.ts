@@ -59,6 +59,7 @@ describe('bot hosting', () => {
     const { tokens } = await login(relay)
 
     expect((await relay.fetch(listTools(tokens.access_token))).status).toBe(200)
+    await vi.waitFor(async () => expect(await storage.loadSealedToken(BOT_ID)).toBeDefined())
     expect(await storage.loadSealedToken(BOT_ID)).not.toContain(TOKEN)
     expect(await vault.load(BOT_ID)).toBe(TOKEN)
     await vi.waitFor(() =>

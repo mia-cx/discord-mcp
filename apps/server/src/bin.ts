@@ -46,9 +46,14 @@ const startBotHosting = (allowedUserIds: ReadonlyArray<string> | undefined) =>
         }),
       )
     }
+    const context = yield* Effect.context<never>()
+    const log = (message: string) => Effect.runForkWith(context)(Effect.log(message))
     const storage = yield* Effect.acquireRelease(
       Effect.tryPromise({
-        try: () => connectStorage(databaseUrl),
+        try: () =>
+          connectStorage(databaseUrl, (error) =>
+            log(`Lost a Postgres connection; reconnecting on next use: ${error.message}`),
+          ),
         catch: (cause) =>
           new ConfigurationError({
             variable: 'DATABASE_URL',
@@ -57,13 +62,12 @@ const startBotHosting = (allowedUserIds: ReadonlyArray<string> | undefined) =>
       }),
       (storage) => Effect.promise(() => storage.close()),
     )
-    const context = yield* Effect.context<never>()
     return yield* Effect.acquireRelease(
       Effect.sync(() =>
         createBotRuntimes({
           vault: createTokenVault(vaultKey, storage),
           clock: systemClock,
-          log: (message) => Effect.runForkWith(context)(Effect.log(message)),
+          log,
         }),
       ),
       (bots) => Effect.sync(() => bots.close()),

@@ -155,7 +155,8 @@ export const createRelay = (
         return discordFailure(renderCause(verified.cause))
       }
       if (!isBot(verified.value)) return invalidBot()
-      await bots?.use(verified.value.id, credential)
+      // Hosting never delays or fails the agent's call; `use` logs its own failures.
+      void bots?.use(verified.value.id, credential)
 
       const response = await mcp.fetch(request, { authInfo: authenticated })
       // Complete the bounded response before releasing the runtime. The SDK's legacy fallback
