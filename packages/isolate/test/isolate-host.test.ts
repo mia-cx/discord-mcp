@@ -200,4 +200,34 @@ describe('the isolate host', () => {
     expect(await host.run(late)).toMatchObject({ outcome: 'completed' })
     expect((await running).outcome).toBe('completed')
   })
+
+  it('lets a bot past its share use idle slots while one stays free for another bot', async () => {
+    const host = makeIsolateHost(4)
+    const finished: string[] = []
+    const slow = {
+      ...(await execution(
+        '1',
+        'export default () => new Promise((r) => setTimeout(r, 800))',
+        5000,
+      )),
+      urgent: true,
+    }
+    const runs = [
+      { ...slow, queue: 'bot-1:a', label: 'slow a' },
+      { ...slow, queue: 'bot-1:b', label: 'slow b' },
+      // A third deferred slash command of the same bot, past its share of two.
+      {
+        ...(await execution('1', 'export default () => 0', 5000)),
+        urgent: true,
+        queue: 'bot-1:c',
+        label: 'third',
+      },
+    ]
+
+    await Promise.all(
+      runs.map(({ label, ...run }) => host.run(run).then(() => finished.push(label))),
+    )
+
+    expect(finished[0]).toBe('third')
+  })
 })

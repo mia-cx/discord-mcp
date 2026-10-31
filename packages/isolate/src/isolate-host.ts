@@ -276,8 +276,9 @@ export interface IsolateHost {
 }
 
 /**
- * Process slots. A bot holds at most half of them, so no bot can hold them all, and a freed slot
- * goes to the next waiting bot in turn, so a bot with many slow runs waits its turn like the rest.
+ * Process slots. A bot within its share, half the slots, takes any free slot; a bot past it takes
+ * one only while another stays free for a different bot. Freed slots go to waiting bots in turn,
+ * so no bot can hold them all and a busy bot still uses the capacity nobody else needs.
  */
 const slots = (size: number) => {
   const share = Math.max(1, Math.floor(size / 2))
@@ -286,12 +287,26 @@ const slots = (size: number) => {
   const held = new Map<string, number>()
   /** Each waiting bot's line, in the order bots get their next turn. */
   const waiting = new Map<string, Array<() => void>>()
-  const take = (botId: string) => held.set(botId, (held.get(botId) ?? 0) + 1)
-  const eligible = (botId: string) => (held.get(botId) ?? 0) < share
+  const canTake = (botId: string) => free > 1 || (free > 0 && (held.get(botId) ?? 0) < share)
+  const take = (botId: string) => {
+    free -= 1
+    held.set(botId, (held.get(botId) ?? 0) + 1)
+  }
+  /** Admit the oldest run of each waiting bot that may take a slot, in turn. */
+  const grant = () => {
+    for (const [botId, [first, ...rest]] of waiting) {
+      if (first === undefined || !canTake(botId)) continue
+      waiting.delete(botId)
+      if (rest.length > 0) waiting.set(botId, rest)
+      take(botId)
+      first()
+      return grant()
+    }
+  }
   return {
     acquire: (botId: string, withinMs?: number) => {
-      if (free > 0 && eligible(botId)) {
-        free -= 1
+      // A bot's runs start in order, so one with a line joins its end.
+      if (!waiting.has(botId) && canTake(botId)) {
         take(botId)
         return Promise.resolve()
       }
@@ -312,9 +327,9 @@ const slots = (size: number) => {
         waiting.set(botId, [...(waiting.get(botId) ?? []), admit])
       })
     },
-    // A finished execution hands its slot straight to the oldest run of the next bot below its
-    // share. Its own bot goes to the back of the line, behind every bot still waiting for a turn.
+    // The releasing bot goes to the back of the line, behind every bot still waiting for a turn.
     release: (botId: string) => {
+      free += 1
       const count = (held.get(botId) ?? 1) - 1
       if (count === 0) held.delete(botId)
       else held.set(botId, count)
@@ -323,17 +338,7 @@ const slots = (size: number) => {
         waiting.delete(botId)
         waiting.set(botId, own)
       }
-      const next = [...waiting.keys()].find(eligible)
-      const line = next === undefined ? undefined : waiting.get(next)
-      if (next === undefined || line === undefined) {
-        free += 1
-        return
-      }
-      const [first, ...rest] = line
-      waiting.delete(next)
-      if (rest.length > 0) waiting.set(next, rest)
-      take(next)
-      first?.()
+      grant()
     },
   }
 }
