@@ -69,6 +69,8 @@ export interface ScriptExecution {
    * so it never waits behind ordinary runs.
    */
   readonly urgent?: boolean
+  /** Skipped, rejecting, when no slot frees within this long, as for an answer that would be late. */
+  readonly admitWithinMs?: number
   readonly timeoutMs: number
   readonly broker: Broker
   readonly signal?: AbortSignal
@@ -287,14 +289,27 @@ const slots = (size: number) => {
   const take = (botId: string) => held.set(botId, (held.get(botId) ?? 0) + 1)
   const eligible = (botId: string) => (held.get(botId) ?? 0) < share
   return {
-    acquire: (botId: string) => {
+    acquire: (botId: string, withinMs?: number) => {
       if (free > 0 && eligible(botId)) {
         free -= 1
         take(botId)
         return Promise.resolve()
       }
-      return new Promise<void>((resolve) => {
-        waiting.set(botId, [...(waiting.get(botId) ?? []), resolve])
+      return new Promise<void>((resolve, reject) => {
+        const admit = () => {
+          clearTimeout(timer)
+          resolve()
+        }
+        const timer =
+          withinMs === undefined
+            ? undefined
+            : setTimeout(() => {
+                const rest = (waiting.get(botId) ?? []).filter((waiter) => waiter !== admit)
+                if (rest.length > 0) waiting.set(botId, rest)
+                else waiting.delete(botId)
+                reject(new Error(`No process slot freed within ${withinMs} ms.`))
+              }, withinMs)
+        waiting.set(botId, [...(waiting.get(botId) ?? []), admit])
       })
     },
     // A finished execution hands its slot straight to the oldest run of the next bot below its
@@ -339,7 +354,7 @@ export const makeIsolateHost = (
       const pool = execution.urgent ? urgent : ordinary
       const current = previous.then(async () => {
         execution.signal?.throwIfAborted()
-        await pool.acquire(execution.botId)
+        await pool.acquire(execution.botId, execution.admitWithinMs)
         try {
           execution.signal?.throwIfAborted()
           return await execute(execution)

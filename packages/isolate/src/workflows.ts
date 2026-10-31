@@ -88,6 +88,8 @@ const PRIVILEGED: ReadonlyArray<readonly [string, number, number]> = [
 const NAME = /^[a-z0-9][a-z0-9-]{0,62}$/
 const SOURCE_LIMIT_BYTES = 256 * 1024
 const PROBE_TIMEOUT_MS = 10_000
+/** How long an interaction may wait for a process slot and still be answered in time. */
+const INTERACTION_ADMISSION_MS = 2_000
 /** How long one workflow may take over one event. */
 export const EVENT_TIMEOUT_MS = 30_000
 
@@ -388,6 +390,8 @@ export const makeWorkflowHost = ({
         input: { event: dispatch },
         signal: workflow.stop.signal,
         urgent: isInteraction,
+        // Discord drops an interaction not answered within three seconds of the event.
+        ...(isInteraction ? { admitWithinMs: INTERACTION_ADMISSION_MS } : {}),
         broker: makeBroker({
           operations,
           grants,

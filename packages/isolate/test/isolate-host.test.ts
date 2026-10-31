@@ -182,4 +182,22 @@ describe('the isolate host', () => {
 
     expect(finished).toEqual(['bot-2', 'bot-1 a', 'bot-1 b'])
   })
+
+  it('skips an execution that waits for a slot past its admission deadline', async () => {
+    const host = makeIsolateHost(1)
+    const busy = {
+      ...(await execution(
+        '1',
+        'export default () => new Promise((r) => setTimeout(r, 1500))',
+        5000,
+      )),
+      urgent: true,
+    }
+    const late = { ...(await execution('2', 'export default () => 0', 5000)), urgent: true }
+
+    const running = host.run(busy)
+    await expect(host.run({ ...late, admitWithinMs: 300 })).rejects.toThrow('No process slot')
+    expect(await host.run(late)).toMatchObject({ outcome: 'completed' })
+    expect((await running).outcome).toBe('completed')
+  })
 })
