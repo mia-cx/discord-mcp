@@ -58,6 +58,8 @@ it.skipIf(database === undefined)(
   async () => {
     if (database === undefined) return
     const { hostname, port, pathname } = new URL(database.url)
+    // Migrated as the server's own user first, so the role below owns nothing and drops cleanly.
+    await (await connectStorage(database.url, () => {})).close()
     const role = `lock_${randomUUID().replaceAll('-', '')}`
     await admin(database.url, `create role ${role} superuser login password 'pa%ss'`)
     cleanup.push(() => admin(database.url, `drop role ${role}`))

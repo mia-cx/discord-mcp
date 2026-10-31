@@ -322,8 +322,8 @@ Set `DATABASE_URL`, `TOKEN_VAULT_KEY` (generate it like `OAUTH_ENCRYPTION_KEY`),
 `DISCORD_OAUTH_ALLOWED_USER_IDS` list. Without that list, the server logs a warning and
 serves the plain relay. `DATABASE_URL` must reach the Postgres primary directly, with no
 pooler such as PgBouncer in between: each bot's schedules fire only on the process holding
-its session advisory lock, on a connection that sets its own TCP keepalives. Back up the vault key apart from the database: without it, stored
-tokens cannot be decrypted.
+its session advisory lock, on a connection that sets its own TCP keepalives. Back up the
+vault key apart from the database: without it, stored tokens cannot be decrypted.
 
 ### Tiers
 
