@@ -165,8 +165,9 @@ public registry with install scripts off, through a proxy that reaches only the 
 Each revision records every package version it was built with. Publishing fails, before any
 revision is stored, on a package that can't be bundled or loaded in workerd, such as a native
 addon, and on code that can't work when each event runs in a fresh isolate: collectors,
-`awaitMessages`, and URL attachments. These checks read the source as written, so a call
-built at runtime gets past them. `discord_workflow_enable` runs a revision and returns its grants and intents;
+`awaitMessages`, and URL attachments. These checks read the workflow's own syntax, so a call
+built at runtime, or made inside a dependency, gets past them. Installs are capped at 256 MB
+and two at a time per bot host. `discord_workflow_enable` runs a revision and returns its grants and intents;
 Discord's privileged intents must be on in the Developer Portal first. While any workflow is
 enabled, the bot stays online without agent calls. After a restart, workflows also run the
 events Discord replays.

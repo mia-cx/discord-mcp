@@ -68,7 +68,10 @@ const registry = await fixtureRegistry([
   {
     name: 'snoop',
     version: '1.0.0',
-    files: { 'index.js': `module.exports = require(${JSON.stringify(secret)})` },
+    files: {
+      // A glob import: esbuild bundles every file it matches, here climbing out of the install.
+      'index.js': `module.exports = (name) => require('${'../'.repeat(16)}${dirname(secret).slice(1)}/' + name)`,
+    },
   },
 ])
 afterAll(async () => {
@@ -167,38 +170,46 @@ describe('publishing a workflow with npm dependencies', () => {
     await storage.close()
   }, 60_000)
 
-  it('installs exactly the versions a lockfile pins', async () => {
-    const { storage, host } = await setup()
-    const lockfile = JSON.stringify({
-      lockfileVersion: 3,
-      requires: true,
-      packages: {
-        '': { dependencies: { greet: '1.0.0' } },
-        'node_modules/greet': {
-          version: '1.0.0',
-          resolved: registry.dist('greet', '1.0.0').tarball,
-          integrity: registry.dist('greet', '1.0.0').integrity,
-          dependencies: { shout: '^1.0.0' },
+  it.each([
+    ['installs exactly the versions a lockfile pins', '1.0.0', 'shout@1.0.0'],
+    // The lockfile claims 1.0.0 but names 1.1.0's tarball, which is what npm installs.
+    ['records what was installed, not what a lockfile claims', '1.1.0', 'shout@1.1.0'],
+  ])(
+    '%s',
+    async (_, tarball, recorded) => {
+      const { storage, host } = await setup()
+      const lockfile = JSON.stringify({
+        lockfileVersion: 3,
+        requires: true,
+        packages: {
+          '': { dependencies: { greet: '1.0.0' } },
+          'node_modules/greet': {
+            version: '1.0.0',
+            resolved: registry.dist('greet', '1.0.0').tarball,
+            integrity: registry.dist('greet', '1.0.0').integrity,
+            dependencies: { shout: '^1.0.0' },
+          },
+          'node_modules/shout': {
+            version: '1.0.0',
+            resolved: registry.dist('shout', tarball).tarball,
+            integrity: registry.dist('shout', tarball).integrity,
+          },
         },
-        'node_modules/shout': {
-          version: '1.0.0',
-          resolved: registry.dist('shout', '1.0.0').tarball,
-          integrity: registry.dist('shout', '1.0.0').integrity,
-        },
-      },
-    })
+      })
 
-    const revision = await host.publish(caller, {
-      name: 'greeter',
-      source: GREETER,
-      grants,
-      dependencies: { greet: '1.0.0' },
-      lockfile,
-    })
+      const revision = await host.publish(caller, {
+        name: 'greeter',
+        source: GREETER,
+        grants,
+        dependencies: { greet: '1.0.0' },
+        lockfile,
+      })
 
-    expect(revision.packages).toEqual(['greet@1.0.0', 'shout@1.0.0'])
-    await storage.close()
-  }, 60_000)
+      expect(revision.packages).toEqual(['greet@1.0.0', recorded])
+      await storage.close()
+    },
+    60_000,
+  )
 
   it.each([
     [
@@ -238,7 +249,7 @@ describe('publishing a workflow with npm dependencies', () => {
       { dependencies: { snoop: '1.0.0' } },
       GREETER.replace("'greet'", "'snoop'"),
       "A dependency can't run in a workflow.",
-      /resolves outside the workflow's dependencies/,
+      /reaches a file outside the workflow's dependencies/,
     ],
     [
       'a dependency fetched from outside the registry',
