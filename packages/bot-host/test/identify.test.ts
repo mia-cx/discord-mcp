@@ -79,45 +79,33 @@ it.each([
     resetAfter: HOUR,
     waits: [HOUR],
   },
-])('spends the daily Identify budget: $case', ({ remaining, resetAfter, waits }) => {
-  // Every shard in its own bucket, so only the budget makes anyone wait.
-  const gate = createIdentifyGate(manualClock(), {
-    ...LIMIT,
-    remaining,
-    resetAfter,
-    maxConcurrency: 16,
-  })
-  const seen = waits.map((_, shardId) => {
-    const wait = gate.budgetWait()
-    if (wait === 0) gate.whenFree(shardId, () => {})
-    return wait
-  })
-  expect(seen).toEqual(waits)
-})
-
-it('charges only Identifies sent, not connections that failed before Hello', () => {
-  const gate = createIdentifyGate(manualClock(), { ...LIMIT, remaining: 2 })
-  // Shards that pass the budget check but never reach Hello send no Identify.
-  for (let attempt = 0; attempt < 10; attempt++) expect(gate.budgetWait()).toBe(0)
-
-  gate.whenFree(0, () => {})
-  expect(gate.budgetWait()).toBe(DAY)
-})
-
-it('spends half the daily total once the budget resets, then waits a day', () => {
-  const clock = manualClock()
-  const gate = createIdentifyGate(clock, {
-    ...LIMIT,
-    remaining: 0,
+  {
+    case: 'no more shards than half of what remains, however many start at once',
+    remaining: 4,
     resetAfter: HOUR,
-    maxConcurrency: 500,
-  })
-  expect(gate.budgetWait()).toBe(HOUR)
+    waits: [0, 0, HOUR, HOUR, HOUR, HOUR, HOUR, HOUR],
+  },
+])('reserves the daily Identify budget: $case', ({ remaining, resetAfter, waits }) => {
+  const gate = createIdentifyGate(manualClock(), { ...LIMIT, remaining, resetAfter })
+  expect(waits.map(() => gate.reserve())).toEqual(waits)
+})
+
+it('gets back an Identify reserved by a connection that never identified', () => {
+  const gate = createIdentifyGate(manualClock(), { ...LIMIT, remaining: 2 })
+  expect(gate.reserve()).toBe(0)
+  expect(gate.reserve()).toBe(DAY)
+
+  gate.release()
+  expect(gate.reserve()).toBe(0)
+})
+
+it('reserves half the daily total once the budget resets, then waits a day', () => {
+  const clock = manualClock()
+  const gate = createIdentifyGate(clock, { ...LIMIT, remaining: 0, resetAfter: HOUR })
+  expect(gate.reserve()).toBe(HOUR)
 
   clock.advance(HOUR)
-  for (let shardId = 0; shardId < 500; shardId++) {
-    expect(gate.budgetWait()).toBe(0)
-    gate.whenFree(shardId, () => {})
-  }
-  expect(gate.budgetWait()).toBe(DAY)
+  const reserved = Array.from({ length: 500 }, () => gate.reserve())
+  expect(reserved.every((wait) => wait === 0)).toBe(true)
+  expect(gate.reserve()).toBe(DAY)
 })

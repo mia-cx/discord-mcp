@@ -113,12 +113,16 @@ export const startShard = ({
   let cancelTimer = () => {}
   /** Withdraws a connected shard's wait for its turn to identify. */
   let cancelIdentify = () => {}
+  /** The current connection holds an Identify from the bot's budget and has not sent it. */
+  let reserved = false
 
   const send = (payload: Payload) => socket?.send(JSON.stringify(payload))
 
   const drop = (code: number) => {
     cancelTimer()
     cancelIdentify()
+    if (reserved) identifies.release()
+    reserved = false
     const current = socket
     socket = undefined
     current?.close(code)
@@ -136,10 +140,13 @@ export const startShard = ({
     onSession(undefined)
   }
 
-  // A connection without a session identifies after Hello, so it waits for the bot's budget.
+  // A connection without a session identifies after Hello, so it reserves an Identify first.
   const connectToIdentify = () => {
-    const waitMs = identifies.budgetWait()
-    if (waitMs === 0) return connect()
+    const waitMs = identifies.reserve()
+    if (waitMs === 0) {
+      reserved = true
+      return connect()
+    }
     onIdentifyBudgetSpent(waitMs)
     cancelTimer = clock.schedule(connectToIdentify, waitMs)
   }
@@ -202,6 +209,7 @@ export const startShard = ({
         }
         cancelIdentify = identifies.whenFree(shardId, () => {
           cancelIdentify = () => {}
+          reserved = false
           send({
             op: Op.Identify,
             d: {

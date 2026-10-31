@@ -17,12 +17,16 @@ export interface SessionStartLimit {
 
 /** Paces one bot's Identifies across all its shards. */
 export interface IdentifyGate {
-  /** 0 while the bot has Identifies left today, otherwise the wait until its budget reopens. */
-  readonly budgetWait: () => number
   /**
-   * Call `identify` once shard `shardId`'s concurrency bucket is free, at once if it is free now,
-   * and charge it to the budget. Shards in a bucket identify in the order they asked. The
-   * returned function withdraws the ask.
+   * Reserve one Identify from the bot's daily budget and return 0, or return the wait until the
+   * budget reopens.
+   */
+  readonly reserve: () => number
+  /** Return a reservation whose connection closed before it identified. */
+  readonly release: () => void
+  /**
+   * Call `identify` once shard `shardId`'s concurrency bucket is free, at once if it is free now.
+   * Shards in a bucket identify in the order they asked. The returned function withdraws the ask.
    */
   readonly whenFree: (shardId: number, identify: () => void) => () => void
 }
@@ -36,9 +40,8 @@ interface Bucket {
 }
 
 /**
- * Discord resets a bot's token once it spends its daily Identifies. The gate spends about half of
- * what remains, leaving the rest to the bot's other clients and to the next process. Shards that
- * passed `budgetWait` before it ran out still identify, so it can overspend by one per shard.
+ * Discord resets a bot's token once it spends its daily Identifies. The gate reserves at most half
+ * of what remains, leaving the rest to the bot's other clients and to the next process.
  */
 export const createIdentifyGate = (clock: Clock, limit: SessionStartLimit): IdentifyGate => {
   let allowance = Math.floor(limit.remaining / 2)
@@ -65,8 +68,6 @@ export const createIdentifyGate = (clock: Clock, limit: SessionStartLimit): Iden
     }
     bucket.waiting.shift()
     bucket.freeAt = now + IDENTIFY_INTERVAL_MS
-    refill()
-    allowance -= 1
     next()
     drain(bucket)
   }
@@ -81,9 +82,14 @@ export const createIdentifyGate = (clock: Clock, limit: SessionStartLimit): Iden
     return bucket
   }
   return {
-    budgetWait: () => {
+    reserve: () => {
       const now = refill()
-      return allowance > 0 ? 0 : resetsAt - now
+      if (allowance === 0) return resetsAt - now
+      allowance -= 1
+      return 0
+    },
+    release: () => {
+      allowance += 1
     },
     whenFree: (shardId, identify) => {
       const bucket = bucketOf(shardId)

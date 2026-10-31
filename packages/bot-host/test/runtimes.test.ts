@@ -211,6 +211,28 @@ it('runs every shard Discord recommends, one Identify per concurrency bucket at 
   await storage.close()
 })
 
+it('identifies no more shards than half the Identifies Discord says remain', async () => {
+  const storage = await inMemoryStorage()
+  const gateway = await fakeGateway(100 * HOUR)
+  const clock = manualClock()
+  const bots = createBotRuntimes({
+    vault: createTokenVault(KEY, storage),
+    clock,
+    log: () => {},
+    discordFetch: gateway.discordFetch({ shards: 4, maxConcurrency: 4, remaining: 4 }),
+  })
+
+  await bots.use(BOT_ID, 'private-token-a')
+  await vi.waitFor(() => expect(identified(gateway)).toHaveLength(2))
+  clock.advance(HOUR)
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  expect(identified(gateway)).toHaveLength(2)
+
+  await bots.close()
+  await gateway.close()
+  await storage.close()
+})
+
 it('reconnects a dropped shard on its own, resuming its session', async () => {
   const storage = await inMemoryStorage()
   const gateway = await fakeGateway(100 * HOUR)

@@ -291,6 +291,44 @@ describe('the shard supervisor', () => {
     expect(urls).toEqual([`${expected}?v=10&encoding=json`])
   })
 
+  it('keeps its Identify budget through connections that fail before Hello', async () => {
+    const clock = manualClock()
+    const NativeWebSocket = globalThis.WebSocket
+    let attempts = 0
+    vi.stubGlobal(
+      'WebSocket',
+      class extends NativeWebSocket {
+        constructor() {
+          attempts += 1
+          // Nothing listens on port 1, so every connection fails before Hello.
+          super('ws://127.0.0.1:1')
+        }
+      },
+    )
+    cleanup.push(() => vi.unstubAllGlobals())
+    const onIdentifyBudgetSpent = vi.fn()
+    const shard = startShard({
+      token: TOKEN,
+      gatewayUrl: 'wss://gateway.discord.gg',
+      clock,
+      shardId: 0,
+      shardCount: 1,
+      // Room for exactly one Identify.
+      identifies: createIdentifyGate(clock, { ...LIMIT, remaining: 2 }),
+      onSession: () => {},
+      onReady: () => {},
+      onFatal: () => {},
+      onIdentifyBudgetSpent,
+    })
+    cleanup.push(shard.stop)
+
+    await vi.waitFor(() => {
+      clock.advance(30_000)
+      expect(attempts).toBeGreaterThanOrEqual(3)
+    })
+    expect(onIdentifyBudgetSpent).not.toHaveBeenCalled()
+  })
+
   it('stops for good when Discord rejects the token', async () => {
     const { gateway, clock, onFatal } = await start()
     await identified(gateway, 1)
