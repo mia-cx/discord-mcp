@@ -58,11 +58,17 @@ const isUrl = (node: unknown): boolean => {
   return URL_TEXT.test(text(node) ?? '')
 }
 
-const collects = (node: Node) =>
-  (node.type === 'Identifier' && COLLECTORS.has(String(node.name))) ||
-  (node.type === 'MemberExpression' &&
-    node.computed === true &&
-    COLLECTORS.has(text(node.property) ?? ''))
+/**
+ * A collector reached as a member, `channel.awaitMessages` or `discord.MessageCollector`, or
+ * called or constructed by a bare name, as after destructuring. A data key of the same name isn't.
+ */
+const collects = (node: Node) => {
+  if (node.type === 'MemberExpression') {
+    return COLLECTORS.has(nameOf(node.property, node.computed) ?? '')
+  }
+  if (node.type !== 'NewExpression' && node.type !== 'CallExpression') return false
+  return COLLECTORS.has(nameOf(node.callee, false) ?? '')
+}
 
 const uploadsUrl = (node: Node) => {
   if (node.type === 'Property') {

@@ -22,6 +22,11 @@ describe('finding what a fresh isolate per event cannot run', () => {
       'const log = (c: unknown) => c\n@log class Bot {}\nm.channel.createMessageCollector()',
       [COLLECTOR],
     ],
+    [
+      'a destructured collector class',
+      "const { MessageCollector } = require('discord.js'); new MessageCollector(m.channel)",
+      [COLLECTOR],
+    ],
     ['a computed collector method', "m.channel['createMessageCollector']()", [COLLECTOR]],
     [
       'a URL in files',
@@ -41,6 +46,7 @@ describe('finding what a fresh isolate per event cannot run', () => {
     ],
     // Text that only mentions them creates nothing.
     ['a message that mentions awaitMessages', "m.reply('Example: .awaitMessages()')", []],
+    ['a data key named awaitMessages', 'm.reply(JSON.stringify({ awaitMessages: false }))', []],
     ['a URL sent as text', "m.reply({ content: 'https://example.com/cat.png' })", []],
     ['a local file', "m.reply({ files: ['./cat.png'] })", []],
     ['source that does not compile', 'm.reply(', []],
