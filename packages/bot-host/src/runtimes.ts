@@ -6,6 +6,7 @@ export const IDLE_TIMEOUT_MS = 24 * 60 * 60 * 1000
 export const DISCORD_GATEWAY_URL = 'wss://gateway.discord.gg'
 /** Each bot runs one shard. */
 const SHARD_ID = 0
+const SESSION_CLEAR_RETRY_MS = 60_000
 
 export interface BotRuntimesOptions {
   readonly vault: TokenVault
@@ -59,6 +60,8 @@ export const createBotRuntimes = ({
   const writes = new Map<string, Promise<void>>()
   /** Sessions waiting in their bot's write chain. Only the newest is written. */
   const unsaved = new Map<string, ShardSession | undefined>()
+  /** Scheduled retries of failed session clears, by bot; each cancels its retry. */
+  const retries = new Map<string, () => void>()
 
   const write = (botId: string, task: () => Promise<void>) => {
     const done = (writes.get(botId) ?? Promise.resolve()).then(task)
@@ -72,16 +75,29 @@ export const createBotRuntimes = ({
   // A crash loses at most the writes still queued, so a resume replays a few events twice
   // rather than skipping any.
   const saveSession = (botId: string, session: ShardSession | undefined) => {
+    retries.get(botId)?.()
+    retries.delete(botId)
     const queued = unsaved.has(botId)
     unsaved.set(botId, session)
     if (queued) return
+    let latest: ShardSession | undefined
     write(botId, () => {
-      const latest = unsaved.get(botId)
+      latest = unsaved.get(botId)
       unsaved.delete(botId)
       return latest === undefined
         ? vault.clearSession(botId, SHARD_ID)
         : vault.storeSession(botId, SHARD_ID, latest)
-    }).catch((cause) => log(`Saving bot ${botId}'s Gateway session failed: ${reason(cause)}`))
+    }).catch((cause) => {
+      log(`Saving bot ${botId}'s Gateway session failed: ${reason(cause)}`)
+      // A stale row would let the next process resume a bot that went offline on purpose, so
+      // keep clearing until storage recovers. A bot back online overwrites the row itself.
+      if (latest !== undefined) return
+      const retry = () => {
+        retries.delete(botId)
+        if (!running.has(botId)) saveSession(botId, undefined)
+      }
+      retries.set(botId, clock.schedule(retry, SESSION_CLEAR_RETRY_MS))
+    })
   }
 
   const stop = (botId: string, runtime: Runtime) => {
@@ -168,6 +184,8 @@ export const createBotRuntimes = ({
         runtime.shard?.suspend()
       }
       await Promise.all(writes.values())
+      for (const cancel of retries.values()) cancel()
+      retries.clear()
     },
   }
 }

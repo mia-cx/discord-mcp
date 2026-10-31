@@ -1,11 +1,12 @@
 import { inMemoryStorage } from '@discord-mcp/storage/testing'
 import { expect, it, vi } from 'vitest'
-import { createBotRuntimes } from '../src/runtimes.ts'
+import { createBotRuntimes, IDLE_TIMEOUT_MS } from '../src/runtimes.ts'
 import { fakeGateway, manualClock } from '../src/testing.ts'
 import { createTokenVault } from '../src/vault.ts'
 
 const BOT_ID = '345678901234567890'
 const KEY = Buffer.alloc(32, 1)
+const HOUR = 60 * 60 * 1000
 
 it('leaves a bot Discord rejected offline until its token changes', async () => {
   const storage = await inMemoryStorage()
@@ -65,6 +66,35 @@ it('resumes an online bot after a restart, from what the previous process stored
   await vi.waitFor(async () => expect((await stored.loadSessions())[0]?.session.sequence).toBe(4))
 
   await after.close()
+  await gateway.close()
+  await storage.close()
+})
+
+it('keeps clearing an idle bot’s session while storage fails, so a restart leaves it offline', async () => {
+  const storage = await inMemoryStorage()
+  const gateway = await fakeGateway(100 * HOUR)
+  const clock = manualClock()
+  const vault = createTokenVault(KEY, storage)
+  const clearSession = vi
+    .fn(vault.clearSession)
+    .mockRejectedValueOnce(new Error('Connection terminated unexpectedly'))
+  const bots = createBotRuntimes({
+    vault: { ...vault, clearSession },
+    clock,
+    log: () => {},
+    gatewayUrl: gateway.url,
+  })
+
+  await bots.use(BOT_ID, 'private-token-a')
+  await vi.waitFor(async () => expect(await vault.loadSessions()).toHaveLength(1))
+  clock.advance(IDLE_TIMEOUT_MS)
+  await vi.waitFor(() => expect(clearSession).toHaveBeenCalledTimes(1))
+  expect(await vault.loadSessions()).toHaveLength(1)
+
+  clock.advance(60_000)
+  await vi.waitFor(async () => expect(await vault.loadSessions()).toEqual([]))
+
+  await bots.close()
   await gateway.close()
   await storage.close()
 })
