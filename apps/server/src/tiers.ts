@@ -17,7 +17,7 @@ const moving = (error: string) => json(503, { error }, { 'retry-after': '1' })
  * stops here; the host gets the bot token and this tier's secret instead.
  */
 export const forwardToBotHosts =
-  ({ hosts, secret }: Membership, hostFetch: typeof fetch = fetch): Execute =>
+  ({ hosts, secret }: Membership): Execute =>
   async (request, _credential, botId) => {
     const owner = ownerOf(hosts, botId)
     if (owner === undefined) return moving('bot_host_unavailable')
@@ -25,7 +25,7 @@ export const forwardToBotHosts =
     for (const name of ['host', 'cookie', 'content-length']) headers.delete(name)
     headers.set('authorization', `Bearer ${secret}`)
     try {
-      const response = await hostFetch(`${owner}/mcp`, {
+      const response = await fetch(`${owner}/mcp`, {
         method: request.method,
         headers,
         body: request.body,

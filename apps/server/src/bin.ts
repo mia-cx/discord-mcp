@@ -90,11 +90,12 @@ const origin = (url: string) => {
 
 /** The bot hosts central routes to, and the secret central proves itself to them with. */
 const membership = Effect.gen(function* () {
-  const { hosts, secret } = yield* Config.all({
-    hosts: Config.string('BOT_HOSTS').pipe(Config.map((list) => csv(list).map(origin))),
+  const { listed, secret } = yield* Config.all({
+    listed: Config.string('BOT_HOSTS').pipe(Config.map(csv)),
     secret: Config.redacted('BOT_HOST_SECRET'),
   })
-  if (hosts.length === 0 || hosts.includes(undefined)) {
+  const hosts = listed.map(origin).filter((host) => host !== undefined)
+  if (hosts.length === 0 || hosts.length !== listed.length) {
     return yield* Effect.fail(
       new ConfigurationError({
         variable: 'BOT_HOSTS',
@@ -111,7 +112,7 @@ const membership = Effect.gen(function* () {
       }),
     )
   }
-  return { hosts: hosts.filter((host) => host !== undefined), secret: Redacted.value(secret) }
+  return { hosts, secret: Redacted.value(secret) }
 })
 
 /** Serve `handler` over HTTP until the program stops. */
@@ -195,6 +196,14 @@ const main = Effect.gen(function* () {
   }
 
   const tier = yield* Config.string('DISCORD_MCP_TIER').pipe(Config.withDefault('all'))
+  if (tier !== 'all' && tier !== 'central' && tier !== 'bot-host') {
+    return yield* Effect.fail(
+      new ConfigurationError({
+        variable: 'DISCORD_MCP_TIER',
+        message: 'DISCORD_MCP_TIER must be "all", "central", or "bot-host".',
+      }),
+    )
+  }
   const allowlist = yield* allowedUsers
   const listen = (handler: { fetch: (request: Request) => Promise<Response> }) =>
     serve(handler, config.host, config.port, tier === 'all' ? 'discord-mcp' : `discord-mcp ${tier}`)
@@ -212,14 +221,6 @@ const main = Effect.gen(function* () {
     }
     const bots = yield* startBotHosting(allowlist)
     return yield* listen(createBotHost({ ...members, self }, createExecutor({ rest, bots })))
-  }
-  if (tier !== 'all' && tier !== 'central') {
-    return yield* Effect.fail(
-      new ConfigurationError({
-        variable: 'DISCORD_MCP_TIER',
-        message: 'DISCORD_MCP_TIER must be "all", "central", or "bot-host".',
-      }),
-    )
   }
 
   yield* checkPublicExposure({
