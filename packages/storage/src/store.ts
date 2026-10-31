@@ -69,7 +69,7 @@ export type Listen = (
   channel: string,
   handlers: {
     readonly payload: (payload: string) => void
-    /** Listening again after a lost connection, which missed what was sent meanwhile. */
+    /** Listening after a failed or lost connection, which missed what was sent meanwhile. */
     readonly resumed: () => void
     readonly lost: (error: Error) => void
   },

@@ -135,6 +135,20 @@ export const createConsent = ({
 
   return {
     notice: async (token, channelId) => {
+      // With an Interactions Endpoint URL, Discord sends clicks there, not over the Gateway, so
+      // nobody could opt out.
+      const application = await discordFetch(`${apiUrl}/applications/@me`, {
+        headers: { authorization: `Bot ${token}` },
+      }).catch(() => undefined)
+      if (!application?.ok) {
+        return `The bot couldn't check how Discord delivers its button clicks${application === undefined ? '' : ` (HTTP ${application.status})`}, so it only sends audio. Join again to retry.`
+      }
+      const { interactions_endpoint_url } = (await application.json()) as {
+        readonly interactions_endpoint_url?: string | null
+      }
+      if (interactions_endpoint_url) {
+        return "The bot's application has an Interactions Endpoint URL, so Discord sends clicks on the notice's opt-out buttons there and nobody could opt out. It only sends audio; remove the URL in the Developer Portal to receive."
+      }
       const response = await discordFetch(`${apiUrl}/channels/${channelId}/messages`, {
         method: 'POST',
         headers: { authorization: `Bot ${token}`, 'content-type': 'application/json' },

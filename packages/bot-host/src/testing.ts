@@ -118,13 +118,17 @@ export const fakeGateway = async (
   return {
     url,
     connections,
-    /** REST calls other than `GET /gateway/bot`, oldest first, with their parsed JSON bodies. */
+    /**
+     * REST calls other than `GET /gateway/bot` and `GET /applications/@me`, oldest first, with
+     * their parsed JSON bodies.
+     */
     rest,
     /**
      * A `fetch` that answers `GET /gateway/bot` with this fake's URL, `shards` recommended
      * shards, and a fresh daily Identify budget, unless overridden. It posts channel messages,
      * unless `sendMessages` is false, when Discord refuses them as it does without Send Messages,
-     * and accepts interaction responses and edits to them.
+     * and accepts interaction responses and edits to them. `GET /applications/@me` names
+     * `interactionsEndpoint` as the application's Interactions Endpoint URL, unset by default.
      */
     discordFetch:
       ({
@@ -132,14 +136,22 @@ export const fakeGateway = async (
         maxConcurrency = 1,
         remaining = 1000,
         sendMessages = true,
+        interactionsEndpoint = null,
       }: {
         shards?: number
         maxConcurrency?: number
         remaining?: number
         sendMessages?: boolean
+        interactionsEndpoint?: string | null
       } = {}): typeof fetch =>
       async (input, init) => {
         const path = new URL(String(input)).pathname.replace(/^\/api\/v10/, '')
+        if (path === '/applications/@me') {
+          return Response.json({
+            id: voice?.botId,
+            interactions_endpoint_url: interactionsEndpoint,
+          })
+        }
         if (path === '/gateway/bot') {
           return Response.json({
             url,

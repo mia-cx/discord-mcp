@@ -37,6 +37,8 @@ export const JOIN_TIMEOUT_MS = 15_000
 const RECONNECT_GRACE_MS = 5_000
 /** Audio waiting to reach a slow agent before newer audio is dropped: a few seconds' worth. */
 const MAX_BUFFERED_BYTES = 1024 * 1024
+/** The trailer of a DAVE end-to-end encrypted frame. */
+const DAVE_MAGIC_MARKER = Buffer.from([0xfa, 0xfa])
 /** Voice gateway opcodes for people connecting to and leaving the channel. */
 const CLIENTS_CONNECT = 11
 const CLIENT_DISCONNECT = 13
@@ -367,8 +369,10 @@ export const createVoice = ({ botId, shardOf, send, consent, clock, log }: Voice
   const subscribe = (session: Session, userId: string, person: Person) => {
     const stream = session.connection.receiver.subscribe(userId)
     stream.on('data', (packet: Buffer) => {
-      // While the voice connection resumes, the receiver skips DAVE and pushes ciphertext.
-      if (session.connection.state.status !== VoiceConnectionStatus.Ready) return
+      // The receiver hands on DAVE frames it couldn't decrypt: while the connection resumes, and
+      // while its MLS session isn't ready. A plain Opus packet ending in the marker is rare enough
+      // to lose.
+      if (packet.subarray(-DAVE_MAGIC_MARKER.length).equals(DAVE_MAGIC_MARKER)) return
       session.relay?.audio(userId, packet)
     })
     stream.on('error', (error) => log(`Bot ${botId} lost a speaker's audio: ${error.message}`))

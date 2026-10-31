@@ -98,9 +98,9 @@ export interface VoiceOptOutChange {
 /** Hears voice opt-out changes as they commit. */
 export interface OptOutWatcher {
   readonly changed: (change: VoiceOptOutChange) => void
-  /** The connection dropped and came back: changes made meanwhile were missed. */
+  /** Listening works again after a failed or dropped connection: changes made meanwhile were missed. */
   readonly missed: () => void
-  /** Why the connection dropped; it reconnects on its own. */
+  /** Why a connection failed or dropped; it retries on its own. */
   readonly lost: (error: Error) => void
 }
 
@@ -244,57 +244,53 @@ const KEEPALIVE_PROBES = 3
 const RELISTEN_MS = 1_000
 
 /**
- * Listen on its own connection, since a pooled one goes back to other queries. A lost connection
- * reconnects until stopped. Rejects only when the first connection fails.
+ * Listen on its own connection, since a pooled one goes back to other queries. A connection that
+ * fails, first or later, is retried until stopped, and `resumed` fires once listening works again.
  */
 const listenOn =
   (url: string): Listen =>
-  (channel, { payload, resumed, lost: onLost }) =>
-    new Promise((resolve, reject) => {
-      let stopped = false
-      let current: Client | undefined
-      let retry: ReturnType<typeof setTimeout> | undefined
-      const stop = async () => {
-        stopped = true
-        clearTimeout(retry)
-        await current?.end().catch(() => {})
+  async (channel, { payload, resumed, lost: onLost }) => {
+    let stopped = false
+    let current: Client | undefined
+    let retry: ReturnType<typeof setTimeout> | undefined
+    /** Whether changes may have gone unheard since listening last worked. */
+    let missed = false
+    const open = () => {
+      const client = new Client({
+        connectionString: url,
+        connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
+      })
+      current = client
+      let lost = false
+      const reopen = (error: Error) => {
+        if (lost || stopped) return
+        lost = true
+        missed = true
+        onLost(error)
+        void client.end().catch(() => {})
+        retry = setTimeout(open, RELISTEN_MS)
       }
-      const open = (first: boolean) => {
-        const client = new Client({
-          connectionString: url,
-          connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
-        })
-        current = client
-        let lost = false
-        const reopen = (error: Error) => {
-          if (lost || stopped) return
-          lost = true
-          onLost(error)
-          void client.end().catch(() => {})
-          retry = setTimeout(() => open(false), RELISTEN_MS)
-        }
-        client.on('error', reopen)
-        client.on('end', () => reopen(new Error('The listening connection to Postgres ended.')))
-        client.on('notification', (message) => {
-          if (message.channel === channel && message.payload !== undefined) {
-            payload(message.payload)
-          }
-        })
-        client
-          .connect()
-          .then(() => client.query(`listen "${channel}"`))
-          .then(
-            () => (first ? resolve(stop) : resumed()),
-            (error: Error) => {
-              if (!first) return reopen(error)
-              stopped = true
-              void client.end().catch(() => {})
-              reject(error)
-            },
-          )
-      }
-      open(true)
-    })
+      client.on('error', reopen)
+      client.on('end', () => reopen(new Error('The listening connection to Postgres ended.')))
+      client.on('notification', (message) => {
+        if (message.channel === channel && message.payload !== undefined) payload(message.payload)
+      })
+      client
+        .connect()
+        .then(() => client.query(`listen "${channel}"`))
+        .then(() => {
+          if (!missed) return
+          missed = false
+          resumed()
+        }, reopen)
+    }
+    open()
+    return async () => {
+      stopped = true
+      clearTimeout(retry)
+      await current?.end().catch(() => {})
+    }
+  }
 
 /**
  * Connect to Postgres and apply pending migrations before anything reads or writes.

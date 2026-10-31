@@ -36,6 +36,7 @@ const start = async ({
   shards = 1,
   members = [ALICE],
   sendMessages = true,
+  interactionsEndpoint = null as string | null,
   onDispatch = (_botId: string, _event: string, _data: unknown) => {},
   /** Stands between the bot and the fake Discord, as for slowing a request. */
   through = (discordFetch: typeof fetch): typeof fetch => discordFetch,
@@ -53,7 +54,7 @@ const start = async ({
     storage,
     clock,
     log: () => {},
-    discordFetch: through(gateway.discordFetch({ shards, sendMessages })),
+    discordFetch: through(gateway.discordFetch({ shards, sendMessages, interactionsEndpoint })),
     onDispatch,
   })
   cleanup.push(storage.close, voiceServer.close, gateway.close, bots.close)
@@ -479,6 +480,20 @@ describe('receiving voice', () => {
     await settle()
     expect(heard.events).toEqual([])
     expect(heard.audio).toEqual([])
+    for (const state of voiceStates(gateway))
+      expect(state).toMatchObject({ d: { self_deaf: true } })
+  })
+
+  it('only sends audio when Discord would send the opt-out clicks to an Interactions Endpoint URL', async () => {
+    const { voice, gateway } = await start({
+      interactionsEndpoint: 'https://bot.example/interactions',
+    })
+    expect(await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID, true)).toEqual({
+      receiving: false,
+      reason: expect.stringContaining('Interactions Endpoint URL'),
+    })
+    // No notice whose buttons nobody could use.
+    expect(gateway.rest).toEqual([])
     for (const state of voiceStates(gateway))
       expect(state).toMatchObject({ d: { self_deaf: true } })
   })
