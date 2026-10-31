@@ -1372,3 +1372,54 @@ it('takes a bot Discord rejected the token of offline, even if its workflows cha
   await gateway.close()
   await storage.close()
 })
+
+it('leaves a bot online whose intents Discord refused after its workflows changed them', async () => {
+  const storage = await inMemoryStorage()
+  const gateway = await fakeGateway(100 * HOUR)
+  const clock = manualClock()
+  let paused: Promise<void> | undefined
+  let resume = () => {}
+  let offlineCalls = 0
+  const bots = startHost(
+    {
+      ...storage,
+      loadOnlineBots: async () => {
+        await paused
+        return storage.loadOnlineBots()
+      },
+      setBotOffline: async (...args) => {
+        const changed = await storage.setBotOffline(...args)
+        offlineCalls += 1
+        return changed
+      },
+    },
+    clock,
+    gateway.discordFetch(),
+  )
+  // `GUILD_MEMBERS`, privileged.
+  await enableWorkflow(storage, 'members', 2)
+  await bots.use(BOT_ID, 'private-token-a')
+  await vi.waitFor(() =>
+    expect(gateway.connections[0]?.received[0]).toMatchObject({ op: 2, d: { intents: 131 } }),
+  )
+
+  // The workflows change, and Discord refuses the old intents while the pass for that runs.
+  await enableWorkflow(storage, 'messages', 512)
+  paused = new Promise((resolve) => {
+    resume = resolve
+  })
+  clock.advance(RECONCILE_MS)
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  gateway.connections[0]?.close(4014)
+  await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(4014))
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  paused = undefined
+  resume()
+
+  await vi.waitFor(() => expect(offlineCalls).toBe(1))
+  expect(await storage.loadBot(BOT_ID)).toMatchObject({ rejectedCode: null, online: {} })
+
+  await bots.close()
+  await gateway.close()
+  await storage.close()
+})

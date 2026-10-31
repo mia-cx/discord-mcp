@@ -49,3 +49,21 @@ it('lets a lease it could not release expire, rather than renewing it for nobody
   ).toEqual(expect.objectContaining({ holder: 'another' }))
   await storage.close()
 })
+
+it('keeps one hold of a lease while extending it, and starts another once it is given up', async () => {
+  const storage = await inMemoryStorage()
+  const leases = createLeases(storage, manualClock(), vi.fn())
+  const name = 'shard:345678901234567890:0'
+
+  expect(await leases.claim(name)).toBe(true)
+  const first = leases.tenure(name)
+  expect(await leases.claim(name)).toBe(true)
+  await leases.renew()
+  expect(leases.tenure(name)).toBe(first)
+
+  await leases.release(name)
+  expect(leases.tenure(name)).toBeUndefined()
+  expect(await leases.claim(name)).toBe(true)
+  expect(leases.tenure(name)).not.toBe(first)
+  await storage.close()
+})

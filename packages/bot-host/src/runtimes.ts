@@ -175,8 +175,11 @@ interface Running {
   presence: string | null
   /** Its session has started, with READY or RESUMED, and not dropped since. */
   ready: boolean
-  /** Discord closed the shard for good, with `rejectedCode` when no new shard count can help. */
-  fatal?: { readonly rejectedCode?: number }
+  /**
+   * Discord closed the shard for good, with `rejectedCode` when no new shard count can help, and
+   * what of the bot's state it refused (`ranAs`): a refused token is refused however the bot runs.
+   */
+  fatal?: { readonly rejectedCode?: number; readonly ranAs: BotRanAs }
 }
 
 const reason = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause))
@@ -545,8 +548,15 @@ export const createBotRuntimes = ({
               ? `Bot ${botId} is offline: Discord refused its Gateway intents with code ${code}. It stays offline until its workflows or its token change.`
               : `Bot ${botId} is offline: Discord closed its Gateway session with code ${code}. It stays offline until its token changes.`,
         )
-        // The next pass takes the bot offline, and so stops its shards on every host.
-        run.fatal = reshard ? {} : { rejectedCode: code }
+        // The next pass takes the bot offline, and so stops its shards on every host, unless by
+        // then it runs with another shard count or other intents than Discord refused. Recorded
+        // now: a workflow change may update the run before that pass.
+        run.fatal = reshard
+          ? { ranAs: { shardCount: run.shardCount } }
+          : {
+              rejectedCode: code,
+              ranAs: INTENT_CLOSE_CODES.has(code) ? { intents: run.intents } : {},
+            }
         void tick()
       },
     })
@@ -586,21 +596,10 @@ export const createBotRuntimes = ({
    * The bots online in storage, after taking offline those a shard here was closed for good and
    * those idle for 24 hours without workflows to hold them.
    */
-  /**
-   * What a shard Discord closed for good was refused for, which must still hold for the close to
-   * take the bot offline: once brought back with another shard count or other intents, by any
-   * host, the close says nothing about it. A refused token is refused however the bot runs.
-   */
-  const ranAs = ({ fatal, shardCount, intents }: Running): BotRanAs => {
-    const code = fatal?.rejectedCode
-    if (code === undefined) return { shardCount }
-    return INTENT_CLOSE_CODES.has(code) ? { intents } : {}
-  }
-
   const onlineBots = async () => {
     for (const run of running.values()) {
       if (run.fatal === undefined) continue
-      await vault.setOffline(run.botId, run.token, { ...run.fatal, ranAs: ranAs(run) })
+      await vault.setOffline(run.botId, run.token, run.fatal)
       // Every shard on this token ends with it, at once: should this pass fail, the bot may come
       // back online with the same token before a shard closed later could take it offline again.
       const ended = [...running].filter(
