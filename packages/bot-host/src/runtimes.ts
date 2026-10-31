@@ -1,9 +1,11 @@
 import type { Clock } from './clock.ts'
-import { type Shard, startShard } from './shard.ts'
+import { type Shard, type ShardSession, startShard } from './shard.ts'
 import type { TokenVault } from './vault.ts'
 
 export const IDLE_TIMEOUT_MS = 24 * 60 * 60 * 1000
 export const DISCORD_GATEWAY_URL = 'wss://gateway.discord.gg'
+/** Each bot runs one shard. */
+const SHARD_ID = 0
 
 export interface BotRuntimesOptions {
   readonly vault: TokenVault
@@ -20,17 +22,25 @@ export interface BotRuntimes {
    * stored. Failures are logged rather than thrown, so they never fail the agent's call.
    */
   readonly use: (botId: string, token: string) => Promise<void>
-  /** Take every bot offline. */
-  readonly close: () => void
+  /**
+   * Bring back every bot a previous process left online, resuming its stored session so Discord
+   * replays the events it missed. Each starts a fresh 24-hour idle timer. Failures are logged.
+   */
+  readonly resume: () => Promise<void>
+  /**
+   * Disconnect every bot without ending its session, so the next process can resume it.
+   * Resolves once every pending storage write has settled.
+   */
+  readonly close: () => Promise<void>
 }
 
 interface Runtime {
   readonly token: string
-  /** Settles once this runtime's token write has finished or failed. */
-  stored: Promise<void>
   shard?: Shard
   cancelIdle: () => void
 }
+
+const reason = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause))
 
 /** The bots this process keeps online, one runtime per bot. */
 export const createBotRuntimes = ({
@@ -42,6 +52,37 @@ export const createBotRuntimes = ({
   const running = new Map<string, Runtime>()
   /** Tokens Discord rejected for good, by bot. Retrying them only spends Identifies. */
   const rejected = new Map<string, string>()
+  /**
+   * Each bot's storage writes, chained so they land in order: a replaced token never overwrites
+   * its successor, and an ended session never outlives the next one.
+   */
+  const writes = new Map<string, Promise<void>>()
+  /** Sessions waiting in their bot's write chain. Only the newest is written. */
+  const unsaved = new Map<string, ShardSession | undefined>()
+
+  const write = (botId: string, task: () => Promise<void>) => {
+    const done = (writes.get(botId) ?? Promise.resolve()).then(task)
+    writes.set(
+      botId,
+      done.catch(() => {}),
+    )
+    return done
+  }
+
+  // A crash loses at most the writes still queued, so a resume replays a few events twice
+  // rather than skipping any.
+  const saveSession = (botId: string, session: ShardSession | undefined) => {
+    const queued = unsaved.has(botId)
+    unsaved.set(botId, session)
+    if (queued) return
+    write(botId, () => {
+      const latest = unsaved.get(botId)
+      unsaved.delete(botId)
+      return latest === undefined
+        ? vault.clearSession(botId, SHARD_ID)
+        : vault.storeSession(botId, SHARD_ID, latest)
+    }).catch((cause) => log(`Saving bot ${botId}'s Gateway session failed: ${reason(cause)}`))
+  }
 
   const stop = (botId: string, runtime: Runtime) => {
     if (running.get(botId) !== runtime) return
@@ -58,22 +99,20 @@ export const createBotRuntimes = ({
     }, IDLE_TIMEOUT_MS)
   }
 
-  const start = async (botId: string, runtime: Runtime, previous: Promise<void>) => {
-    // Writes for one bot run in order, so a replaced token never overwrites its successor.
-    await previous
-    try {
-      await vault.store(botId, runtime.token)
-    } catch (cause) {
-      log(`Bot ${botId} stays offline: ${cause instanceof Error ? cause.message : String(cause)}`)
-      return stop(botId, runtime)
-    }
-    // Idle, closed, or replaced by a new token while storing.
-    if (running.get(botId) !== runtime) return
+  const add = (botId: string, token: string) => {
+    const runtime: Runtime = { token, cancelIdle: () => {} }
+    running.set(botId, runtime)
+    keepAlive(botId, runtime)
+    return runtime
+  }
+
+  const connect = (botId: string, runtime: Runtime, session?: ShardSession) => {
     runtime.shard = startShard({
       token: runtime.token,
       gatewayUrl,
       clock,
-      onSession: () => {},
+      ...(session && { session }),
+      onSession: (next) => saveSession(botId, next),
       onReady: () => log(`Bot ${botId} is online.`),
       onIdentifyBudgetSpent: (waitMs) =>
         log(
@@ -99,14 +138,36 @@ export const createBotRuntimes = ({
       }
       // A reset token invalidates the old session, so start over with the new one.
       if (current !== undefined) stop(botId, current)
-      const runtime: Runtime = { token, stored: Promise.resolve(), cancelIdle: () => {} }
-      running.set(botId, runtime)
-      keepAlive(botId, runtime)
-      runtime.stored = start(botId, runtime, current?.stored ?? Promise.resolve())
-      return runtime.stored
+      const runtime = add(botId, token)
+      return write(botId, () => vault.store(botId, token)).then(
+        () => {
+          // Idle, closed, or replaced by a new token while storing.
+          if (running.get(botId) === runtime) connect(botId, runtime)
+        },
+        (cause) => {
+          log(`Bot ${botId} stays offline: ${reason(cause)}`)
+          stop(botId, runtime)
+        },
+      )
     },
-    close: () => {
-      for (const [botId, runtime] of running) stop(botId, runtime)
+    resume: async () => {
+      const stored = await vault.loadSessions().catch((cause) => {
+        log(`Could not resume bots from storage: ${reason(cause)}`)
+        return []
+      })
+      for (const { botId, token, session } of stored) {
+        // An agent call brought it online first.
+        if (running.has(botId)) continue
+        connect(botId, add(botId, token), session)
+      }
+    },
+    close: async () => {
+      for (const [botId, runtime] of running) {
+        running.delete(botId)
+        runtime.cancelIdle()
+        runtime.shard?.suspend()
+      }
+      await Promise.all(writes.values())
     },
   }
 }

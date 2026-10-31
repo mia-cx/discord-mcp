@@ -22,8 +22,9 @@ const csv = (value: string) =>
 const VAULT_KEY_BYTES = 32
 
 /**
- * Bot hosting keeps bots online and stores their tokens. It starts only with a database and an
- * allowlist naming who may use it; otherwise the process stays a plain relay.
+ * Bot hosting keeps bots online and stores their tokens and Gateway sessions, resuming the bots
+ * the previous process left online. It starts only with a database and an allowlist naming who
+ * may use it; otherwise the process stays a plain relay.
  */
 const startBotHosting = (allowedUserIds: ReadonlyArray<string> | undefined) =>
   Effect.gen(function* () {
@@ -64,14 +65,16 @@ const startBotHosting = (allowedUserIds: ReadonlyArray<string> | undefined) =>
       (storage) => Effect.promise(() => storage.close()),
     )
     return yield* Effect.acquireRelease(
-      Effect.sync(() =>
-        createBotRuntimes({
+      Effect.promise(async () => {
+        const bots = createBotRuntimes({
           vault: createTokenVault(vaultKey, storage),
           clock: systemClock,
           log,
-        }),
-      ),
-      (bots) => Effect.sync(() => bots.close()),
+        })
+        await bots.resume()
+        return bots
+      }),
+      (bots) => Effect.promise(() => bots.close()),
     )
   })
 

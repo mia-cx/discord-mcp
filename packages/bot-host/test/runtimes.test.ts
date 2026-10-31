@@ -5,12 +5,13 @@ import { fakeGateway, manualClock } from '../src/testing.ts'
 import { createTokenVault } from '../src/vault.ts'
 
 const BOT_ID = '345678901234567890'
+const KEY = Buffer.alloc(32, 1)
 
 it('leaves a bot Discord rejected offline until its token changes', async () => {
   const storage = await inMemoryStorage()
   const gateway = await fakeGateway()
   const bots = createBotRuntimes({
-    vault: createTokenVault(Buffer.alloc(32, 1), storage),
+    vault: createTokenVault(KEY, storage),
     clock: manualClock(),
     log: () => {},
     gatewayUrl: gateway.url,
@@ -29,7 +30,41 @@ it('leaves a bot Discord rejected offline until its token changes', async () => 
   await bots.use(BOT_ID, 'private-token-b')
   await vi.waitFor(() => expect(gateway.connections[1]?.received[0]).toMatchObject({ op: 2 }))
 
-  bots.close()
+  await bots.close()
+  await gateway.close()
+  await storage.close()
+})
+
+it('resumes an online bot after a restart, from what the previous process stored', async () => {
+  const storage = await inMemoryStorage()
+  const gateway = await fakeGateway()
+  const options = { clock: manualClock(), log: () => {}, gatewayUrl: gateway.url }
+  const before = createBotRuntimes({ vault: createTokenVault(KEY, storage), ...options })
+  const stored = createTokenVault(KEY, storage)
+
+  await before.use(BOT_ID, 'private-token-a')
+  await vi.waitFor(() => expect(gateway.connections[0]?.received[0]?.op).toBe(2))
+  gateway.connections[0]?.send({ op: 0, t: 'MESSAGE_CREATE', s: 2, d: {} })
+  await vi.waitFor(async () => expect((await stored.loadSessions())[0]?.session.sequence).toBe(2))
+  await before.close()
+  // Any close but 1000 or 1001 keeps the session resumable.
+  await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(4000))
+
+  // The next process shares nothing with the last but the database and the vault key.
+  const after = createBotRuntimes({ vault: createTokenVault(KEY, storage), ...options })
+  await after.resume()
+  await vi.waitFor(() =>
+    expect(gateway.connections[1]?.received[0]).toEqual({
+      op: 6,
+      d: { token: 'private-token-a', session_id: 'fake-session', seq: 2 },
+    }),
+  )
+  // Discord replays what happened during the restart.
+  gateway.connections[1]?.send({ op: 0, t: 'MESSAGE_CREATE', s: 3, d: {} })
+  gateway.connections[1]?.send({ op: 0, t: 'RESUMED', s: 4, d: {} })
+  await vi.waitFor(async () => expect((await stored.loadSessions())[0]?.session.sequence).toBe(4))
+
+  await after.close()
   await gateway.close()
   await storage.close()
 })
