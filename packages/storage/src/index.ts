@@ -11,7 +11,23 @@ export interface Storage {
   /** Insert or replace a bot's token vault envelope. */
   readonly storeSealedToken: (botId: string, sealedToken: string) => Promise<void>
   readonly loadSealedToken: (botId: string) => Promise<string | undefined>
+  /** Insert or replace a shard's sealed Gateway session. The bot's token must be stored first. */
+  readonly storeSealedSession: (
+    botId: string,
+    shardId: number,
+    sealedSession: string,
+  ) => Promise<void>
+  readonly deleteSession: (botId: string, shardId: number) => Promise<void>
+  /** Every stored shard session, with its bot's sealed token. */
+  readonly loadSealedSessions: () => Promise<ReadonlyArray<SealedSession>>
   readonly close: () => Promise<void>
+}
+
+export interface SealedSession {
+  readonly botId: string
+  readonly shardId: number
+  readonly sealedSession: string
+  readonly sealedToken: string
 }
 
 const CONNECT_TIMEOUT_MS = 10_000

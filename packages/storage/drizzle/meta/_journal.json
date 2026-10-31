@@ -8,6 +8,13 @@
       "when": 1793424838153,
       "tag": "0000_bots",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1793427414593,
+      "tag": "0001_shard_sessions",
+      "breakpoints": true
     }
   ]
 }
