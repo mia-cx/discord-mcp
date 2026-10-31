@@ -169,17 +169,19 @@ const main = Effect.gen(function* () {
               response,
             )
           })
+          server.on('upgrade', relay.upgrade)
           server.once('error', reject)
           server.listen(config.port, config.host, () => resolve(server))
         }),
     ),
     (server) =>
-      Effect.promise(
-        () =>
-          new Promise<void>((resolve, reject) => {
-            server.close((error) => (error === undefined ? resolve() : reject(error)))
-          }),
-      ),
+      Effect.promise(async () => {
+        // Closing the bots leaves voice and closes voice sockets, which would hold the server open.
+        await bots?.close()
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => (error === undefined ? resolve() : reject(error)))
+        })
+      }),
   )
   const address = server.address()
   const port = typeof address === 'object' && address !== null ? address.port : config.port

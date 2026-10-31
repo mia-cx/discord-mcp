@@ -92,10 +92,16 @@ importers:
       jose:
         specifier: 6.2.4
         version: 6.2.4
+      ws:
+        specifier: 8.22.0
+        version: 8.22.0
     devDependencies:
       '@modelcontextprotocol/client':
         specifier: 2.3.1
         version: 2.3.1
+      '@types/ws':
+        specifier: 8.18.2
+        version: 8.18.2
 
   packages/auth:
     dependencies:
