@@ -36,9 +36,12 @@ const addFormats = (ajvFormats as unknown as { readonly default: (instance: Ajv2
 
 const ajv = new Ajv2020({ allErrors: true, strict: false, validateFormats: true })
 addFormats(ajv)
+// The catalog builds a fresh schema object per call and Ajv caches by identity, so compile once
+// per operation instead.
+const validators = new Map<string, ReturnType<typeof ajv.compile>>()
 
 /**
- * The five operations Discord's own spec marks OAuth2-only.
+ * The six operations that reject a bot token.
  *
  * They are refused *only* under a bot profile — an OAuth2 profile can call them — so the message
  * must say which profile to use rather than implying the operation is unavailable.
@@ -116,7 +119,12 @@ export const validateQueryParams = (
     }
   }
   for (const required of op.requiredQuery) {
-    if (query[required] === undefined) issues.push(`query.${required}: required but not supplied.`)
+    if (query[required] == null) issues.push(`query.${required}: required but not supplied.`)
+  }
+  for (const [key, value] of Object.entries(query)) {
+    if ([value].flat().some((v) => v !== null && typeof v === 'object')) {
+      issues.push(`query.${key}: must be a string, number, boolean, or a list of them.`)
+    }
   }
 
   if (issues.length > 0) {
@@ -169,7 +177,8 @@ export const validateBody = (
 
   return Effect.try({
     try: () => {
-      const validate = ajv.compile(schema)
+      const validate = validators.get(op.operationId) ?? ajv.compile(schema)
+      validators.set(op.operationId, validate)
       if (validate(body)) return
       throw (validate.errors ?? []).map(
         (e: { instancePath: string; message?: string }) =>

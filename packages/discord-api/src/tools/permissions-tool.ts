@@ -1,4 +1,4 @@
-import { defineTool, Snowflake } from '@discord-mcp/core'
+import { defineTool, Snowflake, ValidationError } from '@discord-mcp/core'
 import {
   computeEffectivePermissions,
   explainMissing,
@@ -19,9 +19,17 @@ const RolePayload = Schema.Array(
     managed: Schema.optionalKey(Schema.Boolean),
   }),
 )
-const MemberPayload = Schema.Struct({ roles: Schema.Array(Schema.String) })
+const MemberPayload = Schema.Struct({
+  user: Schema.Struct({ id: Schema.String }),
+  roles: Schema.Array(Schema.String),
+})
+/** Announcement, public, and private threads inherit their parent channel's overwrites. */
+const THREAD_TYPES = new Set([10, 11, 12])
 const ChannelPayload = Schema.Struct({
   id: Schema.String,
+  type: Schema.Int,
+  guild_id: Schema.optionalKey(Schema.String),
+  parent_id: Schema.optionalKey(Schema.NullOr(Schema.String)),
   name: Schema.optionalKey(Schema.String),
   permission_overwrites: Schema.optionalKey(
     Schema.Array(
@@ -105,15 +113,26 @@ export const permissionsExplain = defineTool<typeof Input.Type, unknown, Discord
       let overwrites: ReadonlyArray<OverwriteLike> = []
       let channelName: string | undefined
       if (args.channelId !== undefined) {
-        const channel = yield* Schema.decodeUnknownEffect(ChannelPayload)(
-          yield* rest.request({
-            method: 'GET',
-            route: `/channels/${args.channelId}`,
-            operationFamily: 'channel',
-          }),
-        )
+        const getChannel = (id: string) =>
+          Effect.flatMap(
+            rest.request({ method: 'GET', route: `/channels/${id}`, operationFamily: 'channel' }),
+            Schema.decodeUnknownEffect(ChannelPayload),
+          )
+        const channel = yield* getChannel(args.channelId)
+        if (channel.guild_id !== args.guildId) {
+          return yield* Effect.fail(
+            new ValidationError({
+              message: `Channel ${args.channelId} is not in guild ${args.guildId}.`,
+              issues: ['channelId: pass a channel from the same guild as guildId.'],
+            }),
+          )
+        }
         channelName = channel.name
-        overwrites = (channel.permission_overwrites ?? []).map((o) => ({
+        const source =
+          THREAD_TYPES.has(channel.type) && typeof channel.parent_id === 'string'
+            ? yield* getChannel(channel.parent_id)
+            : channel
+        overwrites = (source.permission_overwrites ?? []).map((o) => ({
           id: o.id,
           type: o.type === 1 ? 1 : 0,
           allow: o.allow,
@@ -124,7 +143,7 @@ export const permissionsExplain = defineTool<typeof Input.Type, unknown, Discord
       const explanation = computeEffectivePermissions({
         guildId: args.guildId,
         guildOwnerId: guild.owner_id,
-        memberId: args.memberId ?? 'self',
+        memberId: member.user.id,
         memberRoleIds: member.roles,
         roles: roles as ReadonlyArray<RoleLike>,
         ...(overwrites.length > 0 ? { overwrites } : {}),

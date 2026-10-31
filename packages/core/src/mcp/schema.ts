@@ -17,11 +17,16 @@ export type McpSchema = Schema.Top & { readonly DecodingServices: never }
  * `toStandardSchemaV1` attaches the first, `toStandardJSONSchemaV1` the second, to the same
  * object. Both mutate and return the input schema, so this is idempotent. There is no adapter
  * package; the bridge is these two calls.
+ *
+ * MCP hands the handler the value `validate` returns, so validation rejects unknown keys to match
+ * the advertised `additionalProperties: false`. Lenient decoding would drop a misspelled argument.
  */
 export const McpInput = <S extends McpSchema>(
   s: S,
 ): StandardSchemaV1<S['Encoded'], S['Type']> & StandardJSONSchemaV1<S['Encoded'], S['Type']> & S =>
-  Schema.toStandardJSONSchemaV1(Schema.toStandardSchemaV1(s))
+  Schema.toStandardJSONSchemaV1(
+    Schema.toStandardSchemaV1(s, { parseOptions: { errors: 'all', onExcessProperty: 'error' } }),
+  )
 
 /** JSON Schema target MCP v2 asks for when it serialises a tool schema. */
 const MCP_JSON_SCHEMA_TARGET = 'draft-2020-12' as const
