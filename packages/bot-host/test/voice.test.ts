@@ -134,6 +134,9 @@ const start = async ({
     cut: () => {
       renewing = false
     },
+    restore: () => {
+      renewing = true
+    },
     /** The next renewal keeps every lease but those named `prefix…`, which another host took. */
     lose: (prefix: string) => {
       taken = prefix
@@ -347,6 +350,32 @@ describe('voice', () => {
     saved()
 
     // It waits out the turn of the Identify that started the session it replaces.
+    await vi.waitFor(() => {
+      clock.advance(1_000)
+      expect(gateway.connections[1]?.received[0]).toBeDefined()
+    })
+    expect(gateway.connections[1]?.received[0]).toMatchObject({ op: 2 })
+  })
+
+  it('restarts such a shard afresh when it takes the shard back before the end is saved', async () => {
+    const { voice, gateway, clock, leases } = await start({ leaseTtlMs: 15_000 })
+    await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID)
+    // Postgres holds a session write, then stops renewing leases.
+    const saved = leases.holdSessions()
+    gateway.connections[0]?.send({ op: 0, t: 'MESSAGE_CREATE', s: 20, d: {} })
+    leases.cut()
+    // The leases lapse 10 s in, while Discord has the shard reconnecting.
+    clock.advance(9_500)
+    gateway.connections[0]?.send({ op: 9, d: true })
+    await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(4000))
+    clock.advance(500)
+
+    // Postgres recovers, the host takes its shard back, and then the held writes land.
+    leases.restore()
+    clock.advance(5_000)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    saved()
+
     await vi.waitFor(() => {
       clock.advance(1_000)
       expect(gateway.connections[1]?.received[0]).toBeDefined()

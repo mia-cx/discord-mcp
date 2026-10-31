@@ -385,9 +385,11 @@ export const createBotRuntimes = ({
       unsaved.delete(key)
       latest = next?.session
       tenure = next?.tenure
-      // Once the hold lapses here the fence decides; a newer hold means the shard came back.
+      // Once the hold lapses here the fence decides. A newer hold means the shard came back, and a
+      // resumable session from before may be older than its owner's since; ending one never is.
       const current = leases.tenure(key)
-      if (current !== undefined && current !== tenure) return
+      const resumable = latest !== undefined && latest.stale !== true
+      if (resumable && current !== undefined && current !== tenure) return
       const fence = { lease: key, holder: leases.holder }
       return latest === undefined
         ? vault.clearSession(botId, shardId, fence)
