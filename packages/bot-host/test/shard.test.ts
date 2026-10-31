@@ -160,6 +160,29 @@ describe('the shard supervisor', () => {
     })
   })
 
+  it('never sends the token to a resume URL outside Discord or the configured Gateway', async () => {
+    const gateway = await fakeGateway()
+    const shard = startShard({
+      token: TOKEN,
+      gatewayUrl: gateway.url,
+      clock: manualClock(),
+      session: { sessionId: 'saved', resumeGatewayUrl: 'ws://localhost:1', sequence: 7 },
+      onSession: () => {},
+      onReady: () => {},
+      onFatal: () => {},
+      onIdentifyBudgetSpent: () => {},
+    })
+    cleanup.push(gateway.close, shard.stop)
+
+    // The clock never moves, so only a first connection straight to the Gateway can resume.
+    await vi.waitFor(() =>
+      expect(gateway.connections[0]?.received[0]).toEqual({
+        op: 6,
+        d: { token: TOKEN, session_id: 'saved', seq: 7 },
+      }),
+    )
+  })
+
   it('stops for good when Discord rejects the token', async () => {
     const { gateway, clock, onFatal } = await start()
     await identified(gateway, 1)
