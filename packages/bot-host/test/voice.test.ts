@@ -33,8 +33,9 @@ const start = async ({ heartbeatIntervalMs = 41_250, answersVoice = true } = {})
     answersVoice ? { botId: BOT_ID, endpoint: voiceServer.endpoint } : undefined,
   )
   const clock = manualClock()
+  const vault = createTokenVault(Buffer.alloc(32, 1), storage)
   const bots = createBotRuntimes({
-    vault: createTokenVault(Buffer.alloc(32, 1), storage),
+    vault,
     clock,
     log: () => {},
     gatewayUrl: gateway.url,
@@ -43,7 +44,7 @@ const start = async ({ heartbeatIntervalMs = 41_250, answersVoice = true } = {})
   await bots.use(BOT_ID, 'private-bot-token')
   const voice = bots.voice(BOT_ID)
   if (voice === undefined) throw new Error('the bot is not running')
-  return { bots, voice, voiceServer, gateway, clock }
+  return { bots, vault, voice, voiceServer, gateway, clock }
 }
 
 /** An agent's WebSocket and the server side of it, which the bot host takes over. */
@@ -239,6 +240,18 @@ describe('voice', () => {
       op: 4,
       d: { guild_id: GUILD_ID, channel_id: null, self_deaf: true, self_mute: false },
     })
+  })
+
+  it('ends the session at shutdown when a leave could not reach Discord', async () => {
+    const { bots, vault, voice, gateway } = await start()
+    await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID)
+    await vi.waitFor(async () => expect(await vault.loadSessions()).toHaveLength(1))
+    gateway.connections[0]?.send({ op: 7 })
+    await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(4000))
+
+    // Shutting down mid-reconnect: a resumed session would still have the bot in the channel.
+    await bots.close()
+    expect(await vault.loadSessions()).toEqual([])
   })
 
   it('fails the join when Discord does not connect the bot', async () => {

@@ -151,12 +151,15 @@ export interface BotVoice {
 export interface Voice extends BotVoice {
   /** Feed every Gateway dispatch the bot's shard receives. */
   readonly dispatch: (event: string, data: unknown) => void
-  /** The shard lost its connection: joins wait for the next `READY`. */
+  /** The shard lost its connection: joins wait for the next `READY` or `RESUMED`. */
   readonly dropped: () => void
   /** Whether an agent's voice socket is open, which keeps the bot online. */
   readonly streaming: () => boolean
-  /** Leave every voice channel and close every socket, as the bot goes offline. */
-  readonly close: () => void
+  /**
+   * Leave every voice channel and close every socket, as the bot goes offline. False when a leave
+   * could not reach Discord, so its session would keep the bot in the channel.
+   */
+  readonly close: () => boolean
 }
 
 interface Session {
@@ -384,6 +387,7 @@ export const createVoice = ({ botId, send, clock, log }: VoiceOptions): Voice =>
     streaming: () => [...sessions.values()].some((session) => session.socket !== undefined),
     close: () => {
       for (const session of sessions.values()) destroy(session, OFFLINE)
+      return unsentLeaves.size === 0
     },
   }
 }
