@@ -18,12 +18,13 @@ export interface SessionStartLimit {
 /** Paces one bot's Identifies across all its shards. */
 export interface IdentifyGate {
   /**
-   * Reserve one Identify from the bot's daily budget and return 0, or return the wait until the
-   * budget reopens.
+   * Take one Identify from the bot's daily budget, or `undefined` when it is spent. The returned
+   * function gives it back, for a connection that closed before it identified. A reservation
+   * from before the budget reset gives nothing back.
    */
-  readonly reserve: () => number
-  /** Return a reservation whose connection closed before it identified. */
-  readonly release: () => void
+  readonly reserve: () => (() => void) | undefined
+  /** Milliseconds until a spent budget reopens. */
+  readonly reopensIn: () => number
   /**
    * Call `identify` once shard `shardId`'s concurrency bucket is free, at once if it is free now.
    * Shards in a bucket identify in the order they asked. The returned function withdraws the ask.
@@ -83,14 +84,18 @@ export const createIdentifyGate = (clock: Clock, limit: SessionStartLimit): Iden
   }
   return {
     reserve: () => {
-      const now = refill()
-      if (allowance === 0) return resetsAt - now
+      refill()
+      if (allowance === 0) return undefined
       allowance -= 1
-      return 0
+      // `resetsAt` names the budget window this reservation came from.
+      const window = resetsAt
+      let held = true
+      return () => {
+        if (held && window === resetsAt) allowance += 1
+        held = false
+      }
     },
-    release: () => {
-      allowance += 1
-    },
+    reopensIn: () => resetsAt - refill(),
     whenFree: (shardId, identify) => {
       const bucket = bucketOf(shardId)
       // Its own function, so withdrawing removes this ask and no other.

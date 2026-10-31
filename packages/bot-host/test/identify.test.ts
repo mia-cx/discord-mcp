@@ -1,10 +1,13 @@
 import { expect, it } from 'vitest'
-import { createIdentifyGate } from '../src/identify.ts'
+import { createIdentifyGate, type IdentifyGate } from '../src/identify.ts'
 import { manualClock } from '../src/testing.ts'
 
 const HOUR = 60 * 60 * 1000
 const DAY = 24 * HOUR
 const LIMIT = { total: 1000, remaining: 1000, resetAfter: DAY, maxConcurrency: 1 }
+
+/** Reserve an Identify and return 0, or return the wait until the budget reopens. */
+const waitToReserve = (gate: IdentifyGate) => (gate.reserve() === undefined ? gate.reopensIn() : 0)
 
 it.each([
   {
@@ -87,25 +90,41 @@ it.each([
   },
 ])('reserves the daily Identify budget: $case', ({ remaining, resetAfter, waits }) => {
   const gate = createIdentifyGate(manualClock(), { ...LIMIT, remaining, resetAfter })
-  expect(waits.map(() => gate.reserve())).toEqual(waits)
+  expect(waits.map(() => waitToReserve(gate))).toEqual(waits)
 })
 
 it('gets back an Identify reserved by a connection that never identified', () => {
   const gate = createIdentifyGate(manualClock(), { ...LIMIT, remaining: 2 })
-  expect(gate.reserve()).toBe(0)
-  expect(gate.reserve()).toBe(DAY)
+  const release = gate.reserve()
+  expect(waitToReserve(gate)).toBe(DAY)
 
-  gate.release()
-  expect(gate.reserve()).toBe(0)
+  release?.()
+  expect(waitToReserve(gate)).toBe(0)
+})
+
+it('gets nothing back for a reservation from before the budget reset', () => {
+  const clock = manualClock()
+  const gate = createIdentifyGate(clock, {
+    total: 4,
+    remaining: 2,
+    resetAfter: HOUR,
+    maxConcurrency: 1,
+  })
+  const fromYesterday = gate.reserve()
+
+  clock.advance(HOUR)
+  expect([waitToReserve(gate), waitToReserve(gate)]).toEqual([0, 0])
+  fromYesterday?.()
+  expect(waitToReserve(gate)).toBe(DAY)
 })
 
 it('reserves half the daily total once the budget resets, then waits a day', () => {
   const clock = manualClock()
   const gate = createIdentifyGate(clock, { ...LIMIT, remaining: 0, resetAfter: HOUR })
-  expect(gate.reserve()).toBe(HOUR)
+  expect(waitToReserve(gate)).toBe(HOUR)
 
   clock.advance(HOUR)
-  const reserved = Array.from({ length: 500 }, () => gate.reserve())
+  const reserved = Array.from({ length: 500 }, () => waitToReserve(gate))
   expect(reserved.every((wait) => wait === 0)).toBe(true)
-  expect(gate.reserve()).toBe(DAY)
+  expect(waitToReserve(gate)).toBe(DAY)
 })
