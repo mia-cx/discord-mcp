@@ -2,6 +2,7 @@ import { type BotRuntimes, createBotRuntimes, createTokenVault } from '@discord-
 import { fakeGateway, manualClock } from '@discord-mcp/bot-host/testing'
 import { DiscordRest, OperationCatalog } from '@discord-mcp/discord-api'
 import { makeIsolateHost, makeWorkflowHost, type WorkflowHost } from '@discord-mcp/isolate'
+import { fixtureRegistry } from '@discord-mcp/isolate/testing'
 import { inMemoryStorage } from '@discord-mcp/storage/testing'
 import { Effect, Layer, Redacted } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -29,13 +30,14 @@ const GATEWAY_MESSAGE_CONTENT = 1 << 18
 
 const PING_PONG = `
 import { Client, Events, GatewayIntentBits } from 'discord.js'
+import shout from 'shout'
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
 })
 
 client.on(Events.MessageCreate, async (message) => {
-  if (message.content === 'ping') await message.reply('pong')
+  if (message.content === 'ping') await message.reply(shout('pong'))
   if (message.content === 'status') client.user.setPresence({ activities: [{ name: 'ping' }], status: 'idle' })
 })
 
@@ -119,6 +121,13 @@ afterEach(async () => {
  */
 const platform = async (shards = 1) => {
   const storage = await inMemoryStorage()
+  const registry = await fixtureRegistry([
+    {
+      name: 'shout',
+      version: '1.0.0',
+      files: { 'index.js': 'module.exports = (s) => s.toUpperCase()' },
+    },
+  ])
   // Heartbeats are proven in the shard suite; keep them out of these windows.
   const gateway = await fakeGateway(100 * HOUR)
   const clock = manualClock(0.5, START)
@@ -184,6 +193,7 @@ const platform = async (shards = 1) => {
       },
     },
     operations: catalog.all,
+    registry: registry.url,
     rest: (_botId, token) => ({ client: client(token), release: () => {} }),
     log,
   })
@@ -207,6 +217,7 @@ const platform = async (shards = 1) => {
   )
   cleanup.push(
     () => storage.close(),
+    registry.close,
     gateway.close,
     () => bots.close(),
     () => workflows?.close(),
@@ -281,12 +292,14 @@ describe('workflows', () => {
       name: 'ping',
       source: PING_PONG,
       grants: { families: ['message', 'interaction', 'webhook'] },
+      dependencies: { shout: '^1.0.0' },
     })
     expect(published.structuredContent.data).toMatchObject({
       name: 'ping',
       revision: 1,
       events: ['messageCreate', 'interactionCreate'],
       intents: ['Guilds', 'GuildMessages', 'MessageContent'],
+      packages: ['shout@1.0.0'],
       enabled: false,
     })
 
@@ -316,7 +329,7 @@ describe('workflows', () => {
         token: TOKEN,
         method: 'POST',
         route: `/channels/${CHANNEL}/messages`,
-        body: expect.objectContaining({ content: 'pong' }),
+        body: expect.objectContaining({ content: 'PONG' }),
       }),
     )
 
@@ -420,7 +433,12 @@ describe('workflows', () => {
         client.on('messageCreate', () => { const a = []; for (;;) a.push(new Array(1e6).fill(1)) })`,
       grants,
     })
-    await asA('discord_workflow_publish', { name: 'ping', source: PING_PONG, grants })
+    await asA('discord_workflow_publish', {
+      name: 'ping',
+      source: PING_PONG,
+      grants,
+      dependencies: { shout: '1.0.0' },
+    })
     await asA('discord_workflow_enable', { name: 'hog' })
     await asA('discord_workflow_enable', { name: 'ping' })
     const connection = await identifiedWith(PING_INTENTS | VOICE_INTENTS)

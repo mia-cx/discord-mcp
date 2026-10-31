@@ -11,10 +11,12 @@ import type {
 import type { OperationEntry } from '@mia-cx/discord-catalog'
 import { Effect, Redacted } from 'effect'
 import { type KvStore, makeBroker, type Presence } from './broker.ts'
-import { prepareScript, ScriptBuildError, type ScriptModule } from './bundle.ts'
+import { bundleWorkflow, ScriptBuildError, type ScriptModule, withRuntime } from './bundle.ts'
 import { checkScheduleFloor, MIN_SCHEDULE_INTERVAL_MINUTES, parseCron } from './cron.ts'
+import { type Dependencies, DependencyError, withDependencies } from './dependencies.ts'
 import type { GatewayEvent, IsolateHost, ScheduleTick, ScriptOutcome } from './isolate-host.ts'
 import { makeScheduler, type SchedulerClock } from './schedules.ts'
+import { unsupportedUses } from './unsupported.ts'
 
 const GUILD_MEMBERS = 1 << 1
 const GUILD_MESSAGES = 1 << 9
@@ -140,6 +142,8 @@ export interface WorkflowHostOptions {
   /** The wall clock schedules fire and run records are dated by. */
   readonly clock: SchedulerClock
   readonly operations: ReadonlyArray<OperationEntry>
+  /** The npm registry workflow dependencies install from; npm's public one by default. */
+  readonly registry?: string
   /**
    * Borrow the REST client a bot's workflows call Discord through, acting with `token`. The bot
    * host lends the bot's own rate limiter, so workflows and agent calls share its limits.
@@ -173,6 +177,7 @@ export interface WorkflowListing {
       readonly intents: ReadonlyArray<string>
       readonly schedules: ReadonlyArray<string>
       readonly grants: WorkflowGrants
+      readonly packages: ReadonlyArray<string>
     } | null
   }>
   readonly changes: Awaited<ReturnType<Storage['workflowChanges']>>
@@ -185,7 +190,15 @@ export interface WorkflowHost {
    */
   readonly publish: (
     caller: WorkflowCaller,
-    input: { readonly name: string; readonly source: string; readonly grants: WorkflowGrants },
+    input: {
+      readonly name: string
+      readonly source: string
+      readonly grants: WorkflowGrants
+      /** npm packages the source imports, by version, range, or tag. */
+      readonly dependencies?: Readonly<Record<string, string>>
+      /** A package-lock.json pinning every version `dependencies` installs. */
+      readonly lockfile?: string
+    },
   ) => Promise<WorkflowRevision>
   readonly list: (botId: string) => Promise<WorkflowListing>
   /**
@@ -276,11 +289,42 @@ interface Enabled {
   readonly stop: AbortController
 }
 
-/** Compile a revision for later events; a failure is reported by the event that awaits it. */
-const compile = (source: string) => {
-  const modules = prepareScript(source)
+/**
+ * Load a revision's modules for later events; a failure is reported by the event that awaits it.
+ * Revisions stored before bundles were are bundled from their source here.
+ */
+const compile = ({ source, bundle }: WorkflowRevision) => {
+  const modules = (bundle === null ? bundleWorkflow(source) : Promise.resolve(bundle)).then(
+    withRuntime,
+  )
   modules.catch(() => {})
   return modules
+}
+
+/**
+ * Check a workflow for what can't run in an isolate, then bundle it with its dependencies. Every
+ * failure is the agent's to fix, so each becomes a validation error.
+ */
+const buildRevision = async (
+  source: string,
+  dependencies: Dependencies,
+): Promise<{ readonly value: string; readonly packages: ReadonlyArray<string> }> => {
+  const misuses = await unsupportedUses(source)
+  if (misuses.length > 0) {
+    throw invalid("The workflow uses discord.js features workflows can't run.", ...misuses)
+  }
+  const none =
+    Object.keys(dependencies.dependencies).length === 0 && dependencies.lockfile === undefined
+  try {
+    return none
+      ? { value: await bundleWorkflow(source), packages: [] }
+      : await withDependencies(dependencies, (root) => bundleWorkflow(source, root))
+  } catch (error) {
+    if (error instanceof ScriptBuildError || error instanceof DependencyError) {
+      throw invalid(error.message, ...error.issues)
+    }
+    throw error
+  }
 }
 
 /** Identifies a revision across a delete and a republish under the same name. */
@@ -378,6 +422,7 @@ export const makeWorkflowHost = ({
   bots,
   clock,
   operations,
+  registry,
   rest,
   log,
 }: WorkflowHostOptions): WorkflowHost => {
@@ -405,7 +450,7 @@ export const makeWorkflowHost = ({
         (revision) =>
           kept.get(revisionKey(revision)) ?? {
             revision,
-            modules: compile(revision.source),
+            modules: compile(revision),
             stop: new AbortController(),
           },
       ),
@@ -618,11 +663,11 @@ export const makeWorkflowHost = ({
   /** A revision's compiled modules, or undefined after logging why it did not compile. */
   const modulesOf = (botId: string, workflow: Enabled) =>
     workflow.modules.catch((error: unknown) => {
-      const { name, revision, source } = workflow.revision
+      const { name, revision } = workflow.revision
       log(
         `Workflow ${name} (revision ${revision}) of bot ${botId} did not compile: ${String(error)}`,
       )
-      workflow.modules = compile(source)
+      workflow.modules = compile(workflow.revision)
       return undefined
     })
 
@@ -709,7 +754,7 @@ export const makeWorkflowHost = ({
   }
 
   return {
-    publish: async (caller, { name, source, grants }) => {
+    publish: async (caller, { name, source, grants, dependencies = {}, lockfile }) => {
       if (!NAME.test(name)) {
         throw invalid(
           'The name is not valid.',
@@ -719,10 +764,12 @@ export const makeWorkflowHost = ({
       if (Buffer.byteLength(source) > SOURCE_LIMIT_BYTES) {
         throw invalid(`The source exceeds ${SOURCE_LIMIT_BYTES} bytes.`)
       }
-      const modules = await prepareScript(source).catch((error: unknown) => {
-        throw error instanceof ScriptBuildError ? invalid(error.message, ...error.issues) : error
+      const { value: bundle, packages } = await buildRevision(source, {
+        dependencies,
+        ...(lockfile === undefined ? {} : { lockfile }),
+        ...(registry === undefined ? {} : { registry }),
       })
-      const declared = await probe(caller, modules)
+      const declared = await probe(caller, await withRuntime(bundle))
       const unsupported = declared.events.filter(
         (event) =>
           !(event in WORKFLOW_EVENTS) && event !== SCHEDULE_EVENT && !SILENT_EVENTS.has(event),
@@ -754,6 +801,8 @@ export const makeWorkflowHost = ({
         botId: caller.botId,
         name,
         source,
+        bundle,
+        packages,
         grants,
         events,
         intents: declared.intents,
@@ -783,6 +832,7 @@ export const makeWorkflowHost = ({
                     intents: intentNames(revision.intents),
                     schedules: revision.schedules,
                     grants: revision.grants,
+                    packages: revision.packages,
                   },
           }
         }),

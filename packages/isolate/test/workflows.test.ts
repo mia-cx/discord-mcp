@@ -3,6 +3,7 @@ import { inMemoryStorage } from '@discord-mcp/storage/testing'
 import { OperationCatalog } from '@mia-cx/discord-catalog'
 import { Effect } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { withRuntime } from '../src/bundle.ts'
 import type { IsolateHost, ScriptExecution, ScriptOutcome } from '../src/isolate-host.ts'
 import { makeIsolateHost } from '../src/isolate-host.ts'
 import { makeWorkflowHost, type WorkflowEvent } from '../src/workflows.ts'
@@ -19,6 +20,9 @@ const ALL_FLAGS = 0xff000
 const grants = { operations: [], families: ['message'], hosts: [] }
 
 const catalog = await Effect.runPromise(Effect.provide(OperationCatalog, OperationCatalog.layer))
+// discord.js is bundled once per process, on the first event; under load that alone can outlast
+// the waits below.
+await withRuntime('')
 const cleanup: Array<() => unknown> = []
 afterEach(async () => {
   for (const step of cleanup.splice(0).reverse()) await step()
@@ -79,6 +83,8 @@ const setup = async (isolates: IsolateHost = recordingIsolates().host) => {
       botId: BOT.id,
       name,
       source: '',
+      bundle: '',
+      packages: [],
       grants,
       events,
       intents,
@@ -213,6 +219,8 @@ describe('the workflow dispatcher', () => {
         botId,
         name: 'ping',
         source: '',
+        bundle: '',
+        packages: [],
         grants,
         events: ['messageCreate'],
         intents: GUILDS,

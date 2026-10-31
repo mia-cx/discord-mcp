@@ -1,5 +1,5 @@
 {
-  "id": "d51a238f-a08f-4419-ade5-0a3c63a131d8",
+  "id": "7b043e51-1b61-4173-b19b-e1c803fed41a",
   "prevId": "2fe44207-baac-4240-8907-41fc342e6aed",
   "version": "7",
   "dialect": "postgresql",
@@ -274,6 +274,19 @@
           "primaryKey": false,
           "notNull": true
         },
+        "bundle": {
+          "name": "bundle",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "packages": {
+          "name": "packages",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
         "grants": {
           "name": "grants",
           "type": "jsonb",
@@ -291,13 +304,6 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true
-        },
-        "schedules": {
-          "name": "schedules",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
         },
         "published_by": {
           "name": "published_by",
@@ -504,12 +510,6 @@
         "enabled_revision": {
           "name": "enabled_revision",
           "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "schedule_cursor": {
-          "name": "schedule_cursor",
-          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },

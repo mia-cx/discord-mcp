@@ -20,6 +20,10 @@ export interface WorkflowRevision {
   readonly name: string
   readonly revision: number
   readonly source: string
+  /** The source bundled with its dependencies; null for revisions stored before bundles were. */
+  readonly bundle: string | null
+  /** Every npm package the bundle was built with, as `name@version`, sorted. */
+  readonly packages: ReadonlyArray<string>
   readonly grants: WorkflowGrants
   /** The discord.js events its clients listen for. */
   readonly events: ReadonlyArray<string>
@@ -83,6 +87,8 @@ export interface PublishWorkflow {
   readonly botId: string
   readonly name: string
   readonly source: string
+  readonly bundle: string
+  readonly packages: ReadonlyArray<string>
   readonly grants: WorkflowGrants
   readonly events: ReadonlyArray<string>
   readonly intents: number

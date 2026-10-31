@@ -37,6 +37,8 @@ const revisionColumns = {
   name: workflows.name,
   revision: revisions.revision,
   source: revisions.source,
+  bundle: revisions.bundle,
+  packages: revisions.packages,
   grants: revisions.grants,
   events: revisions.events,
   intents: revisions.intents,
