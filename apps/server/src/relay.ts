@@ -91,6 +91,11 @@ const isBot = (value: unknown): value is { bot: true; id: string } =>
   typeof value.id === 'string'
 
 const SNOWFLAKE = /^\d{17,20}$/
+/**
+ * Voice sockets only carry audio in, so TCP keepalive is what notices an agent that vanished
+ * without closing, whose socket would otherwise keep its bot online for good.
+ */
+const VOICE_KEEPALIVE_MS = 30_000
 
 const allowedOrigin = (request: Request, origins: ReadonlyArray<string>) => {
   const origin = request.headers.get('origin')
@@ -270,6 +275,7 @@ export const createRelay = (
       // Node hands the socket over without an error listener; a reset while admission awaits
       // Discord would otherwise crash the process.
       socket.on('error', () => socket.destroy())
+      request.socket.setKeepAlive(true, VOICE_KEEPALIVE_MS)
       admitVoice(request).then(
         (admitted) => {
           if (admitted instanceof Response) return refuseUpgrade(socket, admitted)

@@ -158,17 +158,24 @@ const main = Effect.gen(function* () {
     Effect.tryPromise(
       () =>
         new Promise<ReturnType<typeof createServer>>((resolve, reject) => {
-          const server = createServer((request, response) => {
-            void handle(
-              {
-                method: request.method ?? 'GET',
-                url: request.url ?? '/',
-                headers: request.headers,
-                [Symbol.asyncIterator]: () => request[Symbol.asyncIterator](),
-              },
-              response,
-            )
-          })
+          const server = createServer(
+            // Only WebSocket upgrades go to the voice socket. Others, such as h2c, stay requests.
+            {
+              shouldUpgradeCallback: (request) =>
+                request.headers.upgrade?.toLowerCase() === 'websocket',
+            },
+            (request, response) => {
+              void handle(
+                {
+                  method: request.method ?? 'GET',
+                  url: request.url ?? '/',
+                  headers: request.headers,
+                  [Symbol.asyncIterator]: () => request[Symbol.asyncIterator](),
+                },
+                response,
+              )
+            },
+          )
           server.on('upgrade', relay.upgrade)
           server.once('error', reject)
           server.listen(config.port, config.host, () => resolve(server))
