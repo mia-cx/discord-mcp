@@ -180,6 +180,10 @@ Keep the environment file private. Rotating the encryption key invalidates all l
 | `DATABASE_URL` | Optional Postgres URL. Turns on [bot hosting](#bot-hosting) when the allowlist names users. |
 | `TOKEN_VAULT_KEY` | Required for bot hosting. Stable random 32-byte base64 key that encrypts stored bot tokens. |
 | `DISCORD_TOKEN` | Stdio only. Ignored by the HTTP relay. |
+| `DISCORD_MCP_TIER` | `all` runs both tiers in one process; `central` or `bot-host` runs one. See [Tiers](#tiers). |
+| `BOT_HOSTS` | Split tiers only. Comma-separated base URL of every bot host. |
+| `BOT_HOST_URL` | Bot hosts only. This host's URL, exactly as `BOT_HOSTS` lists it. |
+| `BOT_HOST_SECRET` | Split tiers only. Shared random secret, at least 32 characters, that bot hosts require from central. |
 
 `/health/live` and `/health/ready` return HTTP 200 when the process is serving.
 They do not check Discord. `/mcp` returns 401 for missing, invalid, expired, or
@@ -206,6 +210,29 @@ Set `DATABASE_URL`, `TOKEN_VAULT_KEY` (generate it like `OAUTH_ENCRYPTION_KEY`),
 serves the plain relay. Back up the vault key apart from the database: without it, stored
 tokens cannot be decrypted.
 
+### Tiers
+
+The relay runs as one process by default. To scale, split it into two tiers, each with
+as many replicas as it needs:
+
+- **Central** serves MCP and OAuth. It checks the login and the allowlist, reads the bot ID
+  from the first segment of the bot token, and forwards the request to the bot host that
+  owns that bot. It holds no bot tokens and calls Discord only to check logins.
+- **Bot hosts** check each bot token with Discord and run its requests. All requests for one
+  bot share one rate limiter, whichever central replica received them. `DATABASE_URL` and
+  `TOKEN_VAULT_KEY` go on bot hosts, which start bot hosting only when their
+  `DISCORD_OAUTH_ALLOWED_USER_IDS` names users. Central enforces that allowlist.
+
+Give both tiers the same `BOT_HOSTS` and `BOT_HOST_SECRET`. Ownership comes from rendezvous
+hashing over `BOT_HOSTS`, so every replica agrees on it, and adding or removing a host moves
+only the bots that host gains or loses. While a rollout leaves the lists different, a host
+answers 503 with `Retry-After: 1` for a bot it does not own. Keep bot hosts off the public
+network: the hop from central is plain HTTP and carries bot tokens.
+
+Each central replica remembers spent authorization codes on its own, so with several
+replicas a code can be redeemed once per replica within its minute. PKCE still binds it to
+the client that started the login.
+
 For agent-operated clients, use the [curl example](./docs/operating.md#curl).
 For a developer-Team-derived access list, follow
 [the explicit membership sync procedure](./docs/operating.md#developer-team-allowlist).
@@ -225,7 +252,8 @@ After changing `packages/storage/src/schema.ts`, generate a migration with
 
 Integration tests cover browser/CLI login, credential bindings, code and refresh replay,
 concurrent bridge refreshes,
-OAuth revocation and expiry, concurrent bot isolation, reads, writes, and rate limits.
+OAuth revocation and expiry, concurrent bot isolation, reads, writes, rate limits, and
+routing across central and bot-host processes.
 
 ## Earlier implementation
 
