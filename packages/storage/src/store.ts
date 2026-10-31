@@ -278,6 +278,12 @@ export const createStorage = (db: Db, close: () => Promise<void>): Storage => ({
     await failing(
       'Recording a run',
       db.transaction(async (tx) => {
+        // Recordings of one workflow take turns, so each trim sees the runs recorded before it.
+        await tx
+          .select({ id: workflows.id })
+          .from(workflows)
+          .where(eq(workflows.id, run.workflowId))
+          .for('update')
         await tx.insert(runs).values(run)
         // The run ranked `keep + 1`, newest first, and every older one go, through the workflow's
         // (workflow_id, id) index.
