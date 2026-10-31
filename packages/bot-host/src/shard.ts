@@ -93,7 +93,7 @@ export interface ShardOptions {
 }
 
 export interface Shard {
-  /** Send a payload on the open connection. False when there is none. */
+  /** Send a payload once the connection has identified or resumed. False before then. */
   readonly send: (payload: { readonly op: number; readonly d: unknown }) => boolean
   /** End the session, so Discord shows the bot offline, and stop reconnecting. */
   readonly stop: () => void
@@ -299,7 +299,9 @@ export const startShard = ({
   connect()
   return {
     send: (payload) => {
-      if (socket?.readyState !== WebSocket.OPEN) return false
+      // Discord closes a session with 4003 for any payload before Identify or Resume, which go
+      // out right after Hello.
+      if (socket?.readyState !== WebSocket.OPEN || !greeted) return false
       send(payload)
       return true
     },

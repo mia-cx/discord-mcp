@@ -219,7 +219,7 @@ describe('voice', () => {
     await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(1000))
   })
 
-  it('waits out a Gateway reconnect before joining, and keeps voice through a resume', async () => {
+  it('waits out a Gateway reconnect to join, and leaves once the session resumes', async () => {
     const { voice, gateway, clock } = await start()
     await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID)
     // Discord asks the bot to reconnect, which it routinely does.
@@ -227,12 +227,18 @@ describe('voice', () => {
     await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(4000))
 
     const joining = voice.join('234567890123456780', FAKE_VOICE_CHANNEL_ID)
+    // A leave while disconnected can't reach Discord yet, and the resumed session still has the
+    // bot in the channel.
+    expect(voice.leave(GUILD_ID)).toBe(true)
     clock.advance(1_000)
     await vi.waitFor(() => expect(gateway.connections[1]?.received[0]).toMatchObject({ op: 6 }))
     gateway.connections[1]?.send({ op: 0, t: 'RESUMED', s: 2 })
     await joining
     expect(voice.joined('234567890123456780')).toBe(true)
-    expect(voice.joined(GUILD_ID)).toBe(true)
+    expect(gateway.connections[1]?.received).toContainEqual({
+      op: 4,
+      d: { guild_id: GUILD_ID, channel_id: null, self_deaf: true, self_mute: false },
+    })
   })
 
   it('fails the join when Discord does not connect the bot', async () => {

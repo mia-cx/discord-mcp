@@ -181,6 +181,11 @@ const OFFLINE = { code: VoiceClose.Offline, reason: 'The bot went offline.' }
 export const createVoice = ({ botId, send, clock, log }: VoiceOptions): Voice => {
   const sessions = new Map<string, Session>()
   const adapters = new Map<string, DiscordGatewayAdapterLibraryMethods>()
+  /**
+   * Leaves the shard could not send while reconnecting, by server. A resumed session still has
+   * the bot in those channels, so they go out once it resumes.
+   */
+  const unsentLeaves = new Map<string, VoicePayload>()
   let online = false
   let onOnline: Array<() => void> = []
 
@@ -242,7 +247,14 @@ export const createVoice = ({ botId, send, clock, log }: VoiceOptions): Voice =>
       adapterCreator: (methods) => {
         adapters.set(guildId, methods)
         return {
-          sendPayload: send,
+          sendPayload: (payload: VoicePayload) => {
+            const sent = send(payload)
+            if (sent) unsentLeaves.delete(guildId)
+            else if ((payload.d as { channel_id: string | null }).channel_id === null) {
+              unsentLeaves.set(guildId, payload)
+            }
+            return sent
+          },
           destroy: () => {
             if (adapters.get(guildId) === methods) adapters.delete(guildId)
           },
@@ -327,7 +339,11 @@ export const createVoice = ({ botId, send, clock, log }: VoiceOptions): Voice =>
     dispatch: (event, data) => {
       if (event === 'READY' || event === 'RESUMED') {
         // A new Gateway session no longer holds the old session's voice state; a resumed one does.
-        if (event === 'READY') for (const session of sessions.values()) destroy(session, OFFLINE)
+        if (event === 'READY') {
+          for (const session of sessions.values()) destroy(session, OFFLINE)
+          unsentLeaves.clear()
+        }
+        for (const [guildId, leave] of unsentLeaves) if (send(leave)) unsentLeaves.delete(guildId)
         online = true
         for (const ready of onOnline.splice(0)) ready()
         return
