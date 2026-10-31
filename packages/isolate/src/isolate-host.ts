@@ -24,6 +24,8 @@ const HEAP_LIMIT_MB = 256
 const RESULT_LIMIT_BYTES = 1024 * 1024
 const STDERR_TAIL_BYTES = 4 * 1024
 const STARTUP_RETRY_MS = 10
+/** Enough that a host with few CPUs still runs one bot's runaway beside other bots' work. */
+const MIN_CONCURRENCY = 4
 
 /** A Gateway dispatch: its event name and data. */
 export interface GatewayEvent {
@@ -60,6 +62,11 @@ export interface ScriptExecution {
    * Gateway dispatch; `probe`, a report of the events and intents a workflow's clients declare.
    */
   readonly input?: { readonly event: GatewayEvent } | { readonly probe: true }
+  /**
+   * Starts without waiting for a free process slot, for an interaction Discord expects answered
+   * within three seconds. Interactions are rare enough to leave uncounted.
+   */
+  readonly urgent?: boolean
   readonly timeoutMs: number
   readonly broker: Broker
   readonly signal?: AbortSignal
@@ -268,7 +275,9 @@ export interface IsolateHost {
  * Runs executions one at a time per queue, each in its own workerd process, with at most
  * `concurrency` processes at once. Executions over the limit wait their turn, oldest first.
  */
-export const makeIsolateHost = (concurrency = availableParallelism()): IsolateHost => {
+export const makeIsolateHost = (
+  concurrency = Math.max(MIN_CONCURRENCY, availableParallelism()),
+): IsolateHost => {
   const queues = new Map<string, Promise<unknown>>()
   let running = 0
   const waiting: Array<() => void> = []
@@ -290,6 +299,7 @@ export const makeIsolateHost = (concurrency = availableParallelism()): IsolateHo
       const previous = queues.get(execution.queue) ?? Promise.resolve()
       const current = previous.then(async () => {
         execution.signal?.throwIfAborted()
+        if (execution.urgent) return execute(execution)
         await acquire()
         try {
           execution.signal?.throwIfAborted()

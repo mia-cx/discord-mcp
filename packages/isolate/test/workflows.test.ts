@@ -182,6 +182,20 @@ describe('the workflow dispatcher', () => {
     expect(runs[1]?.started).toBe(false)
   })
 
+  it('stops every queued run when the read after a change fails', async () => {
+    const { runs, host: isolates } = recordingIsolates()
+    const { storage, host, enable } = await setup(isolates)
+    await enable('slow', GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT)
+    host.dispatch(message('first'))
+    host.dispatch(message('second'))
+    await vi.waitFor(() => expect(runs).toHaveLength(2))
+
+    vi.spyOn(storage, 'enabledRevisions').mockRejectedValueOnce(new Error('connection lost'))
+    await expect(host.disable(caller, 'slow')).rejects.toThrow('connection lost')
+
+    expect(runs.map((r) => r.execution.signal?.aborted)).toEqual([true, true])
+  })
+
   it('refuses to publish a client that declares intent bits Discord does not define', async () => {
     const { host } = await setup(makeIsolateHost())
 

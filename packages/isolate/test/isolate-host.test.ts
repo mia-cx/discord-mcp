@@ -117,4 +117,22 @@ describe('the isolate host', () => {
 
     expect(finished).toEqual(['slow', 'quick'])
   })
+
+  it('starts an urgent execution, such as an interaction, without waiting for a slot', async () => {
+    const host = makeIsolateHost(1)
+    const finished: string[] = []
+    const slow = await execution(
+      '1',
+      'export default () => new Promise((r) => setTimeout(r, 1000))',
+      5000,
+    )
+    const urgent = { ...(await execution('2', 'export default () => "now"', 5000)), urgent: true }
+
+    await Promise.all([
+      host.run(slow).then(() => finished.push('slow')),
+      host.run(urgent).then(() => finished.push('urgent')),
+    ])
+
+    expect(finished).toEqual(['urgent', 'slow'])
+  })
 })

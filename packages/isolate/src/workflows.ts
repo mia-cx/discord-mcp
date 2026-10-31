@@ -307,7 +307,12 @@ export const makeWorkflowHost = ({
   const refresh = (botId: string) => {
     const done = (refreshing.get(botId) ?? Promise.resolve()).then(async () => {
       const previous = (await enabled.get(botId)?.catch(() => undefined)) ?? []
-      const revisions = await load(botId, previous)
+      const revisions = await load(botId, previous).catch((error: unknown) => {
+        // The change is stored, but which revisions still run is unknown: stop them all, and let
+        // the next event start the ones that are enabled afresh.
+        for (const entry of previous) entry.stop.abort()
+        throw error
+      })
       for (const entry of previous) if (!revisions.includes(entry)) entry.stop.abort()
       await bots.hold(
         botId,
@@ -373,6 +378,7 @@ export const makeWorkflowHost = ({
         timeoutMs: EVENT_TIMEOUT_MS,
         input: { event: dispatch },
         signal: workflow.stop.signal,
+        urgent: isInteraction,
         broker: makeBroker({
           operations,
           grants,
