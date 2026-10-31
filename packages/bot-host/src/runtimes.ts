@@ -7,6 +7,8 @@ export const DISCORD_GATEWAY_URL = 'wss://gateway.discord.gg'
 /** Each bot runs one shard. */
 const SHARD_ID = 0
 const SESSION_RETRY_MS = 60_000
+/** Discord refused the intents: invalid (4013), or privileged and not allowed (4014). */
+const INTENT_CLOSE_CODES = new Set([4013, 4014])
 
 /** A Gateway event for an online bot, with the token a workflow run acts with. */
 export interface BotEvent {
@@ -73,8 +75,12 @@ export const createBotRuntimes = ({
   /** The intents of each bot with enabled workflows, which stays online without agent calls. */
   const held = new Map<string, number>()
   let resumed = false
-  /** Tokens Discord rejected for good, by bot. Retrying them only spends Identifies. */
-  const rejected = new Map<string, string>()
+  /**
+   * Tokens Discord rejected, by bot, with the close code. Retrying them only spends Identifies,
+   * until a workflow change may have fixed rejected intents.
+   */
+  const rejected = new Map<string, { readonly token: string; readonly code: number }>()
+  let closed = false
   /**
    * Each bot's storage writes, chained so they land in order: a replaced token never overwrites
    * its successor, and an ended session never outlives the next one.
@@ -165,7 +171,7 @@ export const createBotRuntimes = ({
         log(
           `Bot ${botId} is offline: Discord closed its Gateway session with code ${code}. It stays offline until its token changes or the server restarts.`,
         )
-        rejected.set(botId, runtime.token)
+        rejected.set(botId, { token: runtime.token, code })
         stop(botId, runtime)
       },
     })
@@ -181,13 +187,15 @@ export const createBotRuntimes = ({
     }
     if (token === undefined) return log(`Bot ${botId} stays offline: no token is stored for it.`)
     // An agent call brought it online, or its workflows were disabled, while loading.
-    if (running.has(botId) || !held.has(botId) || rejected.get(botId) === token) return
+    if (closed || running.has(botId) || !held.has(botId) || rejected.get(botId)?.token === token) {
+      return
+    }
     connect(botId, add(botId, token))
   }
 
   return {
     use: (botId, token) => {
-      if (rejected.get(botId) === token) return Promise.resolve()
+      if (rejected.get(botId)?.token === token) return Promise.resolve()
       const current = running.get(botId)
       if (current?.token === token) {
         keepAlive(botId, current)
@@ -221,6 +229,9 @@ export const createBotRuntimes = ({
       await Promise.all([...held.keys()].filter((id) => !running.has(id)).map(startHeld))
     },
     hold: async (botId, intents) => {
+      if (closed) return
+      // Discord refused the intents the bot had; the workflows just changed, so try again.
+      if (INTENT_CLOSE_CODES.has(rejected.get(botId)?.code ?? 0)) rejected.delete(botId)
       if (intents === undefined) {
         held.delete(botId)
         const current = running.get(botId)
@@ -239,6 +250,7 @@ export const createBotRuntimes = ({
       shard.updatePresence(presence)
     },
     close: async () => {
+      closed = true
       for (const [botId, runtime] of running) {
         running.delete(botId)
         runtime.cancelIdle()

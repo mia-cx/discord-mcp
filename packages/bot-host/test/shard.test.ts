@@ -83,6 +83,27 @@ describe('the shard supervisor', () => {
     })
   })
 
+  it('holds a deferred presence update while a new connection opens, and forgets the old session', async () => {
+    const { gateway, clock, shard, onSession } = await start()
+    await identified(gateway, 1)
+    const presence = (status: string) => ({ since: null, activities: [], status, afk: false })
+
+    clock.advance(1_000)
+    shard.updatePresence(presence('idle'))
+    // Due at 6 s, after the reconnect below opens its socket at 5 s, the earliest Identify.
+    shard.updatePresence(presence('dnd'))
+    shard.setIntents(512)
+    // New intents need a new session, so a restart must not resume the old one.
+    expect(onSession).toHaveBeenLastCalledWith(undefined)
+    expect(() => clock.advance(5_000)).not.toThrow()
+
+    await identified(gateway, 2)
+    expect(gateway.connections[1]?.received[0]).toMatchObject({
+      op: 2,
+      d: { intents: 512, presence: presence('dnd') },
+    })
+  })
+
   it('resumes after a zombie connection or a dropped one, so Discord replays what it missed', async () => {
     const { gateway, clock, onSession } = await start()
     await identified(gateway, 1)

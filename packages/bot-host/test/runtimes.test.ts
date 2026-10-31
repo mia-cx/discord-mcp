@@ -189,3 +189,32 @@ it('keeps a bot with enabled workflows online from its stored token until they a
   await gateway.close()
   await storage.close()
 })
+
+it("tries again once its workflows change after Discord refused a bot's intents", async () => {
+  const storage = await inMemoryStorage()
+  const gateway = await fakeGateway(1000 * HOUR)
+  const vault = createTokenVault(KEY, storage)
+  await vault.store(BOT_ID, 'private-token-a')
+  const bots = createBotRuntimes({
+    vault,
+    clock: manualClock(),
+    log: () => {},
+    gatewayUrl: gateway.url,
+  })
+  await bots.hold(BOT_ID, 1 << 15)
+  await bots.resume()
+  await vi.waitFor(() => expect(gateway.connections[0]?.received[0]?.op).toBe(2))
+
+  // Message Content is off in the Developer Portal.
+  gateway.connections[0]?.close(4014)
+  await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(4014))
+  // The workflow that needed it was disabled.
+  await bots.hold(BOT_ID, 1)
+
+  await vi.waitFor(() =>
+    expect(gateway.connections[1]?.received[0]).toMatchObject({ op: 2, d: { intents: 1 } }),
+  )
+  await bots.close()
+  await gateway.close()
+  await storage.close()
+})

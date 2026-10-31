@@ -154,7 +154,10 @@ export const startShard = ({
   // The heartbeat runs only while connected and the reconnect wait only while not, so one timer.
   let cancelTimer = () => {}
 
-  const send = (payload: Payload) => socket?.send(JSON.stringify(payload))
+  // A replacement socket may still be connecting when a deferred presence update fires.
+  const send = (payload: Payload) => {
+    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload))
+  }
 
   const drop = (code: number) => {
     cancelTimer()
@@ -327,8 +330,8 @@ export const startShard = ({
     setIntents: (next) => {
       if (next === intents) return
       intents = next
-      // A resumed session keeps the intents it was identified with.
-      forget()
+      // A resumed session keeps the intents it was identified with, so no process may resume it.
+      end()
       reconnect()
     },
     updatePresence: (next) => {
