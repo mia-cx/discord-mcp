@@ -1,6 +1,6 @@
 import { once } from 'node:events'
 import { createServer } from 'node:http'
-import type { AddressInfo } from 'node:net'
+import { type AddressInfo, connect } from 'node:net'
 import { createBotRuntimes, createTokenVault } from '@discord-mcp/bot-host'
 import {
   DAVE_MAGIC_MARKER,
@@ -99,7 +99,19 @@ const start = async () => {
       cleanup.push(() => socket.terminate())
     })
 
-  return { callTool, openSocket, voiceServer }
+  /** Send a raw upgrade request with a Host header no URL can hold; resolves when it ends. */
+  const upgradeWithBadHost = async () => {
+    const socket = connect((server.address() as AddressInfo).port, '127.0.0.1')
+    await once(socket, 'connect')
+    socket.end(
+      'GET /voice HTTP/1.1\r\nHost: [\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n' +
+        'Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n',
+    )
+    socket.resume()
+    await once(socket, 'close')
+  }
+
+  return { callTool, openSocket, upgradeWithBadHost, voiceServer }
 }
 
 describe('the voice socket', () => {
@@ -132,7 +144,8 @@ describe('the voice socket', () => {
   })
 
   it('refuses a socket without credentials, before joining, or with an unknown codec', async () => {
-    const { callTool, openSocket } = await start()
+    const { callTool, openSocket, upgradeWithBadHost } = await start()
+    await upgradeWithBadHost()
     expect(await openSocket(`guild_id=${GUILD_ID}&codec=opus`, {})).toBe(401)
     expect(await openSocket(`guild_id=${GUILD_ID}&codec=opus`)).toBe(409)
 

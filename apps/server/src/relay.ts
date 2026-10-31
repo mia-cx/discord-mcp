@@ -217,7 +217,9 @@ export const createRelay = (
   }
 
   /** Admit a voice WebSocket for a server where the request's bot is in a voice channel. */
-  const admitVoice = async (request: Request) => {
+  const admitVoice = async (upgrade: IncomingMessage) => {
+    // Inside the async function, so a malformed Host rejects rather than throwing at the listener.
+    const request = upgradeRequest(upgrade)
     const url = new URL(request.url)
     if (config.allowedHosts.length > 0 && !config.allowedHosts.includes(url.hostname)) {
       return json(421, { error: 'misdirected_request' })
@@ -265,7 +267,10 @@ export const createRelay = (
     },
     /** Serves the voice WebSocket; attach it to the HTTP server's `upgrade` event. */
     upgrade: (request: IncomingMessage, socket: Duplex, head: Buffer) => {
-      admitVoice(upgradeRequest(request)).then(
+      // Node hands the socket over without an error listener; a reset while admission awaits
+      // Discord would otherwise crash the process.
+      socket.on('error', () => socket.destroy())
+      admitVoice(request).then(
         (admitted) => {
           if (admitted instanceof Response) return refuseUpgrade(socket, admitted)
           voiceSockets.handleUpgrade(request, socket, head, (ws) => {
