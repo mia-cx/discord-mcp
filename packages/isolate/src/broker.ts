@@ -67,12 +67,40 @@ const failureFor = (error: DiscordRestError) => {
   }
 }
 
-const readBody = async (request: Request) => {
-  if (request.body === null) return undefined
-  const type = request.headers.get('content-type') ?? ''
-  if (!type.startsWith('application/json')) return null
-  const text = await request.text()
-  return text === '' ? undefined : (JSON.parse(text) as unknown)
+/** Discord bodies are small JSON; the broker buffers one in relay memory, so it is capped. */
+const BODY_LIMIT_BYTES = 1024 * 1024
+
+type Refusal = { readonly refusal: string }
+
+const readBody = async (request: Request): Promise<{ readonly body?: unknown } | Refusal> => {
+  if (request.body === null) return {}
+  const chunks: Uint8Array[] = []
+  let size = 0
+  for await (const chunk of request.body) {
+    size += chunk.byteLength
+    if (size > BODY_LIMIT_BYTES) return { refusal: `The body exceeds ${BODY_LIMIT_BYTES} bytes.` }
+    chunks.push(chunk)
+  }
+  const text = Buffer.concat(chunks).toString('utf8')
+  if (text === '') return {}
+  if (!(request.headers.get('content-type') ?? '').startsWith('application/json')) {
+    return { refusal: 'Scripts send JSON bodies only; file uploads are not supported.' }
+  }
+  try {
+    return { body: JSON.parse(text) as unknown }
+  } catch {
+    return { refusal: 'The body is not valid JSON.' }
+  }
+}
+
+const auditLogReason = (request: Request): { readonly reason?: string } | Refusal => {
+  const header = request.headers.get('x-audit-log-reason')
+  if (header === null) return {}
+  try {
+    return { reason: decodeURIComponent(header) }
+  } catch {
+    return { refusal: 'X-Audit-Log-Reason is not valid URI encoding.' }
+  }
 }
 
 /**
@@ -97,11 +125,10 @@ export const makeBroker = (options: BrokerOptions): Broker => {
     const decision = checkOperation(options.grants, operation)
     if (!decision.allowed) return refuse(request, decision.reason)
 
+    const reason = auditLogReason(request)
+    if ('refusal' in reason) return refuse(request, reason.refusal)
     const body = await readBody(request)
-    if (body === null) {
-      return refuse(request, 'Scripts send JSON bodies only; file uploads are not supported.')
-    }
-    const reason = request.headers.get('x-audit-log-reason')
+    if ('refusal' in body) return refuse(request, body.refusal)
     return Effect.runPromise(
       options
         .discord({
@@ -109,8 +136,8 @@ export const makeBroker = (options: BrokerOptions): Broker => {
           route,
           operationFamily: operation.family,
           ...(url.search === '' ? {} : { query: url.searchParams }),
-          ...(body === undefined ? {} : { body }),
-          ...(reason === null ? {} : { auditLogReason: decodeURIComponent(reason) }),
+          ...(body.body === undefined ? {} : { body: body.body }),
+          ...(reason.reason === undefined ? {} : { auditLogReason: reason.reason }),
         })
         .pipe(
           Effect.map(replyFor),

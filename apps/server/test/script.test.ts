@@ -104,6 +104,7 @@ describe('discord_script_run', () => {
             const embed = new EmbedBuilder().setTitle('Report ' + i)
             sent.push((await channel.send({ embeds: [embed] })).id)
           }
+          await channel.messages.react(sent[1], '👍')
           await channel.messages.delete(sent[0]).catch((error) => console.log(error.status))
           return { channel: channel.name, sent: sent.length, me: client.user.username, token: client.token, env: process.env }
         }`,
@@ -120,10 +121,16 @@ describe('discord_script_run', () => {
       }),
     ])
     const replayed = calls.filter((call) => call.route.startsWith('/channels/'))
-    expect(replayed).toHaveLength(21)
+    expect(replayed).toHaveLength(22)
     expect(replayed.every((call) => call.token === 'private-token-a')).toBe(true)
     expect(replayed.some((call) => call.method === 'DELETE')).toBe(false)
     expect(replayed[1]?.body).toMatchObject({ embeds: [{ title: 'Report 0' }] })
+    // A bodyless write reaches Discord with no body.
+    expect(replayed.at(-1)).toEqual({
+      token: 'private-token-a',
+      method: 'PUT',
+      route: expect.stringMatching(/\/reactions\/%F0%9F%91%8D\/@me$/),
+    })
     expect(JSON.stringify(run)).not.toContain('private-token')
   })
 
