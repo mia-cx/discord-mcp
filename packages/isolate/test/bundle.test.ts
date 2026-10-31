@@ -6,7 +6,12 @@ describe('preparing a script', () => {
     const modules = await prepareScript(`import { EmbedBuilder } from 'discord.js'
       export default (): unknown => new EmbedBuilder().setTitle('ok').toJSON()`)
 
-    expect(modules.map((module) => module.name)).toEqual(['entry.js', 'discord.js', 'script.js'])
+    expect(modules.map((module) => module.name)).toEqual([
+      'entry.js',
+      'discord.js',
+      'textile',
+      'script.js',
+    ])
   })
 
   it.each([

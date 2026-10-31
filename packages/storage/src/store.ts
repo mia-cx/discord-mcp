@@ -257,7 +257,12 @@ export const createStorage = (db: Db, close: () => Promise<void>): Storage => ({
   },
 
   recordWorkflowRun: async (run) => {
-    await db.insert(runs).values(run)
+    try {
+      await db.insert(runs).values(run)
+    } catch (cause) {
+      // Drizzle's own message lists the query parameters, the run's logs included.
+      throw new Error(`Recording a run failed: ${rootMessage(cause)}`)
+    }
   },
 
   workflowRuns: (botId, { name, failed, since, limit }) =>
