@@ -125,8 +125,8 @@ export const createBotRuntimes = ({
     }
   }
   // A click applies to this process's bots as soon as it is stored. Every bot host, this one
-  // included, hears it again from Postgres, and checks everyone again once a dropped connection
-  // to it comes back.
+  // included, hears it again from Postgres. While that feed isn't listening, an opt-out made
+  // elsewhere would go unheard, so nobody is relayed until it is back and everyone is checked.
   const consent = createConsent({
     storage,
     discordFetch,
@@ -134,14 +134,24 @@ export const createBotRuntimes = ({
     log,
     changed: optOutChanged,
   })
+  let feedLive = false
+  const recheckAll = () => {
+    for (const runtime of running.values()) runtime.voice.recheck()
+  }
   const watching = storage
     .watchVoiceOptOuts({
       changed: optOutChanged,
-      missed: () => {
-        for (const runtime of running.values()) runtime.voice.recheck()
+      live: () => {
+        feedLive = true
+        recheckAll()
       },
-      lost: (error) =>
-        log(`Lost the voice opt-out feed from Postgres; reconnecting: ${error.message}`),
+      lost: (error) => {
+        log(
+          `Lost the voice opt-out feed from Postgres; relaying nobody until it is back: ${error.message}`,
+        )
+        feedLive = false
+        recheckAll()
+      },
     })
     .catch((cause) => {
       log(`Could not follow voice opt-outs from other bot hosts: ${reason(cause)}`)
@@ -250,7 +260,9 @@ export const createBotRuntimes = ({
         send: (shardId, payload) => runtime.shards[shardId]?.send(payload) ?? false,
         consent: {
           notice: (channelId) => consent.notice(runtime.token, channelId),
-          optedOut: (guildId, userId) => consent.optedOut(botId, guildId, userId),
+          // Without the feed, everyone counts as opted out.
+          optedOut: async (guildId, userId) =>
+            !feedLive || (await consent.optedOut(botId, guildId, userId)),
         },
         clock,
         log,

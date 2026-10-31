@@ -98,9 +98,12 @@ export interface VoiceOptOutChange {
 /** Hears voice opt-out changes as they commit. */
 export interface OptOutWatcher {
   readonly changed: (change: VoiceOptOutChange) => void
-  /** Listening works again after a failed or dropped connection: changes made meanwhile were missed. */
-  readonly missed: () => void
-  /** Why a connection failed or dropped; it retries on its own. */
+  /**
+   * Listening started, first or after `lost`. Changes made before it were not heard; changes
+   * from now on are, until `lost`.
+   */
+  readonly live: () => void
+  /** Listening stopped: why its connection failed or dropped. It retries on its own. */
   readonly lost: (error: Error) => void
 }
 
@@ -249,13 +252,12 @@ const RELISTEN_MS = 1_000
  */
 const listenOn =
   (url: string): Listen =>
-  async (channel, { payload, resumed, lost: onLost }) => {
+  async (channel, { payload, listening, lost: onLost }) => {
     let stopped = false
     let current: Client | undefined
     let retry: ReturnType<typeof setTimeout> | undefined
-    /** Whether changes may have gone unheard since listening last worked. */
-    let missed = false
     const open = () => {
+      if (stopped) return
       const client = new Client({
         connectionString: url,
         connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
@@ -265,7 +267,6 @@ const listenOn =
       const reopen = (error: Error) => {
         if (lost || stopped) return
         lost = true
-        missed = true
         onLost(error)
         void client.end().catch(() => {})
         retry = setTimeout(open, RELISTEN_MS)
@@ -279,9 +280,7 @@ const listenOn =
         .connect()
         .then(() => client.query(`listen "${channel}"`))
         .then(() => {
-          if (!missed) return
-          missed = false
-          resumed()
+          if (!lost && !stopped) listening()
         }, reopen)
     }
     open()

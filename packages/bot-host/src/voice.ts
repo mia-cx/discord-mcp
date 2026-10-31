@@ -232,7 +232,7 @@ export interface Voice extends BotVoice {
    * An opt-out drops them at once; an undo checks storage again, since another opt-out may hold.
    */
   readonly optOutChanged: (guildId: string | undefined, userId: string, optedOut: boolean) => void
-  /** Opt-out changes may have been missed: check everyone in every channel again. */
+  /** Ask about everyone's opt-out again, in every channel, as when the answers may have changed. */
   readonly recheck: () => void
   /**
    * Leave every voice channel and close every socket, as the bot goes offline. Returns the shards

@@ -69,8 +69,8 @@ export type Listen = (
   channel: string,
   handlers: {
     readonly payload: (payload: string) => void
-    /** Listening after a failed or lost connection, which missed what was sent meanwhile. */
-    readonly resumed: () => void
+    /** Listening started, first or after `lost`; nothing sent before it was heard. */
+    readonly listening: () => void
     readonly lost: (error: Error) => void
   },
 ) => Promise<() => Promise<void>>
@@ -461,10 +461,10 @@ export const createStorage = (
     return found.length > 0
   },
 
-  watchVoiceOptOuts: ({ changed, missed, lost }) =>
+  watchVoiceOptOuts: ({ changed, live, lost }) =>
     listen(VOICE_OPT_OUTS_CHANNEL, {
       payload: (payload) => changed(JSON.parse(payload) as VoiceOptOutChange),
-      resumed: missed,
+      listening: live,
       lost,
     }),
 

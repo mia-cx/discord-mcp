@@ -1,5 +1,6 @@
 import { once } from 'node:events'
 import type { AddressInfo } from 'node:net'
+import type { OptOutWatcher } from '@discord-mcp/storage'
 import { inMemoryStorage } from '@discord-mcp/storage/testing'
 import opus from '@discordjs/opus'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -49,9 +50,23 @@ const start = async ({
   )
   const clock = manualClock()
   const vault = createTokenVault(Buffer.alloc(32, 1), storage)
+  // The opt-out feed from Postgres, which a test can cut and restore.
+  let feed: OptOutWatcher | undefined
+  let cut = false
   const bots = createBotRuntimes({
     vault,
-    storage,
+    storage: {
+      ...storage,
+      watchVoiceOptOuts: (watcher) => {
+        feed = watcher
+        return storage.watchVoiceOptOuts({
+          ...watcher,
+          changed: (change) => {
+            if (!cut) watcher.changed(change)
+          },
+        })
+      },
+    },
     clock,
     log: () => {},
     discordFetch: through(gateway.discordFetch({ shards, sendMessages, interactionsEndpoint })),
@@ -61,7 +76,17 @@ const start = async ({
   await bots.use(BOT_ID, TOKEN)
   const voice = bots.voice(BOT_ID)
   if (voice === undefined) throw new Error('the bot is not running')
-  return { bots, storage, vault, voice, voiceServer, gateway, clock }
+  const outage = {
+    start: () => {
+      cut = true
+      feed?.lost(new Error('connection terminated'))
+    },
+    end: () => {
+      cut = false
+      feed?.live()
+    },
+  }
+  return { bots, storage, vault, voice, voiceServer, gateway, clock, outage }
 }
 
 /** An agent's WebSocket and the server side of it, which the bot host takes over. */
@@ -612,6 +637,36 @@ describe('receiving voice', () => {
         { type: 'join', user_id: ALICE },
       ]),
     )
+  })
+
+  it('relays nobody while the opt-out feed is down, then only those still allowed', async () => {
+    const { voice, voiceServer, storage, outage } = await start({ members: [ALICE, BOB] })
+    await voice.join(GUILD_ID, FAKE_VOICE_CHANNEL_ID, true)
+    await daveReady(voiceServer)
+    const { agent, socket } = await agentSocket()
+    const heard = listen(agent)
+    voice.attach(GUILD_ID, socket, { codec: 'opus' })
+    await vi.waitFor(() => expect(heard.events).toHaveLength(2))
+
+    outage.start()
+    await vi.waitFor(() =>
+      expect(heard.events.slice(2)).toEqual([
+        { type: 'leave', user_id: ALICE },
+        { type: 'leave', user_id: BOB },
+      ]),
+    )
+    // Alice opts out through another bot host, which this one can't hear about.
+    await storage.setVoiceOptOut({ everywhere: true }, ALICE, true)
+    await voiceServer.speak(ALICE, speech(2, 0xa0))
+    await voiceServer.speak(BOB, speech(2, 0xb0))
+    await settle()
+    expect(heard.audio).toEqual([])
+    expect(heard.events).toHaveLength(4)
+
+    outage.end()
+    await vi.waitFor(() => expect(heard.events.slice(4)).toEqual([{ type: 'join', user_id: BOB }]))
+    await settle()
+    expect(heard.events.slice(4)).toEqual([{ type: 'join', user_id: BOB }])
   })
 
   it("applies another bot host's opt-out and undo at once", async () => {
