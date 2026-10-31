@@ -203,7 +203,16 @@ export const createDiscordLogin = (
   /** `scope` groups Discord's rejections, which this process stops sending after a threshold. */
   const discordJson = async (path: string, scope: string, init: RequestInit = {}) => {
     const admission = rejections.admit([scope])
-    if ('refused' in admission) throw new DiscordUnavailable(429, REFUSAL_RETRY_SECONDS)
+    if ('refused' in admission) {
+      // A full in-flight cap clears in moments; a tripped threshold takes its window.
+      const { refused } = admission
+      throw new DiscordUnavailable(
+        429,
+        refused._tag === 'DiscordRateLimitError'
+          ? String(Math.ceil(refused.retryAfterMs / 1000))
+          : REFUSAL_RETRY_SECONDS,
+      )
+    }
     const response = await discordFetch(`https://discord.com/api/v10${path}`, {
       ...init,
       redirect: 'error',
@@ -214,9 +223,10 @@ export const createDiscordLogin = (
         return answer
       },
       // Nothing cancels these calls, so a missing answer is a network failure Discord never saw.
-      (error: unknown) => {
+      // It must not read as a rejected grant, or a refresh would report a live login as expired.
+      () => {
         admission.settle(false)
-        throw error
+        throw new DiscordUnavailable(502, '1')
       },
     )
     if (response.status === 401 || response.status === 400) {

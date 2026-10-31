@@ -1,4 +1,4 @@
-import { RateGuardTrippedError } from '@discord-mcp/core'
+import { DiscordRateLimitError, RateGuardTrippedError } from '@discord-mcp/core'
 import { Context, Layer } from 'effect'
 
 /**
@@ -40,9 +40,15 @@ const PROCESS_SCOPE = 'process'
 export const isCountedRejection = (status: number): boolean =>
   status === 401 || status === 403 || status === 429
 
-/** A refused call carries the error to return; an admitted one must be settled exactly once. */
+/** A full in-flight cap clears as calls answer, so the caller should simply wait this long. */
+const IN_FLIGHT_RETRY_MS = 1_000
+
+/**
+ * A refused call carries the error to return: tripped thresholds say to stop and diagnose, a full
+ * in-flight cap says to wait. An admitted call must be settled exactly once.
+ */
 export type Admission =
-  | { readonly refused: RateGuardTrippedError }
+  | { readonly refused: RateGuardTrippedError | DiscordRateLimitError }
   | { readonly settle: (rejected: boolean) => void }
 
 /**
@@ -96,7 +102,13 @@ export const rejectionLog = (
         )
       }
       if (inFlight >= config.maxInFlight) {
-        return refuse(PROCESS_SCOPE, total, `${inFlight} Discord calls are already in flight.`)
+        return {
+          refused: new DiscordRateLimitError({
+            message: `This relay already has ${inFlight} Discord calls in flight.`,
+            retryAfterMs: IN_FLIGHT_RETRY_MS,
+            global: true,
+          }),
+        }
       }
       inFlight += 1
       let open = true
