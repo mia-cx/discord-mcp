@@ -106,10 +106,30 @@ const fire = async ({ cron, scheduledAt }, user) => {
   await settle()
 }
 
+/** A client's own schedules, which only its own `schedule` listeners hear. */
+const schedulesOf = (client) => {
+  const schedules = client.options.schedules ?? []
+  if (!Array.isArray(schedules)) {
+    throw new TypeError("A Client's schedules option must be an array of cron expressions.")
+  }
+  const listening = client.listenerCount('schedule') > 0
+  if (schedules.length > 0 && !listening) {
+    throw new TypeError(
+      "A Client declares schedules, but nothing listens for them: add client.on('schedule', (tick) => { ... }) on that Client.",
+    )
+  }
+  if (schedules.length === 0 && listening) {
+    throw new TypeError(
+      "A Client listens for 'schedule', but declares no schedules: list cron expressions in its schedules option.",
+    )
+  }
+  return schedules
+}
+
 const probe = () => {
   const clients = workflowClients()
   return {
-    schedules: [...new Set(clients.flatMap((client) => client.options.schedules ?? []))],
+    schedules: [...new Set(clients.flatMap(schedulesOf))],
     events: [
       ...new Set(
         clients.flatMap((client) =>

@@ -180,7 +180,8 @@ client.on('schedule', async ({ cron, scheduledAt }) => {
 })
 ```
 
-A workflow declares at most ten schedules, each firing at most every five minutes. Each tick
+A workflow declares at most ten schedules, which together fire at most every five minutes, and
+each client hears only its own schedules. Each tick
 runs once, however many bot hosts there are, and schedules start when the workflow is enabled.
 A tick missed while the bot's host was down, or the bot was offline, runs once, late, when the
 bot is back online: each schedule runs its most recent missed tick and skips the earlier ones,

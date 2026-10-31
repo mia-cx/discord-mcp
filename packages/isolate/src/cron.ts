@@ -206,15 +206,22 @@ const matchesDate = (schedule: CronSchedule, at: Date): boolean => {
 const MINUTES_PER_DAY = 24 * 60
 
 /**
- * Reject a schedule that would fire more often than the floor allows.
+ * Reject schedules that together would fire more often than the floor allows.
  *
  * Checked on every firing time of a day rather than by pattern-matching the expression: `*​/1` and
- * `0,1,2,...` are the same schedule, and only one of them looks suspicious. The gap across midnight
- * counts as if the next day fired too, which errs toward refusing.
+ * `0,1,2,...` are the same schedule, and only one of them looks suspicious. Every schedule counts
+ * as firing every day, and the gap across midnight counts too, which errs toward refusing. Two
+ * schedules firing at the same minute are 0 minutes apart.
  */
-export const checkScheduleFloor = (schedule: CronSchedule): CronRejection | undefined => {
-  const times = [...schedule.hours]
-    .flatMap((hour) => [...schedule.minutes].map((minute) => hour * 60 + minute))
+export const checkScheduleFloor = (
+  ...schedules: ReadonlyArray<CronSchedule>
+): CronRejection | undefined => {
+  const times = schedules
+    .flatMap((schedule) =>
+      [...schedule.hours].flatMap((hour) =>
+        [...schedule.minutes].map((minute) => hour * 60 + minute),
+      ),
+    )
     .sort((a, b) => a - b)
   const [first, last] = [times[0], times.at(-1)]
   if (first === undefined || last === undefined) return undefined
@@ -224,6 +231,6 @@ export const checkScheduleFloor = (schedule: CronSchedule): CronRejection | unde
   )
   if (gapMinutes >= MIN_SCHEDULE_INTERVAL_MINUTES) return undefined
   return {
-    reason: `This schedule fires ${gapMinutes} minutes apart, under the ${MIN_SCHEDULE_INTERVAL_MINUTES}-minute floor. A workflow that runs this often will exhaust its action budget rather than keep up.`,
+    reason: `This fires ${gapMinutes} minutes apart, under the ${MIN_SCHEDULE_INTERVAL_MINUTES}-minute floor. A workflow that runs this often will exhaust its action budget rather than keep up.`,
   }
 }

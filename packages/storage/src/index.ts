@@ -139,6 +139,9 @@ export interface SealedSession {
 
 const CONNECT_TIMEOUT_MS = 10_000
 const QUERY_TIMEOUT_MS = 30_000
+/** The lock session's TCP keepalives: idle seconds before probing, and probes before giving up. */
+const KEEPALIVE_IDLE_S = 10
+const KEEPALIVE_PROBES = 3
 
 /**
  * Connect to Postgres and apply pending migrations before anything reads or writes.
@@ -167,8 +170,14 @@ export const connectStorage = async (
     })
   }
   const locks = advisoryLocks(async (onLost) => {
-    // Keepalives notice a dead connection, whose locks Postgres has released, within minutes.
-    const client = new Client({ ...options, keepAlive: true })
+    // Keepalives on both ends notice a dead connection within a minute. Postgres then ends the
+    // session and releases its locks, so another bot host can fire the bots this one held.
+    const client = new Client({
+      ...options,
+      keepAlive: true,
+      keepAliveInitialDelayMillis: KEEPALIVE_IDLE_S * 1000,
+      options: `-c tcp_keepalives_idle=${KEEPALIVE_IDLE_S} -c tcp_keepalives_interval=${KEEPALIVE_IDLE_S} -c tcp_keepalives_count=${KEEPALIVE_PROBES}`,
+    })
     client.on('error', (error) => {
       onError(error)
       onLost()

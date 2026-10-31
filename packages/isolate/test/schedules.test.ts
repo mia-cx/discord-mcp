@@ -216,19 +216,38 @@ describe('workflow schedules', () => {
     ['a malformed cron', "schedules: ['0 9 * *']", 'has 4'],
     ['a cron under five minutes apart', "schedules: ['*/2 * * * *']", 'more often than every 5'],
     ['schedules nobody hears', "schedules: ['0 9 * * *']", 'nothing listens', 'messageCreate'],
+    [
+      'schedules one client declares and another hears',
+      "schedules: ['0 9 * * *']",
+      'nothing listens',
+      'messageCreate',
+      "new Client({ intents: [] }).on('schedule', () => {})",
+    ],
+    ['a schedules string', "schedules: '0 9 * * *'", 'must be an array'],
+    [
+      'schedules that together fire every minute',
+      "schedules: ['*/5 * * * *', '1-59/5 * * * *', '2-59/5 * * * *', '3-59/5 * * * *', '4-59/5 * * * *']",
+      'more often than every 5',
+    ],
+    [
+      'one schedule twice, spaced differently',
+      "schedules: ['*/5 * * * *', '*/5 * * * * ']",
+      'more often than every 5',
+    ],
     // Each takes a search for its next firing, every minute.
     [
       'more than ten schedules',
       "schedules: Array.from({ length: 11 }, (_, i) => '0 0 31 2 *' + ' '.repeat(i))",
       'more than 10',
     ],
-  ])('refuse to publish %s', async (_case, options, error, event = 'schedule') => {
+  ])('refuse to publish %s', async (_case, options, error, event = 'schedule', other = '') => {
     const storage = await inMemoryStorage()
     cleanup.push(() => storage.close())
     const { host } = botHost(storage, { isolates: makeIsolateHost() })
     const source = `import { Client } from 'discord.js'
       const client = new Client({ intents: [], ${options} })
-      client.on('${event}', () => {})`
+      client.on('${event}', () => {})
+      ${other}`
 
     await expect(host.publish(caller, { name: 'digest', source, grants })).rejects.toMatchObject({
       message: expect.stringContaining(error),

@@ -296,17 +296,14 @@ const SCHEDULES_HINT =
 export const MAX_SCHEDULES = 10
 
 /**
- * The cron schedules a revision's clients declare, if there are few, each parses and fires at most
- * every few minutes, and a `schedule` listener hears them.
+ * The cron schedules a revision's clients declare, if there are few, each parses, and together
+ * they fire at most every few minutes. The probe has checked that each client hears its own.
  */
-const checkSchedules = (
-  declared: ReadonlyArray<unknown>,
-  listening: boolean,
-): ReadonlyArray<string> => {
+const checkSchedules = (declared: ReadonlyArray<unknown>): ReadonlyArray<string> => {
   if (declared.length > MAX_SCHEDULES) {
     throw invalid(`The workflow declares more than ${MAX_SCHEDULES} schedules.`, SCHEDULES_HINT)
   }
-  const schedules = declared.map((cron) => {
+  const parsed = declared.map((cron) => {
     if (typeof cron !== 'string') {
       throw invalid(`Schedule ${String(cron)} is not a string.`, SCHEDULES_HINT)
     }
@@ -314,27 +311,15 @@ const checkSchedules = (
     if ('reason' in schedule) {
       throw invalid(`Schedule "${cron}" is not valid: ${schedule.reason}`, SCHEDULES_HINT)
     }
-    if (checkScheduleFloor(schedule) !== undefined) {
-      throw invalid(
-        `Schedule "${cron}" fires more often than every ${MIN_SCHEDULE_INTERVAL_MINUTES} minutes.`,
-        SCHEDULES_HINT,
-      )
-    }
-    return cron
+    return { cron, schedule }
   })
-  if (schedules.length > 0 && !listening) {
+  if (checkScheduleFloor(...parsed.map(({ schedule }) => schedule)) !== undefined) {
     throw invalid(
-      'The workflow declares schedules, but nothing listens for them.',
-      `source: add client.on('${SCHEDULE_EVENT}', (tick) => { ... }). Each tick has the cron expression that fired and its scheduledAt Date.`,
+      `The workflow's schedules fire more often than every ${MIN_SCHEDULE_INTERVAL_MINUTES} minutes.`,
+      `${SCHEDULES_HINT} Schedules that fire at the same minute count as 0 minutes apart.`,
     )
   }
-  if (schedules.length === 0 && listening) {
-    throw invalid(
-      'The workflow listens for schedule ticks, but declares no schedules.',
-      SCHEDULES_HINT,
-    )
-  }
-  return schedules
+  return parsed.map(({ cron }) => cron)
 }
 
 export const makeWorkflowHost = ({
@@ -635,7 +620,7 @@ export const makeWorkflowHost = ({
           'source: use GatewayIntentBits names in the Client options.',
         )
       }
-      const schedules = checkSchedules(declared.schedules, declared.events.includes(SCHEDULE_EVENT))
+      const schedules = checkSchedules(declared.schedules)
       const events = declared.events.filter(
         (event) => event in WORKFLOW_EVENTS || event === SCHEDULE_EVENT,
       )
