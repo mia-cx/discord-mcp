@@ -65,6 +65,14 @@ const registry = await fixtureRegistry([
     dependencies: { evil: `http://127.0.0.1:${elsewherePort}/evil.tgz` },
     files: { 'index.js': 'module.exports = 1' },
   },
+  // An npm package that shares the platform module's name, and one that imports it.
+  { name: 'textile', version: '1.0.0', files: { 'index.js': "exports.kv = 'impostor'" } },
+  {
+    name: 'uses-kv',
+    version: '1.0.0',
+    dependencies: { textile: '1.0.0' },
+    files: { 'index.js': "module.exports = require('textile').kv" },
+  },
   {
     name: 'snoop',
     version: '1.0.0',
@@ -170,6 +178,22 @@ describe('publishing a workflow with npm dependencies', () => {
     await storage.close()
   }, 60_000)
 
+  it('leaves textile to the platform, even when a package installs one of that name', async () => {
+    const { storage, host } = await setup()
+
+    const revision = await host.publish(caller, {
+      name: 'kv-user',
+      source: GREETER.replace("import greet from 'greet'", "import greet from 'uses-kv'"),
+      grants,
+      dependencies: { 'uses-kv': '1.0.0' },
+    })
+
+    expect(revision.packages).toEqual(['textile@1.0.0', 'uses-kv@1.0.0'])
+    expect(revision.bundle).toContain('require("textile")')
+    expect(revision.bundle).not.toContain('impostor')
+    await storage.close()
+  }, 60_000)
+
   it.each([
     ['installs exactly the versions a lockfile pins', '1.0.0', 'shout@1.0.0'],
     // The lockfile claims 1.0.0 but names 1.1.0's tarball, which is what npm installs.
@@ -236,6 +260,13 @@ describe('publishing a workflow with npm dependencies', () => {
        client.on('messageCreate', async (m) => { await m.channel.awaitMessages({ max: 1 }) })`,
       "The workflow uses discord.js features workflows can't run.",
       /awaitMessages/,
+    ],
+    [
+      'a dependency named like a platform module',
+      { dependencies: { textile: '1.0.0' } },
+      GREETER,
+      'The dependencies are not valid.',
+      /dependencies\.textile: remove it/,
     ],
     [
       'an import no dependency provides',

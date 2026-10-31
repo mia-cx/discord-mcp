@@ -167,8 +167,11 @@ revision is stored, on a package that can't be bundled or loaded in workerd, suc
 addon, and on code that can't work when each event runs in a fresh isolate: collectors,
 `awaitMessages`, and URL attachments. These checks read the workflow's own syntax, so a call
 built at runtime, or made inside a dependency, gets past them. Installs are capped at 256 MB
-and two at a time per bot host. `discord_workflow_enable` runs a revision and returns its grants and intents;
-Discord's privileged intents must be on in the Developer Portal first. While any workflow is
+and two at a time per bot host. discord.js and `textile` always come from the platform, even
+for a package that installs its own.
+
+`discord_workflow_enable` runs a revision and returns its grants and intents; Discord's
+privileged intents must be on in the Developer Portal first. While any workflow is
 enabled, the bot stays online without agent calls. After a restart, workflows also run the
 events Discord replays.
 
