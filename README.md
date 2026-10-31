@@ -397,12 +397,13 @@ the notice is up the bot undeafens, and the socket sends:
   people come and go, and `{"type":"speaking","user_id":"…","speaking":true}` (or `false`).
 
 When the notice can't be posted, `receiving` is false, `reason` says why, and the session only
-sends audio. Joining the same channel again switches receiving on or off. If the bot is moved to
+sends audio. The same happens when the bot's application has an Interactions Endpoint URL, since
+Discord would send the buttons' clicks there instead of to Textile. Joining the same channel again switches receiving on or off. If the bot is moved to
 another channel, it stops receiving until it joins with `receive: true` there.
 
 People who opted out never appear: their audio is dropped before it is decrypted. Opt-outs and
-undos apply at once on every bot host, which Postgres notifies of each one. A bot host that
-loses that notification connection checks everyone again once it reconnects.
+undos apply at once on every bot host, which Postgres notifies of each one. While a bot host's
+notification connection is down, it relays nobody, and it checks everyone again once it reconnects.
 Opt-outs are stored as user IDs only, with the bot and server for a per-bot opt-out. The buttons
 answer while the bot is online.
 
