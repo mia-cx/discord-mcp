@@ -205,4 +205,29 @@ describe('the stateless Discord relay', () => {
     }
     expect((await relay.fetch(list(real))).status).toBe(200)
   })
+
+  it("answers a bot's real token while a forged one naming it still waits on Discord", async () => {
+    const real = botToken()
+    let release = () => {}
+    const stalled = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const discord: typeof fetch = async (_input, init) => {
+      if (new Headers(init?.headers).get('authorization') === `Bot ${real}`) {
+        return Response.json({ id: BOT_ID, bot: true })
+      }
+      await stalled
+      return Response.json({ message: '401: Unauthorized', code: 0 }, { status: 401 })
+    }
+    const oauth = discordOAuth()
+    const relay = createRelay(config, executor(undefined, { discordFetch: discord }), oauth.fetch)
+    const { tokens } = await login(relay)
+
+    const forged = relay.fetch(
+      request(tokens.access_token, botToken(BOT_ID, 'forged'), 'tools/list'),
+    )
+    expect((await relay.fetch(request(tokens.access_token, real, 'tools/list'))).status).toBe(200)
+    release()
+    expect((await forged).status).toBe(403)
+  })
 })

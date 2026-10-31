@@ -10,7 +10,6 @@ import {
   DEFAULT_WINDOW_MS,
   DiscordRest,
   OperationCatalog,
-  RateGuard,
   type RateLimiter,
   type RestConfig,
   relayTools,
@@ -122,8 +121,8 @@ export interface ExecutorOptions {
 
 /**
  * Runs requests the way a bot host does: Discord checks the bot token on every request, and every
- * request for one bot queues in that bot's one rate limiter. Limiters hold no token, so without
- * `bots`, bot credentials, identities, and Discord responses never outlive the request.
+ * request it accepts for one bot queues in that bot's one rate limiter. Limiters hold no token, so
+ * without `bots`, bot credentials, identities, and Discord responses never outlive the request.
  */
 export const createExecutor = ({
   rest,
@@ -149,31 +148,40 @@ export const createExecutor = ({
     return entry
   }
 
+  /**
+   * Anyone can name a bot's public ID, so a token Discord has not accepted gets a limiter of its
+   * own: it never queues ahead of the bot's verified requests or counts against its guard.
+   */
+  const verify = async (token: Redacted.Redacted<string>, signal: AbortSignal) => {
+    const limiter = createRateLimiter(rest, discordFetch)
+    try {
+      return await Effect.runPromiseExit(
+        Effect.flatMap(DiscordRest, (rest) =>
+          rest.request({ method: 'GET', route: '/users/@me', operationFamily: 'authentication' }),
+        ).pipe(Effect.provide(restLayer(token, limiter))),
+        { signal },
+      )
+    } finally {
+      limiter.close()
+    }
+  }
+
   return async (request, credential, botId) => {
+    const token = Redacted.make(credential)
+    const verified = await verify(token, request.signal)
+    if (verified._tag === 'Failure') return discordFailure(renderCause(verified.cause))
+    // A token whose first segment names another bot was routed by a lie.
+    if (!isBot(verified.value) || verified.value.id !== botId) return invalidBot()
+    // Hosting never delays or fails the agent's call; `use` logs its own failures.
+    void bots?.use(botId, credential)
+
     const lane = acquire(botId)
-    const runtime = relayRuntime(restLayer(Redacted.make(credential), lane.limiter))
+    const runtime = relayRuntime(restLayer(token, lane.limiter))
     const mcp = createMcpHandler(() => buildRelayServer(runtime), {
       legacy: 'stateless',
       maxSubscriptions: 0,
     })
     try {
-      // Anyone can name a bot's public ID, so until Discord accepts the token its rejections go to
-      // a guard of its own rather than the one this bot's verified requests share.
-      const unverified = { ...lane.limiter, guard: Effect.runSync(RateGuard.make()) }
-      const verified = await Effect.runPromiseExit(
-        Effect.flatMap(DiscordRest, (rest) =>
-          rest.request({ method: 'GET', route: '/users/@me', operationFamily: 'authentication' }),
-        ).pipe(Effect.provide(restLayer(Redacted.make(credential), unverified))),
-        { signal: request.signal },
-      )
-      if (verified._tag === 'Failure') {
-        return discordFailure(renderCause(verified.cause))
-      }
-      // A token whose first segment names another bot was routed by a lie.
-      if (!isBot(verified.value) || verified.value.id !== botId) return invalidBot()
-      // Hosting never delays or fails the agent's call; `use` logs its own failures.
-      void bots?.use(botId, credential)
-
       const response = await mcp.fetch(request)
       // Complete the bounded response before releasing the runtime. The SDK's legacy fallback
       // can return an SSE body before its tool finishes.
