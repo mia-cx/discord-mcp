@@ -233,6 +233,10 @@ for (const name of ['messageCreate', 'messageUpdate', 'messageDelete', 'messageR
         d: { id: '900000000000000001', channel_id: CHANNEL, guild_id: GUILD },
       },
     ],
+    [
+      'messageDelete',
+      { t: 'MESSAGE_DELETE', d: { id: '900000000000000001', channel_id: CHANNEL } },
+    ],
     ['messageReactionAdd', { t: 'MESSAGE_REACTION_ADD', d: reaction }],
     ['messageReactionRemove', { t: 'MESSAGE_REACTION_REMOVE', d: reaction }],
     [
