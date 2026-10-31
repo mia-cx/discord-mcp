@@ -29,6 +29,9 @@
       "path": "./packages/discord-blueprints"
     },
     {
+      "path": "./packages/isolate"
+    },
+    {
       "path": "./apps/server"
     },
     {

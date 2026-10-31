@@ -10,3 +10,5 @@ allowBuilds:
   argon2: true
   esbuild: true
   msgpackr-extract: true
+  # workerd resolves its platform binary package without its postinstall check.
+  workerd: false
