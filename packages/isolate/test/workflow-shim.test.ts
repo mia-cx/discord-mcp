@@ -200,4 +200,59 @@ describe('the discord.js shim', () => {
       logs: [],
     })
   })
+
+  /** Every event a workflow may listen for, each with a default-options client, as most are written. */
+  const LOGGER = `
+import { Client } from 'discord.js'
+const client = new Client({ intents: [] })
+for (const name of ['messageCreate', 'messageUpdate', 'messageDelete', 'messageReactionAdd', 'messageReactionRemove', 'guildMemberAdd', 'guildMemberRemove']) {
+  client.on(name, () => console.log(name))
+}
+`
+  const reaction = {
+    user_id: USER.id,
+    channel_id: CHANNEL,
+    message_id: '900000000000000001',
+    guild_id: GUILD,
+    emoji: { id: null, name: '👍' },
+  }
+  it.each([
+    ['messageCreate', message('hi')],
+    ['messageCreate', { t: 'MESSAGE_CREATE', d: { ...message('hi').d, guild_id: undefined } }],
+    [
+      'messageUpdate',
+      {
+        t: 'MESSAGE_UPDATE',
+        d: { ...message('edited').d, edited_timestamp: '2026-10-31T00:00:02.000Z' },
+      },
+    ],
+    [
+      'messageDelete',
+      {
+        t: 'MESSAGE_DELETE',
+        d: { id: '900000000000000001', channel_id: CHANNEL, guild_id: GUILD },
+      },
+    ],
+    ['messageReactionAdd', { t: 'MESSAGE_REACTION_ADD', d: reaction }],
+    ['messageReactionRemove', { t: 'MESSAGE_REACTION_REMOVE', d: reaction }],
+    [
+      'guildMemberAdd',
+      {
+        t: 'GUILD_MEMBER_ADD',
+        d: { guild_id: GUILD, user: USER, roles: [], joined_at: '2026-10-31T00:00:00.000Z' },
+      },
+    ],
+    ['guildMemberRemove', { t: 'GUILD_MEMBER_REMOVE', d: { guild_id: GUILD, user: USER } }],
+  ] as const)('delivers %s with no cache and default options (%#)', async (name, event) => {
+    const outcome = await makeIsolateHost().run({
+      queue: BOT.id,
+      botUser: BOT,
+      modules: await prepareScript(LOGGER),
+      timeoutMs: 10_000,
+      input: { event: event as GatewayEvent },
+      broker: async () => new Response(null, { status: 404 }),
+    })
+
+    expect(outcome).toEqual({ outcome: 'completed', result: null, logs: [name] })
+  })
 })

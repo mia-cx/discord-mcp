@@ -25,6 +25,14 @@ const sendToGateway = async (packet) => {
   if (!response.ok) throw new Error((await response.json()).message)
 }
 
+const PARTIALS = [
+  real.Partials.User,
+  real.Partials.Channel,
+  real.Partials.GuildMember,
+  real.Partials.Message,
+  real.Partials.Reaction,
+]
+
 export class Client extends real.Client {
   constructor(options) {
     // workerd forbids timers in global scope, so every sweeper interval is zeroed.
@@ -35,6 +43,9 @@ export class Client extends real.Client {
     )
     super({
       ...options,
+      // An isolate starts every event with empty caches, so without partials discord.js drops
+      // every event about an object it would have had to cache first, like a deleted message.
+      partials: [...new Set([...(options?.partials ?? []), ...PARTIALS])],
       sweepers,
       // The broker owns retries. A 429 it returns is still waited out here, per Retry-After.
       rest: { ...options?.rest, retries: 0, hashSweepInterval: 0, handlerSweepInterval: 0 },

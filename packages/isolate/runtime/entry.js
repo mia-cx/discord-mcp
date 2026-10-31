@@ -46,7 +46,14 @@ const settle = async () => {
  * nothing between events. So each event brings a stand-in for its own guild and channel.
  */
 const seed = (client, data) => {
-  if (data.guild_id === undefined) return
+  if (data.guild_id === undefined) {
+    // A direct message's channel is the DM with its author.
+    const recipient = data.author ?? data.user ?? (data.user_id && { id: data.user_id })
+    if (data.channel_id !== undefined && recipient) {
+      client.channels._add({ id: data.channel_id, type: ChannelType.DM, recipients: [recipient] })
+    }
+    return
+  }
   const guild = client.guilds._add({ id: data.guild_id, unavailable: true })
   const channel =
     data.channel ??
