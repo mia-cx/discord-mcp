@@ -19,16 +19,19 @@ export class ScriptRunner extends Context.Service<ScriptRunner, IsolateHost>()(
 
 const Names = Schema.optionalKey(Schema.Array(Schema.String))
 
+/** What agent code may do. Unknown names fail before anything runs. */
+export const GrantsInput = Schema.Struct({ operations: Names, families: Names, hosts: Names })
+
 const Input = Schema.Struct({
   source: Schema.String,
-  grants: Schema.Struct({ operations: Names, families: Names, hosts: Names }),
+  grants: GrantsInput,
   timeoutSeconds: Schema.optionalKey(
     Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 1, maximum: MAX_TIMEOUT_SECONDS }))),
   ),
 })
 
 /** Unknown names in a grant are typos, and a typo would otherwise surface as a denial mid-run. */
-const resolveGrants = (input: typeof Input.Type.grants) =>
+export const resolveGrants = (input: typeof GrantsInput.Type) =>
   Effect.gen(function* () {
     const catalog = yield* OperationCatalog
     const grants: ScriptGrants = {

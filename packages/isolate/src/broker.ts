@@ -173,12 +173,13 @@ export const makeBroker = (options: BrokerOptions): Broker => {
     return discordError(403, `Refused by the script broker: ${reason}`)
   }
 
-  const discord = async (request: Request, url: URL, route: `/${string}`) => {
-    const operation = matchOperation(options.operations, request.method, route)
+  /** `path` is decoded, to match templates; `route` is as requested, to replay unchanged. */
+  const discord = async (request: Request, url: URL, path: string, route: `/${string}`) => {
+    const operation = matchOperation(options.operations, request.method, path)
     if (operation === undefined) {
-      return refuse(request, `${request.method} ${route} is not a cataloged Discord operation.`)
+      return refuse(request, `${request.method} ${path} is not a cataloged Discord operation.`)
     }
-    const decision = checkOperation(options.grants, operation, route, options.interaction)
+    const decision = checkOperation(options.grants, operation, path, options.interaction)
     if (!decision.allowed) return refuse(request, decision.reason)
     // An interaction reply carries its own credential in the path; the bot's token stays out.
     const ownCredential = operation.pathParams.some((param) => param.endsWith('_token'))
@@ -220,7 +221,7 @@ export const makeBroker = (options: BrokerOptions): Broker => {
 
   const gateway = async (request: Request) => {
     if (options.updatePresence === undefined) {
-      return refuse(request, 'Gateway calls such as setPresence need the bot online.')
+      return refuse(request, 'Gateway calls such as setPresence are available to workflows only.')
     }
     const body = await readBody(request)
     if ('refusal' in body) return refuse(request, body.refusal)
@@ -244,11 +245,12 @@ export const makeBroker = (options: BrokerOptions): Broker => {
     if (!url.pathname.startsWith(DISCORD_API)) {
       return refuse(request, `${url.pathname} is not part of Discord's v10 REST API.`)
     }
+    const route = `/${url.pathname.slice(DISCORD_API.length)}` as const
     // discord.js encodes path segments, such as `@original` as `%40original`; templates do not.
-    const segments = url.pathname.slice(DISCORD_API.length).split('/').map(decodeSegment)
+    const segments = route.split('/').map(decodeSegment)
     if (segments.some((segment) => segment === undefined || segment.includes('/'))) {
       return refuse(request, `${url.pathname} is not a valid path.`)
     }
-    return discord(request, url, `/${segments.join('/')}` as const)
+    return discord(request, url, segments.join('/'), route)
   }
 }
