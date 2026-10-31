@@ -63,7 +63,7 @@ const store = async (credentials, replace = false) => {
     })
     if (replace) await rename(target, output)
   }
-  // Running bridges refresh under this lock, so a replacement never races their rotation.
+  // Running bridges refresh under this lock; one that overlaps it after a crash keeps this login.
   await (replace ? locked(output, write) : write())
   process.stderr.write(`Login saved to ${output} (owner-only permissions).\n`)
 }

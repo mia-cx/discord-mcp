@@ -13,7 +13,7 @@ const loginFile = join(directory, 'login.json')
 const REFRESH_EARLY_SECONDS = 24 * 3600
 // Longer than the relay's 15-second Discord call, so the bridge never abandons a rotation.
 const REFRESH_TIMEOUT_MS = 30_000
-const OVERLAP_WAIT_MS = 1_000
+const OVERLAP_POLL_MS = 250
 const LOOPBACK = ['127.0.0.1', 'localhost', '[::1]']
 // A 2026-07-28 request names its own protocol version here; older clients negotiate it once.
 const VERSION_META_KEY = 'io.modelcontextprotocol/protocolVersion'
@@ -77,9 +77,14 @@ const credentials = async () => {
  * take turns: whoever finds login.json already rotated, or replaced, uses that login instead.
  */
 const refresh = (stale) =>
-  locked(loginFile, async () => {
+  locked(loginFile, async (overlapped) => {
     const current = await readLogin()
     if (current.refresh_token !== stale.refresh_token) return current
+    /** The login another writer saved over `current` meanwhile, if any. */
+    const replaced = async () => {
+      const latest = await readLogin()
+      return latest.refresh_token === current.refresh_token ? undefined : latest
+    }
     const response = await fetch(new URL('/token', current.resource), {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -96,11 +101,15 @@ const refresh = (stale) =>
       const error = await response.json().catch(() => undefined)
       if (error?.error !== 'invalid_grant')
         throw new Error(`Discord login refresh failed (HTTP ${response.status}).`)
-      // A bridge that overlapped this one after a crash may have rotated the token first; give it
-      // a moment to save the new login before calling this one expired.
-      await delay(OVERLAP_WAIT_MS)
-      const latest = await readLogin()
-      if (latest.refresh_token !== current.refresh_token) return latest
+      // A bridge that overlapped this one after a crash may have won the rotation; wait for it to
+      // save before calling the login expired. Without an overlap, nobody else can save it.
+      if (await overlapped()) {
+        for (let waited = 0; waited < REFRESH_TIMEOUT_MS; waited += OVERLAP_POLL_MS) {
+          const latest = await replaced()
+          if (latest) return latest
+          await delay(OVERLAP_POLL_MS)
+        }
+      }
       throw new Error('Discord login expired. Run the login helper again.')
     }
     const tokens = await response.json()
@@ -117,6 +126,9 @@ const refresh = (stale) =>
       refresh_token: tokens.refresh_token,
       expires_at: now() + tokens.expires_in,
     }
+    // An overlapping `login.mjs --replace` may have saved a new login meanwhile; it wins.
+    const latest = await replaced()
+    if (latest) return latest
     const temporary = `${loginFile}.${randomBytes(16).toString('hex')}.tmp`
     await writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600, flag: 'wx' })
     await rename(temporary, loginFile)
