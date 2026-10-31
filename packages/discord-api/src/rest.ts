@@ -194,8 +194,13 @@ const perform = (
             const { status, body, retryAfterMs, global } = readError(cause)
             yield* countIfAvailable('discord.request.failed')
             if (retryAfterMs !== undefined) yield* countIfAvailable('discord.rate_limit_wait')
-            // 400s are free against Cloudflare's budget; only 401/403/429 are counted.
-            if (isCountedRejection(status)) yield* guard.recordRejection(scope)
+            // 400s are free against Cloudflare's budget; only 401/403/429 are counted. A
+            // `retryAfterMs` means @discordjs/rest refused the request itself, mostly before
+            // sending it; either way its bucket now knows the reset and refuses repeats, so
+            // counting those would trip the guard on a burst Discord never saw.
+            if (isCountedRejection(status) && retryAfterMs === undefined) {
+              yield* guard.recordRejection(scope)
+            }
             return yield* Effect.fail(
               mapDiscordError(status, body, {
                 ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
