@@ -328,6 +328,13 @@ describe('workflows', () => {
     connection.send(message(3, 'ping'))
 
     await vi.waitFor(() => expect(pongs()).toHaveLength(2), { timeout: 20_000 })
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('Workflow hog (revision 1) of bot'))
+    // The hog now runs beside the other workflow rather than ahead of it, so it fails later.
+    await vi.waitFor(
+      () =>
+        expect(log).toHaveBeenCalledWith(
+          expect.stringContaining('Workflow hog (revision 1) of bot'),
+        ),
+      { timeout: 20_000 },
+    )
   }, 30_000)
 })
