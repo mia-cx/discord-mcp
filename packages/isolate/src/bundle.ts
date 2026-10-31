@@ -46,6 +46,8 @@ const scriptSource = (source: string): Plugin => ({
     build.onLoad({ filter: /.*/, namespace: 'textile-script' }, () => ({
       contents: source,
       loader: 'ts',
+      // Without one, esbuild expands the script's glob imports against the relay's cwd.
+      resolveDir: runtimeFile(''),
     }))
     build.onResolve({ filter: /.*/, namespace: 'textile-script' }, ({ path }) => {
       if (path === 'discord.js') return { path: runtimeFile('shim.js') }

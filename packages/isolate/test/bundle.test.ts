@@ -16,4 +16,14 @@ describe('bundling a script', () => {
   ])('refuses %s', async (_, source) => {
     await expect(bundleScript(source)).rejects.toBeInstanceOf(ScriptBuildError)
   })
+
+  it('never expands a glob import against the working directory', async () => {
+    // Vitest runs from the repository root, whose package.json names this dev dependency.
+    const bundle = await bundleScript(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: script source; the isolate interpolates it.
+      'export default () => import(`./${String()}.json`)',
+    )
+
+    expect(bundle).not.toContain('@biomejs/biome')
+  })
 })
