@@ -99,4 +99,22 @@ describe('the isolate host', () => {
 
     expect(run).toEqual({ outcome: 'completed', result: '€'.repeat(200000), logs: [] })
   })
+
+  it('runs no more workerd processes at once than its concurrency allows', async () => {
+    const host = makeIsolateHost(1)
+    const finished: string[] = []
+    const slow = await execution(
+      '1',
+      'export default () => new Promise((r) => setTimeout(r, 500))',
+      5000,
+    )
+    const quick = await execution('2', 'export default () => "quick"', 5000)
+
+    await Promise.all([
+      host.run(slow).then(() => finished.push('slow')),
+      host.run(quick).then(() => finished.push('quick')),
+    ])
+
+    expect(finished).toEqual(['slow', 'quick'])
+  })
 })

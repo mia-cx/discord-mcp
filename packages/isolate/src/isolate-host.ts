@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer, request as httpRequest, type IncomingMessage, type Server } from 'node:http'
 import { createRequire } from 'node:module'
-import { tmpdir } from 'node:os'
+import { availableParallelism, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -246,8 +246,10 @@ const execute = async (execution: ScriptExecution): Promise<ScriptOutcome> => {
           child.kill('SIGKILL')
         },
       )
+      // Removed when this execution ends: a workflow's signal outlives thousands of them.
       execution.signal?.addEventListener('abort', () => reject(execution.signal?.reason), {
         once: true,
+        signal: stop.signal,
       })
     })
   } finally {
@@ -262,15 +264,39 @@ export interface IsolateHost {
   readonly run: (execution: ScriptExecution) => Promise<ScriptOutcome>
 }
 
-/** Runs executions one at a time per queue, each in its own workerd process. */
-export const makeIsolateHost = (): IsolateHost => {
+/**
+ * Runs executions one at a time per queue, each in its own workerd process, with at most
+ * `concurrency` processes at once. Executions over the limit wait their turn, oldest first.
+ */
+export const makeIsolateHost = (concurrency = availableParallelism()): IsolateHost => {
   const queues = new Map<string, Promise<unknown>>()
+  let running = 0
+  const waiting: Array<() => void> = []
+  // A finished execution hands its slot straight to the oldest waiting one.
+  const release = () => {
+    const next = waiting.shift()
+    if (next === undefined) running -= 1
+    else next()
+  }
+  const acquire = () => {
+    if (running < concurrency) {
+      running += 1
+      return Promise.resolve()
+    }
+    return new Promise<void>((resolve) => waiting.push(resolve))
+  }
   return {
     run: (execution) => {
       const previous = queues.get(execution.queue) ?? Promise.resolve()
-      const current = previous.then(() => {
+      const current = previous.then(async () => {
         execution.signal?.throwIfAborted()
-        return execute(execution)
+        await acquire()
+        try {
+          execution.signal?.throwIfAborted()
+          return await execute(execution)
+        } finally {
+          release()
+        }
       })
       const settled = current.catch(() => undefined)
       queues.set(execution.queue, settled)
