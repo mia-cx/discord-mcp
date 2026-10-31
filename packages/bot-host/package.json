@@ -14,10 +14,13 @@
     }
   },
   "dependencies": {
-    "@discord-mcp/storage": "workspace:*"
+    "@discord-mcp/storage": "workspace:*",
+    "@discordjs/opus": "0.10.0",
+    "@discordjs/voice": "0.19.2",
+    "@snazzah/davey": "0.1.12",
+    "ws": "8.22.0"
   },
   "devDependencies": {
-    "@types/ws": "8.18.2",
-    "ws": "8.22.0"
+    "@types/ws": "8.18.2"
   }
 }

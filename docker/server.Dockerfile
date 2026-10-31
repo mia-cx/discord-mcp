@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 make g+
 WORKDIR /src
 
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json tsconfig.json ./
+COPY patches ./patches
 COPY types ./types
 COPY packages ./packages
 COPY apps ./apps

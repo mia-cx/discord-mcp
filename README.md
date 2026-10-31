@@ -82,6 +82,8 @@ Both paths require OAuth and bot credentials on every HTTP request.
 | `discord_workflow_enable` | Run a workflow revision on the bot's events and show its grants. |
 | `discord_workflow_disable` | Stop running a workflow. |
 | `discord_workflow_delete` | Delete a workflow and its revisions. |
+| `discord_voice_join` | Join a voice channel to play audio there. [Bot hosting](#bot-hosting) only. |
+| `discord_voice_leave` | Leave a server's voice channel. Bot hosting only. |
 
 The catalog covers the vendored specification's 242 operations. The relay exposes
 bot-authenticated, non-credential operations. OAuth-only endpoints and operations
@@ -90,8 +92,8 @@ the supported operation and its input schema.
 
 Arguments are validated locally before execution. Destructive and admin calls act
 directly under the supplied bot's Discord permissions, with no preview-token
-sessions; only [scripts](#scripts) and [workflows](#workflows) carry server-side grants. This relay does not
-receive voice audio or run agent conversations.
+sessions; only [scripts](#scripts) and [workflows](#workflows) carry server-side grants. This
+relay plays audio in voice channels but does not receive it, or run agent conversations.
 
 Calls currently accept JSON payloads. Multipart file upload is not implemented.
 Discord rate limits and API errors are returned to the caller; the HTTP relay
@@ -210,7 +212,7 @@ a well-formed entry.
 
 ## Run from source
 
-Requires Node.js 24+ and the pnpm version pinned in `package.json`.
+Requires Node.js 24.9+ and the pnpm version pinned in `package.json`.
 
 ```sh
 corepack pnpm install --frozen-lockfile
@@ -304,6 +306,41 @@ Set `DATABASE_URL`, `TOKEN_VAULT_KEY` (generate it like `OAUTH_ENCRYPTION_KEY`),
 serves the plain relay. Back up the vault key apart from the database: without it, stored
 tokens cannot be decrypted.
 
+#### Voice
+
+With bot hosting on, an agent can play audio in a voice channel, as music bots do. Discord
+encrypts the audio end to end with DAVE. Sending needs no notice to the channel; the bot
+receives nothing.
+
+1. Call `discord_voice_join` with `guildId` and `channelId`. The bot needs View Channel,
+   Connect, and Speak. It returns the voice socket's path, `/voice?guild_id=…`.
+2. Open a WebSocket to that path on the relay's host (`wss:` for `https:`) with the same
+   `Authorization` and `X-Discord-Bot-Token` headers as `/mcp`, adding the codec to the query:
+   - `codec=opus`: each binary message is one Opus packet of 20 ms, 48 kHz stereo audio.
+   - `codec=pcm16&sample_rate=R&channels=C`: little-endian 16-bit PCM, interleaved when stereo,
+     at `R` of 8000, 12000, 16000, 24000, or 48000 Hz and `C` of 1 (default) or 2. Messages may
+     split frames but not samples.
+3. Send audio as binary messages. The bot speaks while audio arrives and stops when it pauses for
+   more than 100 ms. Audio sent faster than real time waits: once a second of it is queued, the
+   bot host stops reading the socket until it plays.
+
+Before upgrading, the relay answers 401 or 403 for bad credentials, 400 for a bad query, and
+409 when the bot is not in a voice channel in that server. The socket closes with:
+
+| Code | Meaning |
+| --- | --- |
+| 1000 | The bot left the channel, through `discord_voice_leave` or because Discord disconnected it. |
+| 1001 | The bot went offline, or the server is shutting down. |
+| 1003 | A text message arrived; send audio as binary messages. |
+| 1007 | A message was not valid audio for the codec. |
+| 1009 | A message was larger than 256 KiB. |
+| 4000 | A newer socket for the same server replaced this one. |
+
+Closing the socket stops playback after any queued audio; the bot stays in the channel until it
+leaves. Joining another channel in the same server moves the bot and closes its socket. An open
+socket keeps the bot online past its 24-hour idle timeout. Voice outlasts a resumed Gateway
+connection, but not a new Gateway session or a server restart: join again after a 1001 close.
+
 ### Tiers
 
 The relay runs as one process by default. To scale, split it into two tiers, each with
@@ -311,7 +348,8 @@ as many replicas as it needs:
 
 - **Central** serves MCP and OAuth. It checks the login and the allowlist, reads the bot ID
   from the first segment of the bot token, and forwards the request to the bot host that
-  owns that bot. It holds no bot tokens and calls Discord only to check logins.
+  owns that bot. It relays each [voice socket](#voice) to that bot host the same way. It
+  holds no bot tokens and calls Discord only to check logins.
 - **Bot hosts** check each bot token with Discord and run its requests. All requests for one
   bot share one rate limiter, whichever central replica received them. `DATABASE_URL` and
   `TOKEN_VAULT_KEY` go on bot hosts, and scripts and workflows run there, sharing the bot's

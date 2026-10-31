@@ -17,6 +17,8 @@ const HUMAN_B = '234567890123456780'
 const HOUR = 60 * 60 * 1000
 /** Guilds, GuildMessages, and MessageContent. */
 const PING_INTENTS = 1 | (1 << 9) | (1 << 15)
+/** `GUILDS` and `GUILD_VOICE_STATES`, which every bot identifies with for voice. */
+const VOICE_INTENTS = 129
 /** The application flag that allows the MessageContent intent. */
 const GATEWAY_MESSAGE_CONTENT = 1 << 18
 
@@ -240,7 +242,7 @@ describe('workflows', () => {
       grants: { operations: [], families: ['message', 'interaction', 'webhook'], hosts: [] },
       enabled: true,
     })
-    const connection = await identifiedWith(PING_INTENTS, 1)
+    const connection = await identifiedWith(PING_INTENTS | VOICE_INTENTS, 1)
 
     // Two days without an agent call: the bot stays online for its workflow.
     clock.advance(48 * HOUR)
@@ -333,7 +335,7 @@ describe('workflows', () => {
     await asA('discord_workflow_publish', { name: 'ping', source: PING_PONG, grants })
     await asA('discord_workflow_enable', { name: 'hog' })
     await asA('discord_workflow_enable', { name: 'ping' })
-    const connection = await identifiedWith(PING_INTENTS)
+    const connection = await identifiedWith(PING_INTENTS | VOICE_INTENTS)
     const pongs = () => calls.filter((call) => call.route === `/channels/${CHANNEL}/messages`)
 
     connection.send(message(2, 'ping'))

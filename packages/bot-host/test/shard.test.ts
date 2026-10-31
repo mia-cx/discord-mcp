@@ -30,7 +30,7 @@ const start = async (saved?: { sessionId: string; sequence: number }) => {
     intents: 0,
     identifies: createIdentifyGate(clock, LIMIT),
     ...(saved && {
-      session: { ...saved, resumeGatewayUrl: `${gateway.url}/resume`, shardCount: 1 },
+      session: { ...saved, resumeGatewayUrl: `${gateway.url}/resume`, shardCount: 1, intents: 0 },
     }),
     onSession,
     onReady: () => {},
@@ -144,6 +144,7 @@ describe('the shard supervisor', () => {
         resumeGatewayUrl: gateway.url,
         sequence: 3,
         shardCount: 1,
+        intents: 0,
       }),
     )
 
@@ -155,6 +156,37 @@ describe('the shard supervisor', () => {
       expect(gateway.connections[2]?.received[0]).toMatchObject({ op: 6, d: { seq: 3 } }),
     )
     await identified(gateway, 1)
+  })
+
+  it('identifies afresh instead of resuming a session saved with other intents', async () => {
+    const gateway = await fakeGateway()
+    const clock = manualClock()
+    const shard = startShard({
+      token: TOKEN,
+      gatewayUrl: gateway.url,
+      clock,
+      shardId: 0,
+      shardCount: 1,
+      // `GUILDS` and `GUILD_VOICE_STATES`.
+      intents: 129,
+      identifies: createIdentifyGate(clock, LIMIT),
+      // Saved before voice, when the shard identified with no intents.
+      session: {
+        sessionId: 'no-voice',
+        resumeGatewayUrl: gateway.url,
+        sequence: 7,
+        shardCount: 1,
+        intents: 0,
+      },
+      onSession: () => {},
+      onReady: () => {},
+      onFatal: () => {},
+      onIdentifyBudgetSpent: () => {},
+    })
+    cleanup.push(gateway.close, shard.stop)
+    await vi.waitFor(() =>
+      expect(gateway.connections[0]?.received[0]).toMatchObject({ op: 2, d: { intents: 129 } }),
+    )
   })
 
   it('identifies afresh, within Identify limits, when Discord rejects a saved session', async () => {
@@ -223,7 +255,7 @@ describe('the shard supervisor', () => {
       shardCount: 1,
       intents: 0,
       identifies: createIdentifyGate(clock, LIMIT),
-      session: { sessionId: 'saved', resumeGatewayUrl, sequence: 7, shardCount: 1 },
+      session: { sessionId: 'saved', resumeGatewayUrl, sequence: 7, shardCount: 1, intents: 0 },
       onSession: () => {},
       onReady: () => {},
       onFatal: () => {},
@@ -257,6 +289,7 @@ describe('the shard supervisor', () => {
         resumeGatewayUrl: target.url,
         sequence: 7,
         shardCount: 1,
+        intents: 0,
       }
       const onSession = vi.fn()
       const shard = startShard({
@@ -339,7 +372,7 @@ describe('the shard supervisor', () => {
       shardCount: 1,
       intents: 0,
       identifies: createIdentifyGate(clock, LIMIT),
-      session: { sessionId: 'saved', resumeGatewayUrl, sequence: 7, shardCount: 1 },
+      session: { sessionId: 'saved', resumeGatewayUrl, sequence: 7, shardCount: 1, intents: 0 },
       onSession: () => {},
       onReady: () => {},
       onFatal: () => {},
