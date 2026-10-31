@@ -12,20 +12,21 @@ const catalog = await Effect.runPromise(Effect.provide(OperationCatalog, Operati
 
 /**
  * A local target that records every request, standing in for both a public webhook and something
- * inside the cluster. `/to/<url>` redirects to `<url>`.
+ * inside the cluster. Redirect destinations are registered by the test, never taken from a request.
  */
 const listen = async () => {
   const hits: string[] = []
+  const redirects = new Map<string, string>()
   const server = createServer(async (request, response) => {
     let body = ''
     for await (const chunk of request) body += chunk
     hits.push(`${request.method} ${request.headers.host} ${request.url}${body && ` ${body}`}`)
-    const target = request.url?.match(/^\/to\/(.+)$/)?.[1]
-    if (target !== undefined) response.writeHead(302, { location: decodeURIComponent(target) })
+    const target = redirects.get(request.url ?? '')
+    if (target !== undefined) response.writeHead(302, { location: target })
     response.end('reached')
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-  return { hits, server, port: (server.address() as AddressInfo).port }
+  return { hits, redirects, server, port: (server.address() as AddressInfo).port }
 }
 
 /** Fake DNS: names outside `answers` fail as an unknown domain would, so no test reaches the internet. */
@@ -185,7 +186,11 @@ describe('outbound fetch from an isolate', () => {
     const target = await listen()
     try {
       const at = (host: string, path: string) => `http://${host}:${target.port}${path}`
-      const into = (url: string) => at('hooks.example', `/to/${encodeURIComponent(url)}`)
+      const into = (url: string) => {
+        const path = `/to/${encodeURIComponent(url)}`
+        target.redirects.set(path, url)
+        return at('hooks.example', path)
+      }
       const { broker, denied } = brokerFor(['hooks.example', 'internal.example'], (request) =>
         fetchPublic(request, {
           resolve: dns({ 'hooks.example': ['127.0.0.1'], 'internal.example': ['10.0.0.1'] }),
