@@ -67,7 +67,7 @@ const start = async ({
       ...vault,
       storeSession: async (...args) => {
         await saving
-        if (failSave) {
+        if (failSave && args[2].stale === true) {
           failSave = false
           throw new Error('Connection terminated unexpectedly')
         }
@@ -141,7 +141,7 @@ const start = async ({
     lose: (prefix: string) => {
       taken = prefix
     },
-    /** The next session write fails. */
+    /** The next write of a session ended for a fresh Identify fails. */
     failSession: () => {
       failSave = true
     },
@@ -370,10 +370,12 @@ describe('voice', () => {
     await vi.waitFor(() => expect(gateway.connections[0]?.closeCode).toBe(4000))
     clock.advance(500)
 
-    // Postgres recovers, the host takes its shard back, and then the held writes land.
+    // Postgres recovers, the host takes its shard back, and then the held writes land, but for
+    // the session's end, which fails once.
     leases.restore()
     clock.advance(5_000)
     await new Promise((resolve) => setTimeout(resolve, 200))
+    leases.failSession()
     saved()
 
     await vi.waitFor(() => {

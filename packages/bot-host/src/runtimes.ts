@@ -380,25 +380,30 @@ export const createBotRuntimes = ({
     if (queued) return
     let latest: ShardSession | undefined
     let tenure: object | undefined
+    /**
+     * Whether the session may land under the hold this host has now. Once the hold lapses here the
+     * fence decides. A newer hold means the shard came back, and a resumable session from before
+     * may be older than its owner's since; ending one never is.
+     */
+    const mayLand = () => {
+      const now = leases.tenure(key)
+      const resumable = latest !== undefined && latest.stale !== true
+      return !resumable || now === undefined || now === tenure
+    }
     write(botId, async () => {
       const next = unsaved.get(key)
       unsaved.delete(key)
       latest = next?.session
       tenure = next?.tenure
-      // Once the hold lapses here the fence decides. A newer hold means the shard came back, and a
-      // resumable session from before may be older than its owner's since; ending one never is.
-      const current = leases.tenure(key)
-      const resumable = latest !== undefined && latest.stale !== true
-      if (resumable && current !== undefined && current !== tenure) return
+      if (!mayLand()) return
       const fence = { lease: key, holder: leases.holder }
       return latest === undefined
         ? vault.clearSession(botId, shardId, fence)
         : vault.storeSession(botId, shardId, latest, fence)
     }).catch((cause) => {
       log(`Saving bot ${botId}'s shard ${shardId} Gateway session failed: ${reason(cause)}`)
-      // A newer session is already queued behind this one. Without the hold it was made under, it
-      // can never land, or would land over its next owner's newer session.
-      if (unsaved.has(key) || !leases.holds(key) || leases.tenure(key) !== tenure) return
+      // A newer session is already queued behind this one. Without the lease it can never land.
+      if (unsaved.has(key) || !leases.holds(key) || !mayLand()) return
       // Retry until storage recovers. A lost store can leave an online shard unresumable, since
       // READY may be its last dispatch.
       const cancel = clock.schedule(() => saveSession(botId, shardId, latest), RETRY_MS)
