@@ -14,13 +14,10 @@ export const testConfig: ServerConfig = {
   // `off` so the tool suite never opens a socket; gateway-gated tools stay unregistered, which is
   // exactly what a deployment with the Gateway disabled sees.
   gateway: { mode: 'off', intents: [], bufferSize: 10, maxWaitMs: 1000 },
-  // Enabled, so the workflow-gated tools are registered and the suite exercises them. No container
-  // is ever started: the tests provide a stub supervisor.
+  // Enabled, so the workflow-gated tools are registered and the suite exercises them against a stub
+  // sandbox.
   workflows: {
     enabled: true,
-    supervisorSocket: '/nonexistent/supervisor.sock',
-    supervisorCredential: 'test-credential',
-    supervisorTimeoutMs: 1000,
     capabilityDirectory: '/tmp/discord-mcp-test-capability',
   },
   discordPublicKey: undefined,

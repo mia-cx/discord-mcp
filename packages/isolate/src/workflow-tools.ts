@@ -1,0 +1,257 @@
+import { defineTool, ValidationError } from '@discord-mcp/core'
+import { DiscordRest } from '@discord-mcp/discord-api/relay'
+import type { WorkflowRevision } from '@discord-mcp/storage'
+import { Context, Effect, Schema } from 'effect'
+import { MIN_SCHEDULE_INTERVAL_MINUTES } from './cron.ts'
+import { GrantsInput, resolveGrants } from './tool.ts'
+import {
+  EVENT_TIMEOUT_MS,
+  intentNames,
+  KV_KEY_LIMIT_BYTES,
+  KV_LIMIT_BYTES,
+  MAX_SCHEDULES,
+  ROUTE_BODY_LIMIT_BYTES,
+  ROUTE_TIMEOUT_MS,
+  RUN_RETENTION_MS,
+  RUNS_KEPT,
+  routePath,
+  SCHEDULE_EVENT,
+  WORKFLOW_EVENTS,
+  type WorkflowHost,
+} from './workflows.ts'
+
+/** The process's workflow host, and the Discord user whose relay login made this request. */
+export class Workflows extends Context.Service<
+  Workflows,
+  { readonly host: WorkflowHost; readonly actorId: string }
+>()('isolate/Workflows') {}
+
+/** The host and the caller: the bot this request's token belongs to, and the acting human. */
+const access = Effect.gen(function* () {
+  const { host, actorId } = yield* Workflows
+  const rest = yield* DiscordRest
+  const bot = (yield* rest.request({
+    method: 'GET',
+    route: '/users/@me',
+    operationFamily: 'user',
+  })) as { readonly id: string }
+  return { host, rest, caller: { botId: bot.id, botUser: bot, actorId } }
+})
+
+/** The host's validation errors are the agent's to fix; anything else is a defect. */
+const attempt = <A>(run: () => Promise<A>) =>
+  Effect.promise(run).pipe(
+    Effect.catchDefect((error) =>
+      error instanceof ValidationError ? Effect.fail(error) : Effect.die(error),
+    ),
+  )
+
+const describeRevision = ({
+  botId,
+  name,
+  revision,
+  events,
+  intents,
+  route,
+  schedules,
+  grants,
+  packages,
+}: WorkflowRevision) => ({
+  name,
+  revision,
+  events,
+  intents: intentNames(intents),
+  route: route ? routePath(botId, name) : null,
+  schedules,
+  grants,
+  packages,
+})
+
+const Name = Schema.String.annotate({ description: 'The workflow name, unique per bot.' })
+
+const PublishInput = Schema.Struct({
+  name: Name,
+  source: Schema.String,
+  grants: GrantsInput,
+  dependencies: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)).annotate({
+    description:
+      'npm packages the source imports, by name, with a version, range, or tag from the npm registry. discord.js is provided; leave it out.',
+  }),
+  lockfile: Schema.optionalKey(Schema.String).annotate({
+    description:
+      'The contents of a package-lock.json for `dependencies`, to install exactly the versions it pins.',
+  }),
+})
+
+export const workflowPublish = defineTool({
+  name: 'discord_workflow_publish',
+  title: 'Publish a workflow',
+  description: [
+    "Publish discord.js code that runs as this bot on Gateway events, cron schedules, and inbound HTTP requests, even while no agent is connected. Each publish stores the workflow's next immutable revision; it runs only once enabled with discord_workflow_enable.",
+    `\`source\` is a module that creates a discord.js Client at the top level and adds listeners, as an ordinary bot does; \`login()\` does nothing. It can listen for ${Object.keys(WORKFLOW_EVENTS).join(', ')}, and receives the events its Client's intents cover. No top-level await.`,
+    "Import discord.js, textile, node:*, and the npm packages listed in `dependencies`; pass a `lockfile` to pin every version. Packages install without their install scripts and are bundled for the isolate; one that can't run there fails the publish. The result's `packages` lists every version installed.",
+    `To run on a schedule, list up to ${MAX_SCHEDULES} five-field cron expressions, in UTC and together at least ${MIN_SCHEDULE_INTERVAL_MINUTES} minutes apart, in the Client's \`schedules\` option, and listen for \`${SCHEDULE_EVENT}\` on that Client: \`new Client({ intents: [], schedules: ['0 9 * * *'] })\`, then \`client.on('${SCHEDULE_EVENT}', async ({ cron, scheduledAt }) => { ... })\`. Each tick runs once. A tick missed while the bot host was down or the bot offline runs late, once per schedule, when the bot is back online; earlier missed ticks are skipped, and \`scheduledAt\` says when it was due.`,
+    `To answer webhooks, default-export a fetch handler: \`export default { async fetch(request) { return new Response('ok') } }\`. Once enabled, every request to \`/workflows/<bot ID>/<name>\` on this relay, or any path below it, runs the handler, which may call Discord through a Client created at the top level. The route is public: anyone may call it, so verify the sender yourself, for example by checking a signature over \`await request.arrayBuffer()\`. Requests carry at most ${ROUTE_BODY_LIMIT_BYTES / 1024 / 1024} MiB. The response keeps only its status, body, and Content-Type, and a body over about 700 KiB fails.`,
+    `Each event, tick, or request runs in a fresh isolate, an event or tick for at most ${EVENT_TIMEOUT_MS / 1000} seconds and a request for ${ROUTE_TIMEOUT_MS / 1000}, so nothing in memory lasts between runs: publishing refuses collectors and awaitMessages, which would never fire, and URL attachments, since workflows can't upload files. Caches start empty, so listeners may receive partial objects (check \`.partial\` and fetch). Without MessageContent, guild messages arrive without content unless they mention the bot. Events of one guild run in order. The bot's own messages are not delivered.`,
+    `To remember things between runs, \`import { kv } from 'textile'\`: \`await kv.get(key)\` returns the stored value or undefined, \`await kv.set(key, value)\` stores any JSON value, and \`await kv.delete(key)\` removes it. State belongs to the workflow: it lasts across runs, revisions, and restarts, and goes when the workflow is deleted. Keys and values together take at most ${KV_LIMIT_BYTES / 1024} KiB, and a key at most ${KV_KEY_LIMIT_BYTES} bytes; a set past either throws and stores nothing. Only one guild's non-interaction events run in order: interactions, route requests, direct messages from different channels, and other guilds' events run at the same time, so their writes to one key can interleave and the last one wins. Read console output and failures with discord_workflow_logs.`,
+    'Every request the workflow makes is checked against `grants`, as for discord_script_run. Answering an interaction (reply, deferReply, editReply, followUp) needs the `interaction` and `webhook` families or those operations, and works only for the interaction being handled. setPresence needs no grant.',
+    '`name` is unique per bot: lowercase letters, digits, and dashes. Publishing an existing name adds a revision and leaves the running one in place.',
+  ].join('\n\n'),
+  toolset: 'api',
+  risk: 'destructive',
+  scopes: [],
+  annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+  input: PublishInput,
+  handler: (args: typeof PublishInput.Type) =>
+    Effect.gen(function* () {
+      const grants = yield* resolveGrants(args.grants)
+      const { host, caller } = yield* access
+      const revision = yield* attempt(() =>
+        host.publish(caller, {
+          name: args.name,
+          source: args.source,
+          grants,
+          ...(args.dependencies === undefined ? {} : { dependencies: args.dependencies }),
+          ...(args.lockfile === undefined ? {} : { lockfile: args.lockfile }),
+        }),
+      )
+      return { ...describeRevision(revision), enabled: false }
+    }),
+})
+
+const ListInput = Schema.Struct({})
+
+export const workflowList = defineTool({
+  name: 'discord_workflow_list',
+  title: 'List workflows',
+  description:
+    "List this bot's workflows: each one's latest revision, and the revision it runs with its events, intents, schedules, route, grants, and installed packages. `changes` lists the 20 most recent publishes, enables, disables, and deletes, newest first, with the Discord user ID of the human who made each.",
+  toolset: 'api',
+  risk: 'read',
+  scopes: [],
+  annotations: { readOnlyHint: true, openWorldHint: false },
+  input: ListInput,
+  handler: () =>
+    Effect.gen(function* () {
+      const { host, caller } = yield* access
+      return yield* attempt(() => host.list(caller.botId))
+    }),
+})
+
+const EnableInput = Schema.Struct({
+  name: Name,
+  revision: Schema.optionalKey(
+    Schema.Int.annotate({ description: 'The revision to run. Defaults to the latest.' }),
+  ),
+})
+
+export const workflowEnable = defineTool({
+  name: 'discord_workflow_enable',
+  title: 'Enable a workflow',
+  description:
+    "Run a workflow revision, the latest by default, on this bot's Gateway events, its schedules, and its route, replacing the revision it ran before. Schedules start from now. While any workflow is enabled the bot stays online without agent calls. Returns the grants, intents, and schedules the revision runs with, and its route's path when it has a fetch handler: show them to the human you act for. Privileged intents (MessageContent, GuildMembers, GuildPresences) must be turned on in the Discord Developer Portal first.",
+  toolset: 'api',
+  risk: 'destructive',
+  scopes: [],
+  annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+  input: EnableInput,
+  handler: (args: typeof EnableInput.Type) =>
+    Effect.gen(function* () {
+      const { host, rest, caller } = yield* access
+      const application = (yield* rest.request({
+        method: 'GET',
+        route: '/applications/@me',
+        operationFamily: 'application',
+      })) as { readonly flags?: number }
+      const revision = yield* attempt(() =>
+        host.enable(caller, args.name, args.revision, application.flags ?? 0),
+      )
+      return { ...describeRevision(revision), enabled: true }
+    }),
+})
+
+const NameInput = Schema.Struct({ name: Name })
+
+export const workflowDisable = defineTool({
+  name: 'discord_workflow_disable',
+  title: 'Disable a workflow',
+  description:
+    'Stop running a workflow; its route answers 404. Its revisions stay; enable it again to resume. With no workflow enabled, the bot goes offline 24 hours after the last agent call.',
+  toolset: 'api',
+  risk: 'write',
+  scopes: [],
+  annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: false },
+  input: NameInput,
+  handler: (args: typeof NameInput.Type) =>
+    Effect.gen(function* () {
+      const { host, caller } = yield* access
+      yield* attempt(() => host.disable(caller, args.name))
+      return { name: args.name, enabled: false }
+    }),
+})
+
+export const workflowDelete = defineTool({
+  name: 'discord_workflow_delete',
+  title: 'Delete a workflow',
+  description:
+    'Stop a workflow and delete every revision of it, its KV state, and its run logs. Its entries in the change log stay. This cannot be undone.',
+  toolset: 'api',
+  risk: 'destructive',
+  scopes: [],
+  annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+  input: NameInput,
+  handler: (args: typeof NameInput.Type) =>
+    Effect.gen(function* () {
+      const { host, caller } = yield* access
+      yield* attempt(() => host.delete(caller, args.name))
+      return { name: args.name, deleted: true }
+    }),
+})
+
+const LOGS_LIMIT = 20
+const LOGS_LIMIT_MAX = 100
+
+const LogsInput = Schema.Struct({
+  name: Schema.optionalKey(Name.annotate({ description: "One workflow's runs. Defaults to all." })),
+  failed: Schema.optionalKey(
+    Schema.Boolean.annotate({
+      description: 'Only runs that threw, timed out, crashed, or never started.',
+    }),
+  ),
+  limit: Schema.optionalKey(
+    Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: LOGS_LIMIT_MAX })).annotate({
+      description: `How many runs to return, newest first. Defaults to ${LOGS_LIMIT}.`,
+    }),
+  ),
+})
+
+export const workflowLogs = defineTool({
+  name: 'discord_workflow_logs',
+  title: 'Read workflow logs',
+  description: [
+    `This bot's recent workflow runs, newest first: the workflow and revision, the Gateway event, \`schedule <cron>\` for a tick, or \`HTTP <method>\` for a route request, the outcome (completed, threw, timed_out, crashed, or skipped when it never started), the error, and what it logged with console. Runs stay readable for ${RUN_RETENTION_MS / (24 * 60 * 60 * 1000)} days, up to the newest ${RUNS_KEPT} per workflow.`,
+    'Each run keeps up to 16,384 characters of console output. A run that timed out or crashed keeps none. Bot and interaction tokens in logs and errors read [redacted].',
+  ].join('\n\n'),
+  toolset: 'api',
+  risk: 'read',
+  scopes: [],
+  annotations: { readOnlyHint: true, openWorldHint: false },
+  input: LogsInput,
+  handler: (args: typeof LogsInput.Type) =>
+    Effect.gen(function* () {
+      const { host, caller } = yield* access
+      const runs = yield* attempt(() =>
+        host.runs(caller.botId, { ...args, limit: args.limit ?? LOGS_LIMIT }),
+      )
+      return { runs }
+    }),
+})
+
+export const workflowTools = [
+  workflowPublish,
+  workflowList,
+  workflowEnable,
+  workflowDisable,
+  workflowDelete,
+  workflowLogs,
+] as const

@@ -1,7 +1,13 @@
-import { Clock, Effect } from 'effect'
+import { Clock, Effect, Redacted } from 'effect'
 import { describe, expect, it } from 'vitest'
 import { mapDiscordError } from '../src/errors.ts'
-import { isCountedRejection, RateGuard, rateGuardScope } from '../src/rate-guard.ts'
+import {
+  DEFAULT_FAILURE_THRESHOLD,
+  isCountedRejection,
+  RateGuard,
+  rateGuardScope,
+} from '../src/rate-guard.ts'
+import { createRateLimiter, DiscordRest } from '../src/rest.ts'
 
 const config = { threshold: 3, windowMs: 60_000 }
 const scope = rateGuardScope('bot', 'guild')
@@ -84,6 +90,89 @@ describe('RateGuard', () => {
       ).pipe(Effect.provideService(Clock.Clock, fakeClock)) as Effect.Effect<number, never>,
     )
     expect(count).toBe(0)
+  })
+})
+
+describe('a shared rate limiter', () => {
+  it('does not count requests it refused before Discord saw them', async () => {
+    // Discord allows two guild reads, then the bucket stays empty for a minute.
+    let guildReads = 0
+    const discord: typeof fetch = async (input) => {
+      if (!String(input).includes('/guilds/')) return Response.json({ id: '1', bot: true })
+      guildReads += 1
+      const remaining = String(Math.max(0, 2 - guildReads))
+      return Response.json(
+        { id: '1' },
+        {
+          headers: {
+            'x-ratelimit-limit': '2',
+            'x-ratelimit-remaining': remaining,
+            'x-ratelimit-reset-after': '60',
+            'x-ratelimit-bucket': 'guild',
+          },
+        },
+      )
+    }
+    const limiter = createRateLimiter(
+      { timeoutMs: 1000, retries: 0, maxRateLimitWaitMs: 0 },
+      discord,
+    )
+    const request = (route: `/${string}`) =>
+      Effect.runPromiseExit(
+        Effect.flatMap(DiscordRest, (rest) =>
+          rest.request({ method: 'GET', route, operationFamily: 'guild' }),
+        ).pipe(Effect.provide(DiscordRest.shared(Redacted.make('token'), limiter))),
+      )
+
+    for (let read = 0; read < DEFAULT_FAILURE_THRESHOLD + 5; read++) await request('/guilds/1')
+    const unrelated = await request('/users/@me')
+    limiter.close()
+
+    expect(guildReads).toBe(2)
+    expect(unrelated._tag).toBe('Success')
+  })
+
+  it("trips on 429s Discord itself sends, such as a sublimit's", async () => {
+    // A sublimit answers 429 while the bucket still reports requests remaining.
+    let renames = 0
+    const discord: typeof fetch = async () => {
+      renames += 1
+      return Response.json(
+        { message: 'You are being rate limited.', retry_after: 600, global: false },
+        {
+          status: 429,
+          headers: {
+            'retry-after': '600',
+            'x-ratelimit-limit': '5',
+            'x-ratelimit-remaining': '4',
+            'x-ratelimit-reset-after': '1',
+            'x-ratelimit-scope': 'user',
+          },
+        },
+      )
+    }
+    const limiter = createRateLimiter(
+      { timeoutMs: 1000, retries: 0, maxRateLimitWaitMs: 0 },
+      discord,
+    )
+    const rename = () =>
+      Effect.runPromiseExit(
+        Effect.flatMap(DiscordRest, (rest) =>
+          rest.request({
+            method: 'PATCH',
+            route: '/channels/1',
+            body: {},
+            operationFamily: 'channel',
+          }),
+        ).pipe(Effect.provide(DiscordRest.shared(Redacted.make('token'), limiter))),
+      )
+
+    let last = await rename()
+    for (let attempt = 0; attempt < DEFAULT_FAILURE_THRESHOLD; attempt++) last = await rename()
+    limiter.close()
+
+    expect(renames).toBe(DEFAULT_FAILURE_THRESHOLD)
+    expect(String(last)).toContain('RateGuardTripped')
   })
 })
 

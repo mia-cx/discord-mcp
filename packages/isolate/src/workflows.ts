@@ -1,0 +1,1144 @@
+import { randomUUID } from 'node:crypto'
+import { McpRequestContext, type Principal, ValidationError } from '@discord-mcp/core'
+import type { DiscordRest } from '@discord-mcp/discord-api/relay'
+import type {
+  RecordedWorkflowRun,
+  ScheduledWorkflow,
+  Storage,
+  WorkflowGrants,
+  WorkflowRevision,
+  WorkflowRunOutcome,
+} from '@discord-mcp/storage'
+import type { OperationEntry } from '@mia-cx/discord-catalog'
+import { Effect, Redacted } from 'effect'
+import { type KvStore, makeBroker, type Presence } from './broker.ts'
+import { bundleWorkflow, ScriptBuildError, type ScriptModule, withRuntime } from './bundle.ts'
+import { checkScheduleFloor, MIN_SCHEDULE_INTERVAL_MINUTES, parseCron } from './cron.ts'
+import { type Dependencies, DependencyError, withDependencies } from './dependencies.ts'
+import type { ForwardedInteraction } from './grants.ts'
+import type {
+  GatewayEvent,
+  IsolateHost,
+  RouteRequest,
+  ScheduleTick,
+  ScriptOutcome,
+} from './isolate-host.ts'
+import { makeScheduler, type SchedulerClock } from './schedules.ts'
+import { unsupportedUses } from './unsupported.ts'
+
+const GUILD_MEMBERS = 1 << 1
+const GUILD_MESSAGES = 1 << 9
+const GUILD_MESSAGE_REACTIONS = 1 << 10
+const DIRECT_MESSAGES = 1 << 12
+const DIRECT_MESSAGE_REACTIONS = 1 << 13
+const MESSAGE_CONTENT = 1 << 15
+
+interface WorkflowEventKind {
+  /** The Gateway dispatch that fires it. */
+  readonly t: string
+  /** The intent a workflow must declare to receive it in a guild, and in a direct message. */
+  readonly guild: number
+  readonly direct: number
+}
+
+/** The discord.js events a workflow may listen for. */
+export const WORKFLOW_EVENTS: Readonly<Record<string, WorkflowEventKind>> = {
+  messageCreate: { t: 'MESSAGE_CREATE', guild: GUILD_MESSAGES, direct: DIRECT_MESSAGES },
+  messageUpdate: { t: 'MESSAGE_UPDATE', guild: GUILD_MESSAGES, direct: DIRECT_MESSAGES },
+  messageDelete: { t: 'MESSAGE_DELETE', guild: GUILD_MESSAGES, direct: DIRECT_MESSAGES },
+  messageReactionAdd: {
+    t: 'MESSAGE_REACTION_ADD',
+    guild: GUILD_MESSAGE_REACTIONS,
+    direct: DIRECT_MESSAGE_REACTIONS,
+  },
+  messageReactionRemove: {
+    t: 'MESSAGE_REACTION_REMOVE',
+    guild: GUILD_MESSAGE_REACTIONS,
+    direct: DIRECT_MESSAGE_REACTIONS,
+  },
+  guildMemberAdd: { t: 'GUILD_MEMBER_ADD', guild: GUILD_MEMBERS, direct: GUILD_MEMBERS },
+  guildMemberRemove: { t: 'GUILD_MEMBER_REMOVE', guild: GUILD_MEMBERS, direct: GUILD_MEMBERS },
+  interactionCreate: { t: 'INTERACTION_CREATE', guild: 0, direct: 0 },
+}
+const EVENT_FOR_DISPATCH = new Map(
+  Object.entries(WORKFLOW_EVENTS).map(([name, kind]) => [kind.t, { name, ...kind }]),
+)
+/** Bots listen for these by habit. A workflow never logs in or connects, so they never fire. */
+const SILENT_EVENTS = new Set(['ready', 'clientReady', 'error', 'warn', 'debug'])
+/** The event a workflow's clients hear each tick of the cron schedules in their options. */
+export const SCHEDULE_EVENT = 'schedule'
+
+/** Discord's Gateway intent bits, by discord.js's names. */
+const INTENTS: ReadonlyArray<readonly [string, number]> = [
+  ['Guilds', 1 << 0],
+  ['GuildMembers', 1 << 1],
+  ['GuildModeration', 1 << 2],
+  ['GuildExpressions', 1 << 3],
+  ['GuildIntegrations', 1 << 4],
+  ['GuildWebhooks', 1 << 5],
+  ['GuildInvites', 1 << 6],
+  ['GuildVoiceStates', 1 << 7],
+  ['GuildPresences', 1 << 8],
+  ['GuildMessages', 1 << 9],
+  ['GuildMessageReactions', 1 << 10],
+  ['GuildMessageTyping', 1 << 11],
+  ['DirectMessages', 1 << 12],
+  ['DirectMessageReactions', 1 << 13],
+  ['DirectMessageTyping', 1 << 14],
+  ['MessageContent', 1 << 15],
+  ['GuildScheduledEvents', 1 << 16],
+  ['AutoModerationConfiguration', 1 << 20],
+  ['AutoModerationExecution', 1 << 21],
+  ['GuildMessagePolls', 1 << 24],
+  ['DirectMessagePolls', 1 << 25],
+]
+const KNOWN_INTENTS = INTENTS.reduce((all, [, bit]) => all | bit, 0)
+export const intentNames = (intents: number) =>
+  INTENTS.filter(([, bit]) => (intents & bit) !== 0).map(([name]) => name)
+
+/**
+ * Privileged intents Discord refuses, closing the whole Gateway session, unless the bot's
+ * application flags allow them. Either flag of each pair does.
+ */
+const PRIVILEGED: ReadonlyArray<readonly [string, number, number]> = [
+  ['GuildPresences', 1 << 8, (1 << 12) | (1 << 13)],
+  ['GuildMembers', 1 << 1, (1 << 14) | (1 << 15)],
+  ['MessageContent', 1 << 15, (1 << 18) | (1 << 19)],
+]
+
+/** A workflow's name, unique per bot. */
+export const WORKFLOW_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/
+const SOURCE_LIMIT_BYTES = 256 * 1024
+const PROBE_TIMEOUT_MS = 10_000
+/** How long an interaction may wait for a process slot and still be answered in time. */
+const INTERACTION_ADMISSION_MS = 2_000
+/** How long one workflow may take over one event. */
+export const EVENT_TIMEOUT_MS = 30_000
+/** How long a fetch handler may take. Webhook senders give up after about ten seconds. */
+export const ROUTE_TIMEOUT_MS = 10_000
+/** The largest request body a route accepts. Webhook payloads are small. */
+export const ROUTE_BODY_LIMIT_BYTES = 1024 * 1024
+/** How long a route request may wait for a process slot before it is turned away. */
+const ROUTE_ADMISSION_MS = 2_000
+/**
+ * Route requests one bot may have waiting or running. Callers are anonymous, so more are turned
+ * away rather than queued.
+ */
+const ROUTE_REQUESTS_PER_BOT = 8
+
+/**
+ * Inbound HTTP routes live under this prefix, which no built-in endpoint uses, so a route can
+ * never shadow one.
+ */
+export const ROUTE_PREFIX = '/workflows/'
+/** A workflow's route, namespaced by its bot. Any path below it reaches the same workflow. */
+export const routePath = (botId: string, name: string) => `${ROUTE_PREFIX}${botId}/${name}`
+
+/** What a workflow's KV keys and values may take together. */
+export const KV_LIMIT_BYTES = 1024 * 1024
+export const KV_KEY_LIMIT_BYTES = 512
+const HOUR_MS = 60 * 60 * 1000
+/** How long a run's record stays readable, and how many records each workflow keeps at most. */
+export const RUN_RETENTION_MS = 7 * 24 * HOUR_MS
+export const RUNS_KEPT = 1000
+/** A run's console output, and its error, are each stored up to this many characters. */
+const RUN_LOG_LIMIT_CHARS = 16 * 1024
+/** How often expired run records are deleted, at most. */
+const PRUNE_INTERVAL_MS = HOUR_MS
+const REDACTED = '[redacted]'
+
+/** A Gateway event for an online bot, with the token a run acts with. */
+export interface WorkflowEvent {
+  readonly botId: string
+  readonly token: string
+  readonly dispatch: GatewayEvent
+}
+
+/**
+ * The bot host's side of workflows: who stays online, with which intents, its presence, and the
+ * token an online bot's scheduled runs act with.
+ */
+export interface WorkflowBots {
+  readonly hold: (botId: string, intents: number | undefined) => Promise<void>
+  /** Rejects when the bot is offline. */
+  readonly updatePresence: (botId: string, presence: Presence) => Promise<void>
+  /** The token of a bot this host serves, which route requests and schedules act with. */
+  readonly tokenOf: (botId: string) => string | undefined
+  /** Whether enabled workflows hold this bot here, even while Discord has it offline. */
+  readonly holds: (botId: string) => boolean
+}
+
+export interface WorkflowHostOptions {
+  readonly storage: Storage
+  readonly isolates: IsolateHost
+  readonly bots: WorkflowBots
+  /** The wall clock schedules fire and run records are dated by. */
+  readonly clock: SchedulerClock
+  readonly operations: ReadonlyArray<OperationEntry>
+  /** The npm registry workflow dependencies install from; npm's public one by default. */
+  readonly registry?: string
+  /**
+   * Borrow the REST client a bot's workflows call Discord through, acting with `token`. The bot
+   * host lends the bot's own rate limiter, so workflows and agent calls share its limits.
+   */
+  readonly rest: (botId: string, token: Redacted.Redacted<string>) => BorrowedRest
+  /** Operator-facing failures. Never receives a token. */
+  readonly log: (message: string) => void
+}
+
+/** A bot's REST client, lent until `release`. */
+export interface BorrowedRest {
+  readonly client: DiscordRest['Service']
+  readonly release: () => void
+}
+
+/** Who is changing a bot's workflows. */
+export interface WorkflowCaller {
+  readonly botId: string
+  readonly botUser: unknown
+  /** The Discord user ID of the human whose relay login made the call. */
+  readonly actorId: string
+}
+
+export interface WorkflowListing {
+  readonly workflows: ReadonlyArray<{
+    readonly name: string
+    readonly latestRevision: number
+    readonly enabled: {
+      readonly revision: number
+      readonly events: ReadonlyArray<string>
+      readonly intents: ReadonlyArray<string>
+      /** The path of its inbound HTTP route, or null when it has no fetch handler. */
+      readonly route: string | null
+      readonly schedules: ReadonlyArray<string>
+      readonly grants: WorkflowGrants
+      readonly packages: ReadonlyArray<string>
+    } | null
+  }>
+  readonly changes: Awaited<ReturnType<Storage['workflowChanges']>>
+}
+
+export interface WorkflowHost {
+  /**
+   * Load the source in an isolate to find its events, intents, and schedules, then store a new
+   * revision.
+   */
+  readonly publish: (
+    caller: WorkflowCaller,
+    input: {
+      readonly name: string
+      readonly source: string
+      readonly grants: WorkflowGrants
+      /** npm packages the source imports, by version, range, or tag. */
+      readonly dependencies?: Readonly<Record<string, string>>
+      /** A package-lock.json pinning every version `dependencies` installs. */
+      readonly lockfile?: string
+    },
+  ) => Promise<WorkflowRevision>
+  readonly list: (botId: string) => Promise<WorkflowListing>
+  /**
+   * Run a revision, the latest by default, on the bot's events. `applicationFlags` are the bot
+   * application's, which decide whether Discord allows its privileged intents.
+   */
+  readonly enable: (
+    caller: WorkflowCaller,
+    name: string,
+    revision: number | undefined,
+    applicationFlags: number,
+  ) => Promise<WorkflowRevision>
+  readonly disable: (caller: WorkflowCaller, name: string) => Promise<void>
+  readonly delete: (caller: WorkflowCaller, name: string) => Promise<void>
+  /** The bot's most recent unexpired workflow runs, newest first. */
+  readonly runs: (
+    botId: string,
+    query: { readonly name?: string; readonly failed?: boolean; readonly limit: number },
+  ) => Promise<ReadonlyArray<RecordedWorkflowRun>>
+  /** Run every enabled workflow that listens for this event. Events of one guild run in order. */
+  readonly dispatch: (event: WorkflowEvent) => void
+  /**
+   * Answer a request to an enabled workflow's route with its fetch handler, abandoning it once
+   * `signal` aborts. Every failure is a bare status: 404 for a bot this host doesn't hold or a
+   * workflow that isn't enabled or has no route, 503 while busy, while an enabled route's bot is
+   * offline, or when its revision stops mid-request, 504 past a deadline, and 502 when the
+   * handler fails. Details go to the operator log only.
+   */
+  readonly serve: (
+    botId: string,
+    name: string,
+    request: RouteRequest,
+    signal: AbortSignal,
+  ) => Promise<Response>
+  /**
+   * Keep every bot with enabled workflows that `owns` accepts online, fire their schedules, and
+   * delete expired run records. Called once at startup.
+   */
+  readonly restore: (owns?: (botId: string) => boolean) => Promise<void>
+  /** Stop firing schedules. */
+  readonly close: () => Promise<void>
+}
+
+const invalid = (message: string, ...issues: ReadonlyArray<string>) =>
+  new ValidationError({ message, issues })
+
+const failure = (outcome: Exclude<ScriptOutcome, { outcome: 'completed' }>) => {
+  switch (outcome.outcome) {
+    case 'threw':
+      return `${outcome.error.name}: ${outcome.error.message}`
+    case 'timed_out':
+      return `it ran past ${outcome.timeoutMs} ms`
+    case 'crashed':
+      return outcome.message
+  }
+}
+
+/**
+ * Replaces each secret in `text`. A workflow can log the interaction it handles, token included,
+ * and Discord's errors can quote a request's path.
+ */
+const redactor =
+  (secrets: ReadonlyArray<string>) =>
+  (text: string): string =>
+    secrets.reduce((redacted, secret) => redacted.replaceAll(secret, REDACTED), text)
+
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g
+
+/** `text` as Postgres can store it: it refuses NUL and lone surrogates, which JavaScript allows. */
+const storable = (text: string) => text.replaceAll('\0', '�').replace(LONE_SURROGATE, '�')
+
+/** A run's error, cut to what a record keeps. Its listener can throw any message. */
+const clippedError = (text: string) =>
+  text.length > RUN_LOG_LIMIT_CHARS ? `${text.slice(0, RUN_LOG_LIMIT_CHARS)} [truncated]` : text
+
+/** A run's console lines, cut to what a record keeps. */
+const storedLogs = (lines: ReadonlyArray<string>) => {
+  const kept: string[] = []
+  let chars = 0
+  for (const line of lines) {
+    chars += line.length
+    if (chars > RUN_LOG_LIMIT_CHARS) return [...kept, '[logs truncated]']
+    kept.push(line)
+  }
+  return kept
+}
+
+/** Workflows call Discord from their listeners only, never while loading. */
+const refuseAll = async () =>
+  Response.json(
+    { code: 0, message: 'A workflow calls Discord only from its listeners.' },
+    { status: 403 },
+  )
+
+interface Enabled {
+  readonly revision: WorkflowRevision
+  /** Replaced when compiling fails, so the next event compiles it again. */
+  modules: Promise<ReadonlyArray<ScriptModule>>
+  /** Aborted once the revision stops running: its queued runs never start, running ones end. */
+  readonly stop: AbortController
+}
+
+/**
+ * Load a revision's modules for later events; a failure is reported by the event that awaits it.
+ * Revisions stored before bundles were are bundled from their source here.
+ */
+const compile = ({ source, bundle }: WorkflowRevision) => {
+  const modules = (bundle === null ? bundleWorkflow(source) : Promise.resolve(bundle)).then(
+    withRuntime,
+  )
+  modules.catch(() => {})
+  return modules
+}
+
+/**
+ * Check a workflow for what can't run in an isolate, then bundle it with its dependencies. Every
+ * failure is the agent's to fix, so each becomes a validation error.
+ */
+const buildRevision = async (
+  source: string,
+  dependencies: Dependencies,
+): Promise<{ readonly value: string; readonly packages: ReadonlyArray<string> }> => {
+  const misuses = await unsupportedUses(source)
+  if (misuses.length > 0) {
+    throw invalid("The workflow uses discord.js features workflows can't run.", ...misuses)
+  }
+  const none =
+    Object.keys(dependencies.dependencies).length === 0 && dependencies.lockfile === undefined
+  try {
+    return none
+      ? { value: await bundleWorkflow(source), packages: [] }
+      : await withDependencies(dependencies, (root) => bundleWorkflow(source, root))
+  } catch (error) {
+    if (error instanceof ScriptBuildError || error instanceof DependencyError) {
+      throw invalid(error.message, ...error.issues)
+    }
+    throw error
+  }
+}
+
+/** Identifies a revision across a delete and a republish under the same name. */
+const revisionKey = ({ name, revision, publishedAt }: WorkflowRevision) =>
+  `${name}:${revision}:${publishedAt.getTime()}`
+
+/** Names a revision in operator logs. */
+const labelOf = ({ botId, name, revision }: WorkflowRevision) =>
+  `Workflow ${name} (revision ${revision}) of bot ${botId}`
+
+/** A bare error status for a route's anonymous caller. */
+const refuse = (status: number, error: string, headers: Record<string, string> = {}) =>
+  Response.json({ error }, { status, headers })
+
+/** `promise`, or a rejection with `signal`'s reason once it aborts first. */
+const until = <A>(promise: Promise<A>, signal: AbortSignal) =>
+  Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      signal.throwIfAborted()
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+    }),
+  ])
+
+/** A fetch handler's answer, rebuilt from its untrusted result, or undefined when malformed. */
+const answer = (result: unknown) => {
+  if (typeof result !== 'object' || result === null) return undefined
+  const { status, contentType, body } = result as Record<string, unknown>
+  if (typeof status !== 'number' || typeof body !== 'string') return undefined
+  if (contentType !== null && typeof contentType !== 'string') return undefined
+  const bytes = Buffer.from(body, 'base64')
+  try {
+    // Throws on a status outside 200–599, a body on a bodyless status, or a malformed type.
+    return new Response(bytes.length === 0 ? null : new Uint8Array(bytes), {
+      status,
+      headers: contentType === null ? {} : { 'content-type': contentType },
+    })
+  } catch {
+    return undefined
+  }
+}
+
+/** Who a workflow's Discord calls run as, for the REST client's request context. */
+const WORKFLOW_PRINCIPAL: Principal = { id: 'workflow', kind: 'discord-bot', scopes: new Set() }
+
+/**
+ * What a revision may see of an event: nothing outside its own intents, and in a guild, no
+ * message content without MessageContent, as Discord applies it.
+ */
+const visibleTo = (revision: WorkflowRevision, kind: WorkflowEventKind, event: WorkflowEvent) => {
+  const { d } = event.dispatch
+  const inGuild = d.guild_id !== undefined
+  const needed = inGuild ? kind.guild : kind.direct
+  if ((revision.intents & needed) !== needed) return undefined
+  const isMessage = kind.t === 'MESSAGE_CREATE' || kind.t === 'MESSAGE_UPDATE'
+  if (!isMessage || !inGuild || (revision.intents & MESSAGE_CONTENT) !== 0) return event.dispatch
+  return { t: kind.t, d: visibleMessage(d, event.botId) }
+}
+
+type Message = Record<string, unknown>
+
+/**
+ * A message as an app without MessageContent sees it. Each message, including the ones it quotes
+ * or forwards, keeps its content only if the app wrote it or it mentions the app.
+ */
+const visibleMessage = (
+  { referenced_message, message_snapshots, ...message }: Message,
+  botId: string,
+): Message => {
+  const { poll: _, ...rest } = message
+  const author = message.author as { id?: unknown } | undefined
+  const mentioned = ((message.mentions ?? []) as ReadonlyArray<{ id?: unknown }>).some(
+    (user) => user.id === botId,
+  )
+  return {
+    ...(author?.id === botId || mentioned
+      ? message
+      : { ...rest, content: '', embeds: [], attachments: [], components: [] }),
+    ...(referenced_message == null
+      ? { referenced_message }
+      : { referenced_message: visibleMessage(referenced_message as Message, botId) }),
+    ...(Array.isArray(message_snapshots)
+      ? {
+          message_snapshots: message_snapshots.map((snapshot: { message?: Message }) => ({
+            ...snapshot,
+            ...(snapshot.message === undefined
+              ? {}
+              : { message: visibleMessage(snapshot.message, botId) }),
+          })),
+        }
+      : {}),
+  }
+}
+
+const SCHEDULES_HINT =
+  "source: list five-field cron expressions, in UTC, in the Client's schedules option, as in new Client({ intents: [], schedules: ['0 9 * * *'] })."
+
+/** Each schedule is searched for its next firing every minute, so a workflow declares few. */
+export const MAX_SCHEDULES = 10
+
+/**
+ * The cron schedules a revision's clients declare, if there are few, each parses, and together
+ * they fire at most every few minutes. The probe has checked that each client hears its own.
+ */
+const checkSchedules = (declared: ReadonlyArray<unknown>): ReadonlyArray<string> => {
+  if (declared.length > MAX_SCHEDULES) {
+    throw invalid(`The workflow declares more than ${MAX_SCHEDULES} schedules.`, SCHEDULES_HINT)
+  }
+  const parsed = declared.map((cron) => {
+    if (typeof cron !== 'string') {
+      throw invalid(`Schedule ${String(cron)} is not a string.`, SCHEDULES_HINT)
+    }
+    const schedule = parseCron(cron)
+    if ('reason' in schedule) {
+      throw invalid(`Schedule "${cron}" is not valid: ${schedule.reason}`, SCHEDULES_HINT)
+    }
+    return { cron, schedule }
+  })
+  if (checkScheduleFloor(...parsed.map(({ schedule }) => schedule)) !== undefined) {
+    throw invalid(
+      `The workflow's schedules fire more often than every ${MIN_SCHEDULE_INTERVAL_MINUTES} minutes.`,
+      `${SCHEDULES_HINT} Schedules that fire at the same minute count as 0 minutes apart.`,
+    )
+  }
+  return parsed.map(({ cron }) => cron)
+}
+
+export const makeWorkflowHost = ({
+  storage,
+  isolates,
+  bots,
+  clock,
+  operations,
+  registry,
+  rest,
+  log,
+}: WorkflowHostOptions): WorkflowHost => {
+  const now = clock.date
+  /** Each bot's enabled revisions, compiled once and dropped whenever they change. */
+  const enabled = new Map<string, Promise<ReadonlyArray<Enabled>>>()
+  /** Routing for one bot runs in event order, so its guilds' queues fill in event order. */
+  const routing = new Map<string, Promise<void>>()
+  /** Refreshes for one bot run in order, so the last change decides what the bot host holds. */
+  const refreshing = new Map<string, Promise<void>>()
+  /**
+   * Each bot's own user, which its isolates report as `client.user`, by the token it was read
+   * with. A resumed session brings no READY to read it from.
+   */
+  const users = new Map<string, { readonly token: string; readonly user: Promise<unknown> }>()
+
+  /**
+   * Read the bot's enabled revisions. A revision still enabled keeps its entry from `previous`,
+   * so the stop signal its queued runs carry is the one a later change aborts.
+   */
+  const load = (botId: string, previous: ReadonlyArray<Enabled> = []) => {
+    const kept = new Map(previous.map((entry) => [revisionKey(entry.revision), entry]))
+    const list = storage.enabledRevisions(botId).then((revisions) =>
+      revisions.map(
+        (revision) =>
+          kept.get(revisionKey(revision)) ?? {
+            revision,
+            modules: compile(revision),
+            stop: new AbortController(),
+          },
+      ),
+    )
+    enabled.set(botId, list)
+    // A failed read is retried on the next event.
+    list.catch(() => {
+      if (enabled.get(botId) === list) enabled.delete(botId)
+    })
+    return list
+  }
+
+  const enabledFor = (botId: string) => enabled.get(botId) ?? load(botId)
+
+  /**
+   * Point the bot host and the dispatcher at the bot's enabled revisions after a change, and stop
+   * every run of a revision that no longer runs.
+   */
+  const refresh = (botId: string) => {
+    const done = (refreshing.get(botId) ?? Promise.resolve()).then(async () => {
+      const previous = (await enabled.get(botId)?.catch(() => undefined)) ?? []
+      const revisions = await load(botId, previous).catch((error: unknown) => {
+        // The change is stored, but which revisions still run is unknown: stop them all, and let
+        // the next event start the ones that are enabled afresh.
+        for (const entry of previous) entry.stop.abort()
+        throw error
+      })
+      for (const entry of previous) if (!revisions.includes(entry)) entry.stop.abort()
+      await bots.hold(
+        botId,
+        revisions.length === 0
+          ? undefined
+          : revisions.reduce((all, { revision }) => all | revision.intents, 0),
+      )
+    })
+    refreshing.set(
+      botId,
+      done.catch(() => {}),
+    )
+    return done
+  }
+
+  const userFor = (botId: string, token: string) => {
+    const current = users.get(botId)
+    if (current?.token === token) return current.user
+    const { client, release } = rest(botId, Redacted.make(token))
+    const user = Effect.runPromise(
+      client.request({ method: 'GET', route: '/users/@me', operationFamily: 'user' }),
+    ).finally(release)
+    const entry = { token, user }
+    users.set(botId, entry)
+    // A failed lookup is retried on the next event.
+    user.catch(() => {
+      if (users.get(botId) === entry) users.delete(botId)
+    })
+    return user
+  }
+
+  /** A revision's compiled modules, or undefined once it has logged why they did not compile. */
+  const modulesOf = (workflow: Enabled) =>
+    workflow.modules.catch((error: unknown) => {
+      log(`${labelOf(workflow.revision)} did not compile: ${String(error)}`)
+      workflow.modules = compile(workflow.revision)
+      return undefined
+    })
+
+  /** Route requests each bot has waiting or running. */
+  const serving = new Map<string, number>()
+
+  /** A workflow's own KV store, whichever revision runs. Its failures reach the operator. */
+  const kvFor = (workflowId: string, label: string, redact: (text: string) => string): KvStore => {
+    const reported = <A>(operation: Promise<A>) =>
+      operation.catch((error: unknown) => {
+        log(`${label}: KV failed: ${redact(String(error))}`)
+        throw error
+      })
+    return {
+      get: (key) => reported(storage.loadWorkflowValue(workflowId, key)),
+      set: async (key, value) => {
+        if (Buffer.byteLength(key) > KV_KEY_LIMIT_BYTES) {
+          return `A KV key takes at most ${KV_KEY_LIMIT_BYTES} bytes.`
+        }
+        const { stored, bytes } = await reported(
+          storage.storeWorkflowValue(workflowId, key, value, KV_LIMIT_BYTES),
+        )
+        return stored
+          ? undefined
+          : `The workflow's KV keys and values would take ${bytes} bytes, past its limit of ${KV_LIMIT_BYTES}. Delete keys to make room.`
+      },
+      delete: (key) => reported(storage.deleteWorkflowValue(workflowId, key)),
+    }
+  }
+
+  let prunedAt = Number.NEGATIVE_INFINITY
+  /** Delete expired run records, at most once an interval. Every bot host does, harmlessly. */
+  const prune = () => {
+    const at = now()
+    if (at - prunedAt < PRUNE_INTERVAL_MS) return
+    prunedAt = at
+    storage
+      .pruneWorkflowRuns(new Date(at - RUN_RETENTION_MS))
+      .catch((error: unknown) => log(`Pruning workflow runs failed: ${String(error)}`))
+  }
+
+  /**
+   * The broker for one run: the revision's grants over the bot's REST client, presence, and the
+   * workflow's KV store. `trigger` names what started the run, in its Discord calls' request
+   * context; `redact` keeps the run's secrets out of KV failures.
+   */
+  const brokerFor = (
+    revision: WorkflowRevision,
+    client: DiscordRest['Service'],
+    trigger: string,
+    redact: (text: string) => string,
+    interaction?: ForwardedInteraction,
+  ) => {
+    const label = labelOf(revision)
+    return makeBroker({
+      operations,
+      grants: revision.grants,
+      discord: (call, signal) =>
+        client.request(call).pipe(
+          // DiscordRest aborts its HTTP request with the request context's signal.
+          Effect.provideService(McpRequestContext, {
+            requestId: `${label}: ${trigger}`,
+            signal,
+            progressToken: undefined,
+            notify: undefined,
+            principal: WORKFLOW_PRINCIPAL,
+          }),
+        ),
+      ...(interaction === undefined ? {} : { interaction }),
+      updatePresence: async (presence) => bots.updatePresence(revision.botId, presence),
+      kv: kvFor(revision.workflowId, label, redact),
+      // The URL can hold an interaction token, so only the reason is logged.
+      onDenied: ({ method, reason }) => log(`${label}: refused ${method}: ${reason}`),
+    })
+  }
+
+  /**
+   * Records one run of `revision` on `event`, received at `receivedAt`. `error` arrives redacted
+   * and clipped; logs are redacted and cut here.
+   */
+  const recorder =
+    (
+      revision: WorkflowRevision,
+      event: string,
+      receivedAt: Date,
+      redact: (text: string) => string,
+    ) =>
+    (outcome: WorkflowRunOutcome, error: string | null, logs: ReadonlyArray<string>) =>
+      storage
+        .recordWorkflowRun(
+          {
+            workflowId: revision.workflowId,
+            revision: revision.revision,
+            event,
+            outcome,
+            error: error === null ? null : storable(error),
+            logs: storedLogs(logs.map((line) => storable(redact(line)))),
+            receivedAt,
+            finishedAt: new Date(now()),
+          },
+          RUNS_KEPT,
+        )
+        .then(prune, (error: unknown) =>
+          log(`${labelOf(revision)}: its run was not recorded: ${String(error)}`),
+        )
+
+  /**
+   * Queue one workflow's run of one Gateway event or schedule tick. Enqueues before returning, so
+   * callers keep order.
+   */
+  const run = (
+    botId: string,
+    token: string,
+    trigger: { readonly event: GatewayEvent } | { readonly tick: ScheduleTick },
+    workflow: Enabled,
+    botUser: unknown,
+    modules: ReadonlyArray<ScriptModule>,
+  ) => {
+    const { client, release } = rest(botId, Redacted.make(token))
+    const dispatch = 'event' in trigger ? trigger.event : undefined
+    const d = dispatch?.d ?? {}
+    const { name } = workflow.revision
+    const label = labelOf(workflow.revision)
+    /** What it ran for, as its logs and run record name it. */
+    const cause = dispatch?.t ?? `schedule ${'tick' in trigger ? trigger.tick.cron : ''}`
+    const isInteraction = dispatch?.t === 'INTERACTION_CREATE'
+    const redact = redactor([
+      token,
+      ...(isInteraction && typeof d.token === 'string' && d.token !== '' ? [d.token] : []),
+    ])
+    const record = recorder(workflow.revision, cause, new Date(now()), redact)
+    return isolates
+      .run({
+        // Each workflow sees a guild's events, and a direct message channel's, in order, and never
+        // waits on another workflow. Interactions skip the queue: Discord needs an answer within
+        // three seconds, whatever else the guild is doing. Ticks queue apart from events.
+        botId,
+        queue: `${botId}:${name}:${
+          dispatch === undefined
+            ? SCHEDULE_EVENT
+            : isInteraction
+              ? `interaction:${String(d.id)}`
+              : String(d.guild_id ?? `direct:${String(d.channel_id)}`)
+        }`,
+        botUser,
+        modules,
+        timeoutMs: EVENT_TIMEOUT_MS,
+        input: trigger,
+        signal: workflow.stop.signal,
+        urgent: isInteraction,
+        // Discord drops an interaction not answered within three seconds of the event.
+        ...(isInteraction ? { admitWithinMs: INTERACTION_ADMISSION_MS } : {}),
+        broker: brokerFor(
+          workflow.revision,
+          client,
+          cause,
+          redact,
+          isInteraction
+            ? { id: String(d.id), applicationId: String(d.application_id), token: String(d.token) }
+            : undefined,
+        ),
+      })
+      .then(
+        (outcome) => {
+          if (outcome.outcome === 'completed') return record('completed', null, outcome.logs)
+          const reason = clippedError(redact(failure(outcome)))
+          log(`${label} failed on ${cause}: ${reason}`)
+          return record(outcome.outcome, reason, 'logs' in outcome ? outcome.logs : [])
+        },
+        (error: unknown) => {
+          // Disabled or deleted while queued or running.
+          if (workflow.stop.signal.aborted) return
+          const reason = clippedError(redact(String(error)))
+          log(`${label} did not run: ${reason}`)
+          return record('skipped', reason, [])
+        },
+      )
+      .finally(release)
+  }
+
+  /** The bot's enabled revision of workflow `name` that has a route. */
+  const enabledRoute = async (botId: string, name: string, signal: AbortSignal) =>
+    (await until(enabledFor(botId), signal)).find(
+      ({ revision }) => revision.name === name && revision.route,
+    )
+
+  /**
+   * The answer for a bot with no running session. Any snowflake can be named, so only a bot its
+   * workflows hold here reaches storage, and it is retried only while this route is enabled.
+   */
+  const offline = async (botId: string, name: string, signal: AbortSignal) => {
+    if (!bots.holds(botId)) return refuse(404, 'not_found')
+    try {
+      return (await enabledRoute(botId, name, signal)) === undefined
+        ? refuse(404, 'not_found')
+        : refuse(503, 'unavailable', { 'retry-after': '1' })
+    } catch {
+      return signal.aborted
+        ? refuse(504, 'workflow_timed_out')
+        : refuse(503, 'unavailable', { 'retry-after': '1' })
+    }
+  }
+
+  /**
+   * Run `workflow`'s fetch handler for one request, record the run, and answer with its response
+   * or a bare failure status. Rejects when the run never reached an outcome: stopped, abandoned
+   * at `signal`, or not admitted.
+   */
+  const runRoute = async (
+    workflow: Enabled,
+    token: string,
+    request: RouteRequest,
+    signal: AbortSignal,
+    record: ReturnType<typeof recorder>,
+    redact: (text: string) => string,
+  ) => {
+    const { botId, name } = workflow.revision
+    const label = labelOf(workflow.revision)
+    const event = `HTTP ${request.method}`
+    const [botUser, modules] = await until(
+      Promise.all([userFor(botId, token), modulesOf(workflow)]),
+      signal,
+    )
+    if (modules === undefined) return refuse(502, 'workflow_failed')
+    const { client, release } = rest(botId, Redacted.make(token))
+    const outcome = await isolates
+      .run({
+        botId,
+        // Requests wait only for a process slot, never for each other.
+        queue: `${botId}:${name}:route:${randomUUID()}`,
+        botUser,
+        modules,
+        timeoutMs: ROUTE_TIMEOUT_MS,
+        input: { request },
+        signal: AbortSignal.any([workflow.stop.signal, signal]),
+        admitWithinMs: ROUTE_ADMISSION_MS,
+        broker: brokerFor(workflow.revision, client, event, redact),
+      })
+      .finally(release)
+    if (outcome.outcome !== 'completed') {
+      const reason = clippedError(redact(failure(outcome)))
+      log(`${label} failed on ${event}: ${reason}`)
+      void record(outcome.outcome, reason, 'logs' in outcome ? outcome.logs : [])
+      return outcome.outcome === 'timed_out'
+        ? refuse(504, 'workflow_timed_out')
+        : refuse(502, 'workflow_failed')
+    }
+    const response = answer(outcome.result)
+    if (response !== undefined) {
+      void record('completed', null, outcome.logs)
+      return response
+    }
+    const malformed = 'The fetch handler answered with a malformed response.'
+    log(`${label} failed on ${event}: ${malformed}`)
+    void record('crashed', malformed, outcome.logs)
+    return refuse(502, 'workflow_failed')
+  }
+
+  const route = async (event: WorkflowEvent) => {
+    const kind = EVENT_FOR_DISPATCH.get(event.dispatch.t)
+    if (kind === undefined) return
+    // Answering its own messages would loop.
+    const author = event.dispatch.d.author as { id?: unknown } | undefined
+    if (kind.t === 'MESSAGE_CREATE' && author?.id === event.botId) return
+    const matching = (await enabledFor(event.botId)).flatMap((workflow) => {
+      if (!workflow.revision.events.includes(kind.name)) return []
+      const dispatch = visibleTo(workflow.revision, kind, event)
+      return dispatch === undefined ? [] : [{ workflow, dispatch }]
+    })
+    if (matching.length === 0) return
+    const [botUser, modules] = await Promise.all([
+      userFor(event.botId, event.token),
+      Promise.all(matching.map(({ workflow }) => modulesOf(workflow))),
+    ])
+    // Enqueued together, in order, so every workflow sees a guild's events in the order they came.
+    matching.forEach(({ workflow, dispatch }, index) => {
+      const compiled = modules[index]
+      if (compiled === undefined) return
+      void run(event.botId, event.token, { event: dispatch }, workflow, botUser, compiled)
+    })
+  }
+
+  /** Run one tick of a scheduled revision, if it still runs and its bot is online. */
+  const tick = async ({ botId, name, revision }: ScheduledWorkflow, tick: ScheduleTick) => {
+    const label = `Workflow ${name} (revision ${revision}) of bot ${botId}`
+    const token = bots.tokenOf(botId)
+    if (token === undefined) {
+      log(`${label} skipped its ${tick.cron} tick: the bot is offline.`)
+      return
+    }
+    const find = async () =>
+      (await enabledFor(botId)).find(
+        (entry) => entry.revision.name === name && entry.revision.revision === revision,
+      )
+    // Another bot host enabled the revision, so this one's list is stale.
+    const workflow = (await find()) ?? (await refresh(botId).then(find))
+    if (workflow === undefined) {
+      log(`${label} skipped its ${tick.cron} tick: it no longer runs here.`)
+      return
+    }
+    const [botUser, modules] = await Promise.all([userFor(botId, token), modulesOf(workflow)])
+    if (modules !== undefined) await run(botId, token, { tick }, workflow, botUser, modules)
+  }
+
+  const scheduler = makeScheduler({
+    storage,
+    clock,
+    online: (botId) => bots.tokenOf(botId) !== undefined,
+    log,
+    fire: (workflow, next) =>
+      void tick(workflow, next).catch((error: unknown) =>
+        log(
+          `Workflow ${workflow.name} of bot ${workflow.botId} missed its ${next.cron} tick: ${String(error)}`,
+        ),
+      ),
+  })
+
+  const probe = async (caller: WorkflowCaller, modules: ReadonlyArray<ScriptModule>) => {
+    const outcome = await isolates.run({
+      botId: caller.botId,
+      queue: `${caller.botId}:publish`,
+      botUser: caller.botUser,
+      modules,
+      timeoutMs: PROBE_TIMEOUT_MS,
+      input: { probe: true },
+      broker: refuseAll,
+    })
+    if (outcome.outcome !== 'completed') {
+      throw invalid(`The workflow did not load: ${failure(outcome)}`)
+    }
+    return outcome.result as {
+      readonly events: ReadonlyArray<string>
+      readonly intents: number
+      readonly route: boolean
+      readonly schedules: ReadonlyArray<unknown>
+    }
+  }
+
+  return {
+    publish: async (caller, { name, source, grants, dependencies = {}, lockfile }) => {
+      if (!WORKFLOW_NAME.test(name)) {
+        throw invalid(
+          'The name is not valid.',
+          'name: use 1 to 63 lowercase letters, digits, and dashes, starting with a letter or digit.',
+        )
+      }
+      if (Buffer.byteLength(source) > SOURCE_LIMIT_BYTES) {
+        throw invalid(`The source exceeds ${SOURCE_LIMIT_BYTES} bytes.`)
+      }
+      const { value: bundle, packages } = await buildRevision(source, {
+        dependencies,
+        ...(lockfile === undefined ? {} : { lockfile }),
+        ...(registry === undefined ? {} : { registry }),
+      })
+      const declared = await probe(caller, await withRuntime(bundle))
+      const unsupported = declared.events.filter(
+        (event) =>
+          !(event in WORKFLOW_EVENTS) && event !== SCHEDULE_EVENT && !SILENT_EVENTS.has(event),
+      )
+      if (unsupported.length > 0) {
+        throw invalid(
+          `Workflows can't listen for ${unsupported.join(', ')} yet.`,
+          `source: listen for ${Object.keys(WORKFLOW_EVENTS).join(', ')}.`,
+        )
+      }
+      const unknownIntents = declared.intents & ~KNOWN_INTENTS
+      if (unknownIntents !== 0) {
+        throw invalid(
+          `The client declares intent bits Discord does not define: ${unknownIntents}.`,
+          'source: use GatewayIntentBits names in the Client options.',
+        )
+      }
+      const schedules = checkSchedules(declared.schedules)
+      const events = declared.events.filter(
+        (event) => event in WORKFLOW_EVENTS || event === SCHEDULE_EVENT,
+      )
+      if (events.length === 0 && !declared.route) {
+        throw invalid(
+          'The workflow listens for no Gateway events or schedules, and has no fetch handler.',
+          `source: add a listener with client.on(), for one of ${Object.keys(WORKFLOW_EVENTS).join(', ')}, or ${SCHEDULE_EVENT}; or answer HTTP requests with export default { fetch(request) { ... } }.`,
+        )
+      }
+      return storage.publishWorkflow({
+        botId: caller.botId,
+        name,
+        source,
+        bundle,
+        packages,
+        grants,
+        events,
+        intents: declared.intents,
+        route: declared.route,
+        schedules,
+        actorId: caller.actorId,
+      })
+    },
+
+    list: async (botId) => {
+      const [workflows, running, changes] = await Promise.all([
+        storage.listWorkflows(botId),
+        storage.enabledRevisions(botId),
+        storage.workflowChanges(botId, 20),
+      ])
+      return {
+        workflows: workflows.map(({ name, latestRevision }) => {
+          const revision = running.find((r) => r.name === name)
+          return {
+            name,
+            latestRevision,
+            enabled:
+              revision === undefined
+                ? null
+                : {
+                    revision: revision.revision,
+                    events: revision.events,
+                    intents: intentNames(revision.intents),
+                    route: revision.route ? routePath(botId, name) : null,
+                    schedules: revision.schedules,
+                    grants: revision.grants,
+                    packages: revision.packages,
+                  },
+          }
+        }),
+        changes,
+      }
+    },
+
+    enable: async (caller, name, requested, applicationFlags) => {
+      const revision = await storage.loadWorkflowRevision(caller.botId, name, requested)
+      if (revision === undefined) {
+        throw invalid(
+          requested === undefined
+            ? `No workflow is named ${name}.`
+            : `Workflow ${name} has no revision ${requested}.`,
+          'name: list workflows with discord_workflow_list.',
+        )
+      }
+      const refused = PRIVILEGED.filter(
+        ([, intent, flags]) =>
+          (revision.intents & intent) !== 0 && (applicationFlags & flags) === 0,
+      ).map(([intent]) => intent)
+      if (refused.length > 0) {
+        throw invalid(
+          `Discord would refuse this bot's ${refused.join(' and ')} intent.`,
+          `Turn on ${refused.join(' and ')} under Bot → Privileged Gateway Intents in the Discord Developer Portal, then enable the workflow again.`,
+        )
+      }
+      const enabled = await storage.setEnabledRevision(
+        caller.botId,
+        name,
+        revision.revision,
+        caller.actorId,
+        new Date(clock.date()),
+      )
+      if (!enabled) throw invalid(`No workflow is named ${name}.`)
+      await refresh(caller.botId)
+      return revision
+    },
+
+    disable: async (caller, name) => {
+      const disabled = await storage.setEnabledRevision(
+        caller.botId,
+        name,
+        null,
+        caller.actorId,
+        new Date(clock.date()),
+      )
+      if (!disabled) {
+        throw invalid(`No workflow is named ${name}.`)
+      }
+      await refresh(caller.botId)
+    },
+
+    delete: async (caller, name) => {
+      if (!(await storage.deleteWorkflow(caller.botId, name, caller.actorId))) {
+        throw invalid(`No workflow is named ${name}.`)
+      }
+      await refresh(caller.botId)
+    },
+
+    runs: (botId, query) =>
+      storage.workflowRuns(botId, { ...query, since: new Date(now() - RUN_RETENTION_MS) }),
+
+    dispatch: (event) => {
+      const next = (routing.get(event.botId) ?? Promise.resolve())
+        .then(() => route(event))
+        .catch((error: unknown) =>
+          log(`Bot ${event.botId}'s ${event.dispatch.t} reached no workflow: ${String(error)}`),
+        )
+      routing.set(event.botId, next)
+    },
+
+    serve: async (botId, name, request, signal) => {
+      const token = bots.tokenOf(botId)
+      if (token === undefined) return offline(botId, name, signal)
+      const waiting = serving.get(botId) ?? 0
+      if (waiting >= ROUTE_REQUESTS_PER_BOT) {
+        return refuse(503, 'unavailable', { 'retry-after': '1' })
+      }
+      serving.set(botId, waiting + 1)
+      let workflow: Enabled | undefined
+      let record: ReturnType<typeof recorder> | undefined
+      const event = `HTTP ${request.method}`
+      const redact = redactor([token])
+      try {
+        workflow = await enabledRoute(botId, name, signal)
+        if (workflow === undefined) return refuse(404, 'not_found')
+        record = recorder(workflow.revision, event, new Date(now()), redact)
+        return await runRoute(workflow, token, request, signal, record, redact)
+      } catch (error) {
+        // Replaced, disabled, or deleted while waiting or running: a retry reaches the revision
+        // that runs now, or a 404 once none does.
+        if (workflow?.stop.signal.aborted && !signal.aborted) {
+          return refuse(503, 'unavailable', { 'retry-after': '1' })
+        }
+        const reason = signal.aborted
+          ? 'Its caller stopped waiting.'
+          : clippedError(redact(String(error)))
+        log(`Bot ${botId}'s workflow ${name} did not answer ${event}: ${reason}`)
+        void record?.(signal.aborted ? 'timed_out' : 'skipped', reason, [])
+        return signal.aborted
+          ? refuse(504, 'workflow_timed_out')
+          : refuse(503, 'unavailable', { 'retry-after': '1' })
+      } finally {
+        const left = (serving.get(botId) ?? 1) - 1
+        if (left === 0) serving.delete(botId)
+        else serving.set(botId, left)
+      }
+    },
+
+    restore: async (owns = () => true) => {
+      prune()
+      const intents = new Map<string, number>()
+      for (const { botId, intents: own } of await storage.enabledRevisions()) {
+        // Bot hosts share the database; each holds only the bots it owns.
+        if (!owns(botId)) continue
+        intents.set(botId, (intents.get(botId) ?? 0) | own)
+      }
+      await Promise.all([...intents].map(([botId, all]) => bots.hold(botId, all)))
+      scheduler.start(owns)
+    },
+
+    close: () => scheduler.close(),
+  }
+}

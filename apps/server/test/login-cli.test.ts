@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { toNodeHandler } from '@modelcontextprotocol/node'
 import { expect, it } from 'vitest'
 import { createRelay } from '../src/relay.ts'
-import { config, discordOAuth } from './login-fixture.ts'
+import { config, discordOAuth, executor } from './login-fixture.ts'
 
 it('requires an operator-supplied relay URL before starting login', () => {
   const child = spawnSync(process.execPath, ['scripts/login.mjs', '--no-open'], {
@@ -39,7 +39,7 @@ it('logs in through the CLI loopback callback and writes an owner-only credentia
   const issuer = `http://127.0.0.1:${address.port}`
   const relay = createRelay(
     { ...config, allowedHosts: ['127.0.0.1'], login: { ...config.login, publicBaseUrl: issuer } },
-    undefined,
+    executor(),
     oauth.fetch,
   )
   handle = toNodeHandler(relay)

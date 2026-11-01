@@ -2,11 +2,22 @@ packages:
   - 'apps/*'
   - 'packages/*'
 
+# Keep patch_hash= out of native build paths: node-gyp's Makefiles treat '=' as an assignment.
+virtualStoreDirMaxLength: 60
+
 # Native builds we deliberately allow.
 #
 # `argon2` is load-bearing: personal access tokens are hashed with argon2id, and without its native
-# binding the auth package does not work at all. The other two are build tooling.
+# binding the auth package does not work at all. `@discordjs/opus` encodes `pcm16` voice audio and
+# has no prebuilt binary for Node 24, so it compiles from source. The other two are build tooling.
 allowBuilds:
+  '@discordjs/opus': true
   argon2: true
   esbuild: true
   msgpackr-extract: true
+  # workerd resolves its platform binary package without its postinstall check.
+  workerd: false
+
+# Opus disables NEON in its Linux config; do not compile the unused NEON sources there.
+patchedDependencies:
+  '@discordjs/opus@0.10.0': patches/@discordjs__opus@0.10.0.patch

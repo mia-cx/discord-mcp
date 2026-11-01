@@ -9,6 +9,7 @@
   "dependencies": {
     "@discord-mcp/core": "workspace:*",
     "@discord-mcp/discord-api": "workspace:*",
+    "@discord-mcp/isolate": "workspace:*",
     "@effect/platform-node": "4.0.0-beta.101",
     "@modelcontextprotocol/server": "2.3.1",
     "@modelcontextprotocol/node": "2.1.1",
@@ -19,10 +20,15 @@
     "@discord-mcp/discord-gateway": "workspace:*",
     "@discord-mcp/auth": "workspace:*",
     "@discord-mcp/workflow-runtime": "workspace:*",
-    "@discord-mcp/sandbox-supervisor": "workspace:*",
-    "@discord-mcp/workflow-sdk": "workspace:*"
+    "@discord-mcp/workflow-sdk": "workspace:*",
+    "@discord-mcp/bot-host": "workspace:*",
+    "@discord-mcp/storage": "workspace:*",
+    "ws": "8.22.0"
   },
   "devDependencies": {
-    "@modelcontextprotocol/client": "2.3.1"
+    "@electric-sql/pglite": "0.5.13",
+    "@electric-sql/pglite-socket": "0.2.16",
+    "@modelcontextprotocol/client": "2.3.1",
+    "@types/ws": "8.18.2"
   }
 }

@@ -30,7 +30,6 @@ import {
 import { blueprintTools } from '@discord-mcp/discord-blueprints'
 import { DiscordGateway, gatewayTools } from '@discord-mcp/discord-gateway'
 import { AuditRepository, PersistenceLayer } from '@discord-mcp/persistence'
-import { SupervisorClient } from '@discord-mcp/sandbox-supervisor'
 import {
   CapabilityBroker,
   CapabilityServer,
@@ -48,7 +47,6 @@ import {
 } from '@discord-mcp/workflow-runtime'
 import { Effect, Layer } from 'effect'
 import type { ServerConfig } from './config.ts'
-import { SandboxSupervisorLayer } from './sandbox-adapter.ts'
 
 /** Every tool the process knows how to register, before toolset and gate selection. */
 export const allTools: ReadonlyArray<AnyToolDef> = [
@@ -200,22 +198,9 @@ export const AppLayer = (config: ServerConfig) => {
           Layer.provide(Layer.merge(secrets, persistence)),
         )
 
-  // Workflows run arbitrary code, so they are off unless an operator turned them on and pointed at
-  // a supervisor. When off, the tools are not registered at all and the port explains why rather
-  // than failing obscurely at the first call.
-  const sandbox = config.workflows.enabled
-    ? SandboxSupervisorLayer.pipe(
-        Layer.provide(
-          SupervisorClient.layer({
-            socketPath: config.workflows.supervisorSocket,
-            serviceCredential: config.workflows.supervisorCredential,
-            timeoutMs: config.workflows.supervisorTimeoutMs,
-          }),
-        ),
-      )
-    : SandboxSupervisor.unavailable(
-        'Workflows are disabled. Set DISCORD_MCP_WORKFLOWS_ENABLED=true and configure DISCORD_MCP_SUPERVISOR_SOCKET to run them.',
-      )
+  // No execution backend exists until Textile's runners land, so the port refuses with a reason
+  // rather than failing obscurely at the first call.
+  const sandbox = SandboxSupervisor.unavailable('This server has no workflow execution backend.')
 
   const profiles = authProfilesLayer.pipe(Layer.provide(oauth))
 

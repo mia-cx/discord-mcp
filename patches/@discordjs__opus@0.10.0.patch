@@ -1,0 +1,13 @@
+diff --git a/deps/binding.gyp b/deps/binding.gyp
+index 510ccb4087fc74b3909ec0a50407dd452e79c630..2016409375ebb2cabdfe301a58190d422b4a31df 100644
+--- a/deps/binding.gyp
++++ b/deps/binding.gyp
+@@ -205,7 +205,7 @@
+             "defines": ["PIC", "HAVE_CONFIG_H"],
+             "conditions": [
+                 [
+-                    "target_arch==\"arm64\"",
++                    "target_arch==\"arm64\" and OS!=\"linux\"",
+                     {
+                         "sources": [
+                             "opus/celt/arm/arm_celt_map.c",

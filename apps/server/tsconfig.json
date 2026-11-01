@@ -25,13 +25,19 @@
       "path": "../../packages/auth"
     },
     {
+      "path": "../../packages/isolate"
+    },
+    {
       "path": "../../packages/workflow-runtime"
     },
     {
-      "path": "../sandbox-supervisor"
+      "path": "../../packages/workflow-sdk"
     },
     {
-      "path": "../../packages/workflow-sdk"
+      "path": "../../packages/bot-host"
+    },
+    {
+      "path": "../../packages/storage"
     }
   ]
 }

@@ -72,17 +72,11 @@ export interface ServerConfig {
   }
   readonly workflows: {
     /**
-     * Off by default. Workflows execute arbitrary code, so enabling them is a decision an operator
-     * makes deliberately, not one they inherit from a default.
+     * Registers the workflow tools. Configuration decoding refuses it while no execution backend
+     * exists; tests set it directly to exercise the lifecycle against a stub sandbox.
      */
     readonly enabled: boolean
-    readonly supervisorSocket: string
-    readonly supervisorCredential: string
-    readonly supervisorTimeoutMs: number
-    /**
-     * Where this process sees the shared capability volume. Workflow containers mount the same
-     * volume, each restricted to its own execution's subdirectory.
-     */
+    /** Where this process creates each execution's capability socket. */
     readonly capabilityDirectory: string
   }
   readonly toolsets: ReadonlySet<Toolset>
@@ -119,16 +113,6 @@ const raw = Config.all({
   gatewayBufferSize: Config.int('DISCORD_MCP_GATEWAY_BUFFER_SIZE').pipe(Config.withDefault(1000)),
   gatewayMaxWaitMs: Config.int('DISCORD_MCP_GATEWAY_MAX_WAIT_MS').pipe(Config.withDefault(120_000)),
   workflowsEnabled: Config.boolean('DISCORD_MCP_WORKFLOWS_ENABLED').pipe(Config.withDefault(false)),
-  supervisorSocket: Config.string('DISCORD_MCP_SUPERVISOR_SOCKET').pipe(
-    Config.withDefault('/run/discord-mcp/supervisor.sock'),
-  ),
-  supervisorCredential: Config.string('DISCORD_MCP_SUPERVISOR_CREDENTIAL').pipe(
-    Config.withDefault(''),
-  ),
-  // Generous: a build resolves arbitrary npm, and a five-minute install is slow rather than broken.
-  supervisorTimeoutMs: Config.int('DISCORD_MCP_SUPERVISOR_TIMEOUT_MS').pipe(
-    Config.withDefault(360_000),
-  ),
   capabilityDirectory: Config.string('DISCORD_MCP_CAPABILITY_DIR').pipe(
     Config.withDefault('/run/discord-mcp/capability'),
   ),
@@ -227,12 +211,13 @@ export const loadServerConfig: Effect.Effect<ServerConfig, ConfigurationError> =
           randomBytes(32)
         : yield* decodeMasterKey(Redacted.make(decoded.masterKey))
 
-    if (decoded.workflowsEnabled && decoded.supervisorCredential === '') {
+    // Refused rather than ignored: enabling would advertise workflow tools that can never run.
+    if (decoded.workflowsEnabled) {
       return yield* Effect.fail(
         new ConfigurationError({
-          variable: 'DISCORD_MCP_SUPERVISOR_CREDENTIAL',
+          variable: 'DISCORD_MCP_WORKFLOWS_ENABLED',
           message:
-            'Workflows are enabled but no supervisor credential is set. The credential is what stops any local process from driving the sandbox supervisor; it must match the supervisor’s own.',
+            'Workflows cannot run: this server has no workflow execution backend. Unset DISCORD_MCP_WORKFLOWS_ENABLED.',
         }),
       )
     }
@@ -271,9 +256,6 @@ export const loadServerConfig: Effect.Effect<ServerConfig, ConfigurationError> =
           : undefined,
       workflows: {
         enabled: decoded.workflowsEnabled,
-        supervisorSocket: decoded.supervisorSocket,
-        supervisorCredential: decoded.supervisorCredential,
-        supervisorTimeoutMs: decoded.supervisorTimeoutMs,
         capabilityDirectory: decoded.capabilityDirectory,
       },
       gateway: {

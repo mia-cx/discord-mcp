@@ -93,19 +93,24 @@ describe('cron matching', () => {
 
 describe('the schedule floor', () => {
   it('refuses a schedule that fires more often than the floor', () => {
-    const rejection = checkScheduleFloor(parse('* * * * *'), new Date(NOW))
+    const rejection = checkScheduleFloor(parse('* * * * *'))
     expect(rejection?.reason).toContain(`${MIN_SCHEDULE_INTERVAL_MINUTES}-minute floor`)
   })
 
   it('catches an enumerated schedule as readily as a stepped one', () => {
     // `0,1,2,3,4` is every minute for five minutes; only one of these looks suspicious, and the
     // check works on actual firings rather than on how the expression is written.
-    expect(checkScheduleFloor(parse('0,1,2,3,4 * * * *'), new Date(NOW))).toBeDefined()
+    expect(checkScheduleFloor(parse('0,1,2,3,4 * * * *'))).toBeDefined()
+  })
+
+  it('catches a short gap however late in the hour it falls', () => {
+    // 09:50 then 09:51: more than ten firings after any time of day.
+    expect(checkScheduleFloor(parse('0,5,10,15,20,25,30,35,40,45,50,51 * * * *'))).toBeDefined()
   })
 
   it('accepts a schedule at the floor', () => {
-    expect(checkScheduleFloor(parse('*/5 * * * *'), new Date(NOW))).toBeUndefined()
-    expect(checkScheduleFloor(parse('0 * * * *'), new Date(NOW))).toBeUndefined()
+    expect(checkScheduleFloor(parse('*/5 * * * *'))).toBeUndefined()
+    expect(checkScheduleFloor(parse('0 * * * *'))).toBeUndefined()
   })
 })
 

@@ -280,7 +280,7 @@ const renderDomainError = (e: DomainError): ToolErrorPayload => {
  *
  * A build failure is the workflow author's to fix and the diagnostics say how; an engine failure is
  * the operator's and no retry will help. Conflating them would send a model into a retry loop
- * against a supervisor that is not running.
+ * against a sandbox that is not running.
  */
 const sandboxSuggestion = (
   phase: 'engine' | 'build' | 'start' | 'protocol' | 'policy',
@@ -299,6 +299,6 @@ const sandboxSuggestion = (
     case 'start':
     case 'engine':
     case 'protocol':
-      return `Do not retry; the sandbox supervisor is unavailable or misconfigured. Tell the user to check that it is running and that DISCORD_MCP_SUPERVISOR_SOCKET points at it.${detail}`
+      return `Do not retry; the workflow sandbox is unavailable or misconfigured. Tell the user to check the server's workflow execution backend.${detail}`
   }
 }

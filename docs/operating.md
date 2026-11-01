@@ -14,7 +14,7 @@ corepack pnpm start
 
 For containers, fill `docker/.env.example` into a private `.env`, then run
 `docker compose --env-file .env up -d` from `docker/`. Use one server process
-and TLS termination. There is no database, state volume, or supervisor.
+and TLS termination. There is no database or state volume.
 
 Local stdio uses `MCP_TRANSPORT=stdio DISCORD_TOKEN=...` and does not require OAuth.
 Never expose a local stdio process as an unauthenticated network proxy.
@@ -62,8 +62,8 @@ OAuth identity does not prove bot ownership. Bot-token possession grants authori
 No bot credential, authentication result, or Discord response is cached.
 A reset bot token or revoked Discord login stops working on its next request.
 Preserve the relay's OAuth client settings and encryption key outside the container.
-Changing the key invalidates all issued credentials. Unfinished logins must restart
-after a server restart; completed logins remain valid.
+Changing the key invalidates all issued credentials. A server restart keeps both completed
+logins and logins in progress.
 
 ## Developer-Team allowlist
 

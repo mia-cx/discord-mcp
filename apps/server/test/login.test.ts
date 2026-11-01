@@ -2,13 +2,24 @@ import { DiscordRest } from '@discord-mcp/discord-api/relay'
 import { Effect, Layer } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createRelay } from '../src/relay.ts'
-import { beginLogin, config, discordOAuth, finishLogin, login, redeem } from './login-fixture.ts'
+import {
+  BOT_ID,
+  beginLogin,
+  botToken,
+  config,
+  discordOAuth,
+  executor,
+  finishLogin,
+  login,
+  redeem,
+} from './login-fixture.ts'
 
-const rest = () =>
+const execute = executor(() =>
   Layer.succeed(DiscordRest)({
     raw: undefined as never,
-    request: () => Effect.succeed({ id: '345678901234567890', bot: true }),
-  })
+    request: () => Effect.succeed({ id: BOT_ID, bot: true }),
+  }),
+)
 const mcp = (token?: string) =>
   new Request('https://relay.test/mcp', {
     method: 'POST',
@@ -16,7 +27,7 @@ const mcp = (token?: string) =>
       'content-type': 'application/json',
       'mcp-method': 'tools/list',
       'mcp-protocol-version': '2026-07-28',
-      'x-discord-bot-token': 'private-bot-token',
+      'x-discord-bot-token': botToken(),
       origin: 'https://relay.test',
       ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
     },
@@ -38,7 +49,7 @@ afterEach(() => vi.useRealTimers())
 describe('Discord login for the relay', () => {
   it('advertises OAuth discovery and requires a human login in addition to a bot token', async () => {
     const oauth = discordOAuth()
-    const relay = createRelay(config, rest, oauth.fetch)
+    const relay = createRelay(config, execute, oauth.fetch)
     const missing = await relay.fetch(mcp())
     expect(missing.status).toBe(401)
     expect(missing.headers.get('access-control-expose-headers')).toContain('WWW-Authenticate')
@@ -54,7 +65,7 @@ describe('Discord login for the relay', () => {
     expect(missing.headers.get('www-authenticate')).toContain(
       'https://relay.test/.well-known/oauth-protected-resource/mcp',
     )
-    expect((await relay.fetch(mcp('private-bot-token'))).status).toBe(401)
+    expect((await relay.fetch(mcp(botToken()))).status).toBe(401)
     expect(oauth.calls).toHaveLength(0)
     const metadata = await relay.fetch(
       new Request('https://relay.test/.well-known/oauth-protected-resource/mcp'),
@@ -82,7 +93,7 @@ describe('Discord login for the relay', () => {
 
   it('rechecks Discord identity and revocation on every request without confusing outages with logout', async () => {
     const oauth = discordOAuth()
-    const relay = createRelay(config, rest, oauth.fetch)
+    const relay = createRelay(config, execute, oauth.fetch)
     const { tokens } = await login(relay)
     const before = oauth.calls.length
     expect((await relay.fetch(mcp(tokens.access_token))).status).toBe(200)
@@ -114,11 +125,11 @@ describe('Discord login for the relay', () => {
 
   it('allows listed humans and denies unlisted humans at login and on previously issued credentials', async () => {
     const oauth = discordOAuth()
-    const unrestricted = createRelay(config, rest, oauth.fetch)
+    const unrestricted = createRelay(config, execute, oauth.fetch)
     const { tokens } = await login(unrestricted)
     const restricted = createRelay(
       { ...config, login: { ...config.login, allowedUserIds: ['345678901234567890'] } },
-      rest,
+      execute,
       oauth.fetch,
     )
     const denied = await restricted.fetch(mcp(tokens.access_token))
@@ -138,7 +149,7 @@ describe('Discord login for the relay', () => {
 
     const empty = createRelay(
       { ...config, login: { ...config.login, allowedUserIds: [] } },
-      rest,
+      execute,
       oauth.fetch,
     )
     expect((await empty.fetch(mcp(accepted.tokens.access_token))).status).toBe(403)
@@ -146,7 +157,7 @@ describe('Discord login for the relay', () => {
 
   it('rotates refresh credentials through Discord and rejects replayed ones', async () => {
     const oauth = discordOAuth()
-    const relay = createRelay(config, rest, oauth.fetch)
+    const relay = createRelay(config, execute, oauth.fetch)
     const metadata = await relay.fetch(
       new Request('https://relay.test/.well-known/oauth-authorization-server'),
     )
@@ -177,7 +188,7 @@ describe('Discord login for the relay', () => {
 
   it('binds refresh to its client, resource and allowlist, and outlives the client registration', async () => {
     const oauth = discordOAuth()
-    const relay = createRelay(config, rest, oauth.fetch)
+    const relay = createRelay(config, execute, oauth.fetch)
     const { tokens, clientId } = await login(relay)
     const another = await beginLogin(relay)
     const params = {
@@ -209,7 +220,7 @@ describe('Discord login for the relay', () => {
 
     const restricted = createRelay(
       { ...config, login: { ...config.login, allowedUserIds: ['345678901234567890'] } },
-      rest,
+      execute,
       oauth.fetch,
     )
     const denied = await redeem(restricted, {
@@ -222,16 +233,16 @@ describe('Discord login for the relay', () => {
 
   it('rejects malformed allowlist configuration instead of starting with unrestricted access', () => {
     expect(() =>
-      createRelay({
-        ...config,
-        login: { ...config.login, allowedUserIds: ['not-a-discord-user-id'] },
-      }),
+      createRelay(
+        { ...config, login: { ...config.login, allowedUserIds: ['not-a-discord-user-id'] } },
+        execute,
+      ),
     ).toThrow('DISCORD_OAUTH_ALLOWED_USER_IDS')
   })
 
-  it('binds single-use authorization codes to PKCE, client, redirect, resource and the current process', async () => {
+  it('binds authorization codes to PKCE, client, redirect and resource, single-use across replicas', async () => {
     const oauth = discordOAuth()
-    const relay = createRelay(config, rest, oauth.fetch)
+    const relay = createRelay(config, execute, oauth.fetch)
     const started = await beginLogin(relay)
     const { params } = await finishLogin(relay, started)
     const another = await beginLogin(relay)
@@ -243,9 +254,10 @@ describe('Discord login for the relay', () => {
       { code: started.clientId },
     ])
       expect((await redeem(relay, { ...params, ...overrides })).status).toBe(400)
-    const restarted = createRelay(config, rest, oauth.fetch)
-    expect((await redeem(restarted, params)).status).toBe(400)
-    expect((await redeem(relay, params)).status).toBe(200)
+    // Another replica, or this one after a restart, redeems the code; the first replica then
+    // refuses it, because Discord rejects the refresh token the code already spent.
+    const replica = createRelay(config, execute, oauth.fetch)
+    expect((await redeem(replica, params)).status).toBe(200)
     const replayed = await redeem(relay, params)
     expect(replayed.status).toBe(400)
     expect(await replayed.text()).not.toContain('private-')
@@ -257,7 +269,7 @@ describe('Discord login for the relay', () => {
 
   it('requires browser-bound consent and rejects unsafe redirects, callback issuers and oversized bodies', async () => {
     const oauth = discordOAuth()
-    const relay = createRelay(config, rest, oauth.fetch)
+    const relay = createRelay(config, execute, oauth.fetch)
     const started = await beginLogin(relay)
     for (const headers of [
       { origin: 'https://relay.test' },
