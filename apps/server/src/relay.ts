@@ -198,13 +198,23 @@ const limiterFor = (lane: Lane, fingerprint: string): RateLimiter => {
 
 /**
  * Every bot's one rate limiter, shared by its agent requests and its workflows. A limiter idle for
- * its guard's window is closed.
+ * its guard's window is closed. With `serves`, a bot's limiter sends nothing to Discord while
+ * `serves` says this process no longer holds the bot, so work admitted before another process
+ * took over makes no further calls.
  */
 export const createBotLimiters = (
   rest: Omit<RestConfig, 'token'>,
   discordFetch: typeof fetch = fetch,
+  serves?: (botId: string) => boolean,
 ) => {
   const lanes = new Map<string, Lane>()
+  const fetchFor = (botId: string): typeof fetch =>
+    serves === undefined
+      ? discordFetch
+      : (input, init) =>
+          serves(botId)
+            ? discordFetch(input, init)
+            : Promise.reject(new Error(`This bot host no longer serves bot ${botId}.`))
   const acquire = (botId: string) => {
     const now = Date.now()
     for (const [id, lane] of lanes) {
@@ -213,7 +223,7 @@ export const createBotLimiters = (
       lane.limiter.close()
     }
     const lane: Lane = lanes.get(botId) ?? {
-      limiter: createRateLimiter(rest, discordFetch),
+      limiter: createRateLimiter(rest, fetchFor(botId)),
       guards: new Map(),
       active: 0,
       idleSince: now,

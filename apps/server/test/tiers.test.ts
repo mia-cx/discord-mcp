@@ -7,7 +7,12 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createRelay } from '../src/relay.ts'
 import { ownerOf } from '../src/router.ts'
 import type { ServeRoute } from '../src/routes.ts'
-import { createBotHost, forwardRoutesToBotHosts, forwardToBotHosts } from '../src/tiers.ts'
+import {
+  createBotHost,
+  forwardRoutesToBotHosts,
+  forwardToBotHosts,
+  routeDispatches,
+} from '../src/tiers.ts'
 import { botToken, config, discordOAuth, executor, login } from './login-fixture.ts'
 
 const BIN = fileURLToPath(new URL('../src/bin.ts', import.meta.url))
@@ -396,5 +401,163 @@ describe('forwarding to a bot host', () => {
     expect(request?.headers).toContainEqual(['authorization', 'Bearer webhook-secret'])
     expect(request?.headers.map(([header]) => header)).not.toContain('cookie')
     expect(skipped.status).toBe(401)
+  })
+})
+
+describe('workflow events across bot hosts', () => {
+  /** Serve `handler` over HTTP on `port`, as the binary does. */
+  const serve = async (
+    handler: { fetch: (request: Request) => Promise<Response> },
+    port: number,
+  ) => {
+    const server = createServer(async (request, response) => {
+      let body = ''
+      for await (const chunk of request) body += String(chunk)
+      const headers = new Headers()
+      for (const [name, value] of Object.entries(request.headers)) {
+        if (typeof value === 'string') headers.set(name, value)
+      }
+      const answer = await handler.fetch(
+        new Request(`http://127.0.0.1:${port}${request.url}`, {
+          method: request.method ?? 'GET',
+          headers,
+          ...(body === '' ? {} : { body }),
+        }),
+      )
+      response.writeHead(answer.status).end(await answer.text())
+    }).listen(port, '127.0.0.1')
+    await once(server, 'listening')
+    return server
+  }
+
+  it("runs a bot's events on its REST owner, in order, once the owner holds the bot", async () => {
+    const ports = [await freePort(), await freePort()]
+    const hosts = ports.map((port) => `http://127.0.0.1:${port}`)
+    const [owner = '', other = ''] = hosts
+    const botId = botOwnedBy(hosts, owner)
+    const token = botToken(botId, 'private-secret')
+    const ran: unknown[] = []
+    // The owner's previous process still holds the bot for the first try.
+    const own = vi.fn(async () => true).mockResolvedValueOnce(false)
+    const servers = await Promise.all(
+      hosts.map((self, index) =>
+        serve(
+          createBotHost({ hosts, secret: SECRET, self }, vi.fn(), {
+            bots: { own },
+            workflows: { dispatch: (event) => ran.push({ self, ...event }) },
+          }),
+          ports[index] ?? 0,
+        ),
+      ),
+    )
+    const log = vi.fn()
+
+    // Host b's shard received them.
+    const route = routeDispatches(
+      { hosts, secret: SECRET, self: other },
+      { bots: { own: async () => true }, workflows: { dispatch: vi.fn() } },
+      log,
+    )
+    for (const n of [1, 2, 3]) route({ botId, token, dispatch: { t: 'MESSAGE_CREATE', d: { n } } })
+
+    await vi.waitFor(() => expect(ran).toHaveLength(3), { timeout: 5_000 })
+    expect(ran).toEqual(
+      [1, 2, 3].map((n) => ({
+        self: owner,
+        botId,
+        token,
+        dispatch: { t: 'MESSAGE_CREATE', d: { n } },
+      })),
+    )
+    expect(log).not.toHaveBeenCalled()
+    // A bot host never runs events for a bot it doesn't own.
+    const refused = await fetch(`${other}/dispatch`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${SECRET}`, 'x-discord-bot-token': token },
+      body: JSON.stringify({ t: 'MESSAGE_CREATE', d: {} }),
+    })
+    expect(refused.status).toBe(503)
+
+    for (const server of servers) server.close()
+  })
+
+  it('waits to run its own shards’ events until the bot’s previous owner lets it go', async () => {
+    const self = 'http://127.0.0.1:1'
+    const botId = '345678901234567890'
+    const ran: unknown[] = []
+    // A host on an older list still holds the bot's REST traffic for the first try.
+    const own = vi.fn(async () => true).mockResolvedValueOnce(false)
+    const route = routeDispatches(
+      { hosts: [self], secret: SECRET, self },
+      { bots: { own }, workflows: { dispatch: (event) => ran.push(event.dispatch.d) } },
+      vi.fn(),
+    )
+
+    route({ botId, token: botToken(botId), dispatch: { t: 'MESSAGE_CREATE', d: { n: 1 } } })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(ran).toEqual([])
+    await vi.waitFor(() => expect(ran).toEqual([{ n: 1 }]), { timeout: 3_000 })
+    expect(own).toHaveBeenCalledTimes(2)
+  })
+
+  it('drops the events a down owner missed once they are too old, rather than queueing them', async () => {
+    const [port = 0] = [await freePort()]
+    const owner = `http://127.0.0.1:${port}`
+    const other = 'http://127.0.0.1:1'
+    const botId = botOwnedBy([owner, other], owner)
+    const token = botToken(botId, 'private-secret')
+    const log = vi.fn()
+    // Events older than a quarter second are dropped.
+    const route = routeDispatches(
+      { hosts: [owner, other], secret: SECRET, self: other },
+      { bots: { own: async () => true }, workflows: { dispatch: vi.fn() } },
+      log,
+      250,
+    )
+    for (let n = 0; n < 50; n += 1)
+      route({ botId, token, dispatch: { t: 'MESSAGE_CREATE', d: { n } } })
+    await new Promise((resolve) => setTimeout(resolve, 1_500))
+
+    // The owner comes back: the next event goes straight through.
+    const ran: unknown[] = []
+    const server = await serve(
+      createBotHost({ hosts: [owner, other], secret: SECRET, self: owner }, vi.fn(), {
+        bots: { own: async () => true },
+        workflows: { dispatch: (event) => ran.push(event.dispatch.d) },
+      }),
+      port,
+    )
+    route({ botId, token, dispatch: { t: 'MESSAGE_CREATE', d: { n: 50 } } })
+    await vi.waitFor(() => expect(ran).toEqual([{ n: 50 }]), { timeout: 3_000 })
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('50 events were dropped'))
+    server.close()
+  })
+
+  it("runs a workflow route only once this host holds the bot's REST lease", async () => {
+    const url = 'http://127.0.0.1:1'
+    const botId = '345678901234567890'
+    const serve = vi.fn<ServeRoute>(async () => new Response('accepted', { status: 202 }))
+    // A host on an older list still serves the bot for the first request.
+    const own = vi.fn(async () => true).mockResolvedValueOnce(false)
+    const botHost = createBotHost({ hosts: [url], secret: SECRET, self: url }, vi.fn(), {
+      bots: { own },
+      route: serve,
+    })
+    const request = () =>
+      botHost.fetch(
+        new Request(`${url}/workflows/${botId}/deploys`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${SECRET}`, 'content-type': 'application/json' },
+          body: JSON.stringify({
+            method: 'POST',
+            url: `https://relay.test/workflows/${botId}/deploys`,
+          }),
+        }),
+      )
+
+    const refused = await request()
+    expect(refused.status).toBe(503)
+    expect(serve).not.toHaveBeenCalled()
+    expect((await request()).status).toBe(202)
   })
 })

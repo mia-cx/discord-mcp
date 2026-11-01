@@ -228,6 +228,11 @@ export interface Voice extends BotVoice {
   /** Whether an agent's voice socket is open, which keeps the bot online. */
   readonly streaming: () => boolean
   /**
+   * Whether the bot is in, or joining, a voice channel carried by the shard, or still owes Discord
+   * a leave there. A resumed session of that shard keeps the bot in the channel.
+   */
+  readonly inChannel: (shardId: number) => boolean
+  /**
    * A person opted out in one server, or in every one when `guildId` is undefined, or undid it.
    * An opt-out drops them at once; an undo checks storage again, since another opt-out may hold.
    */
@@ -235,10 +240,10 @@ export interface Voice extends BotVoice {
   /** Ask about everyone's opt-out again, in every channel, as when the answers may have changed. */
   readonly recheck: () => void
   /**
-   * Leave every voice channel and close every socket, as the bot goes offline. Returns the shards
-   * whose leaves could not reach Discord, whose sessions would keep the bot in those channels.
+   * Leave every voice channel and close every socket, as the bot goes offline. A leave that can't
+   * reach Discord leaves the bot `inChannel` on its shard.
    */
-  readonly close: () => ReadonlySet<number>
+  readonly close: () => void
 }
 
 /** Sends what the agent hears to its socket, in the codec it chose. */
@@ -728,6 +733,8 @@ export const createVoice = ({ botId, shardOf, send, consent, clock, log }: Voice
       return true
     },
     streaming: () => [...sessions.values()].some((session) => session.socket !== undefined),
+    inChannel: (shardId) =>
+      [...sessions.keys(), ...unsentLeaves.keys()].some((guildId) => shardOf(guildId) === shardId),
     optOutChanged: (guildId, userId, optedOut) => {
       for (const session of sessions.values()) {
         if (guildId !== undefined && session.guildId !== guildId) continue
@@ -742,7 +749,6 @@ export const createVoice = ({ botId, shardOf, send, consent, clock, log }: Voice
     },
     close: () => {
       for (const session of sessions.values()) destroy(session, OFFLINE)
-      return new Set([...unsentLeaves.keys()].flatMap((guildId) => shardOf(guildId) ?? []))
     },
   }
 }

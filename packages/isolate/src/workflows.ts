@@ -160,8 +160,9 @@ export interface WorkflowEvent {
  */
 export interface WorkflowBots {
   readonly hold: (botId: string, intents: number | undefined) => Promise<void>
-  readonly updatePresence: (botId: string, presence: Presence) => void
-  /** The token of a bot running on this host, which route requests act with. */
+  /** Rejects when the bot is offline. */
+  readonly updatePresence: (botId: string, presence: Presence) => Promise<void>
+  /** The token of a bot this host serves, which route requests and schedules act with. */
   readonly tokenOf: (botId: string) => string | undefined
   /** Whether enabled workflows hold this bot here, even while Discord has it offline. */
   readonly holds: (botId: string) => boolean
@@ -269,8 +270,7 @@ export interface WorkflowHost {
   ) => Promise<Response>
   /**
    * Keep every bot with enabled workflows that `owns` accepts online, fire their schedules, and
-   * delete expired run records. Called once at startup, before the bot host resumes stored
-   * sessions.
+   * delete expired run records. Called once at startup.
    */
   readonly restore: (owns?: (botId: string) => boolean) => Promise<void>
   /** Stop firing schedules. */

@@ -1,7 +1,28 @@
 import { fileURLToPath } from 'node:url'
-import { and, desc, eq, gte, isNotNull, lt, lte, ne, sql } from 'drizzle-orm'
+import {
+  and,
+  desc,
+  eq,
+  getTableColumns,
+  gt,
+  gte,
+  inArray,
+  isNotNull,
+  isNull,
+  like,
+  lt,
+  lte,
+  ne,
+  sql,
+} from 'drizzle-orm'
 import type { PgDatabase, PgQueryResultHKT } from 'drizzle-orm/pg-core'
-import type { Storage, VoiceOptOutChange, WorkflowChange, WorkflowRevision } from './index.ts'
+import type {
+  Fence,
+  Storage,
+  VoiceOptOutChange,
+  WorkflowChange,
+  WorkflowRevision,
+} from './index.ts'
 import type { AdvisoryLocks } from './locks.ts'
 import * as schema from './schema.ts'
 
@@ -23,6 +44,7 @@ export const migrationsFolder = fileURLToPath(new URL('../drizzle', import.meta.
 
 type Db = PgDatabase<PgQueryResultHKT, typeof schema>
 
+const { bots, shardSessions: sessions, leases } = schema
 const {
   workflows,
   workflowRevisions: revisions,
@@ -59,6 +81,39 @@ const record = (
 /** Advisory lock names, so other locks can never collide with the scheduler's. */
 const scheduleLock = (botId: string) => `textile-schedules:${botId}`
 
+const OFFLINE = { shardCount: null, gatewayUrl: null, onlineUntil: null, presence: null } as const
+
+const online = ({
+  shardCount,
+  gatewayUrl,
+  onlineUntil,
+}: Pick<typeof bots.$inferSelect, 'shardCount' | 'gatewayUrl' | 'onlineUntil'>) =>
+  shardCount === null || gatewayUrl === null || onlineUntil === null
+    ? undefined
+    : { shardCount, gatewayUrl, until: onlineUntil }
+
+/** A bot's enabled workflows keep it online and decide its intents, so neither is stored. */
+// Written out, since Drizzle leaves the columns of a selected subquery unqualified.
+const held = sql<boolean>`exists (
+  select 1 from workflows w where w.bot_id = bots.id and w.enabled_revision is not null
+)`
+const intents = sql<number>`coalesce((
+  select bit_or(r.intents) from workflow_revisions r
+  inner join workflows w on w.id = r.workflow_id and w.enabled_revision = r.revision
+  where w.bot_id = bots.id
+), 0)`.mapWith(Number)
+const botColumns = { ...getTableColumns(bots), held, intents }
+
+/**
+ * `fence`'s lease row, locked for the statement that names it, so a claim that hands the lease to
+ * another holder waits for the write, and a write waiting on that claim re-checks the holder.
+ * One statement rather than a transaction, so the write and its check can't be split up.
+ */
+const lockedLease = ({ lease, holder }: Fence) => sql`held as (
+  select 1 from ${leases} where ${leases.name} = ${lease} and ${leases.holder} = ${holder}
+  for share
+)`
+
 /** The Postgres notification channel that carries voice opt-out changes between processes. */
 const VOICE_OPT_OUTS_CHANNEL = 'voice_opt_outs'
 
@@ -84,52 +139,167 @@ export const createStorage = (
 ): Storage => ({
   storeSealedToken: async (botId, sealedToken) => {
     try {
-      await db
-        .insert(schema.bots)
-        .values({ id: botId, sealedToken })
-        .onConflictDoUpdate({ target: schema.bots.id, set: { sealedToken, updatedAt: sql`now()` } })
+      await db.transaction(async (tx) => {
+        await tx
+          .insert(bots)
+          .values({ id: botId, sealedToken })
+          .onConflictDoUpdate({
+            target: bots.id,
+            set: { sealedToken, ...OFFLINE, rejectedCode: null, updatedAt: sql`now()` },
+          })
+        await tx.delete(sessions).where(eq(sessions.botId, botId))
+      })
     } catch (cause) {
       // Drizzle's own message lists the query parameters, sealed token included.
       throw new Error(`Storing bot ${botId}'s token failed: ${rootMessage(cause)}`)
     }
   },
-  loadSealedToken: async (botId) => {
-    const [row] = await db
-      .select({ sealedToken: schema.bots.sealedToken })
-      .from(schema.bots)
-      .where(eq(schema.bots.id, botId))
-    return row?.sealedToken
+  loadBot: async (botId) => {
+    const [row] = await db.select(botColumns).from(bots).where(eq(bots.id, botId))
+    if (row === undefined) return undefined
+    const { sealedToken, intents, held, presence, rejectedCode } = row
+    return { sealedToken, intents, held, presence, rejectedCode, online: online(row) }
   },
-  storeSealedSession: async (botId, shardId, sealedSession) => {
+  setBotOnline: (botId, sealedToken, { shardCount, gatewayUrl, until }) =>
+    db.transaction(async (tx) => {
+      const started = await tx
+        .update(bots)
+        .set({ shardCount, gatewayUrl, onlineUntil: until, updatedAt: sql`now()` })
+        .where(
+          and(
+            eq(bots.id, botId),
+            eq(bots.sealedToken, sealedToken),
+            isNull(bots.onlineUntil),
+            isNull(bots.rejectedCode),
+          ),
+        )
+        .returning({ id: bots.id })
+      if (started.length === 0) return false
+      // Left by a shard that wrote after the bot went offline; Discord ended it.
+      await tx.delete(sessions).where(eq(sessions.botId, botId))
+      return true
+    }),
+  keepBotOnline: async (botId, until) => {
+    const kept = await db
+      .update(bots)
+      .set({ onlineUntil: until })
+      .where(and(eq(bots.id, botId), isNotNull(bots.onlineUntil)))
+      .returning({ id: bots.id })
+    return kept.length > 0
+  },
+  setBotPresence: async (botId, presence) => {
+    const set = await db
+      .update(bots)
+      .set({ presence })
+      .where(and(eq(bots.id, botId), isNotNull(bots.onlineUntil)))
+      .returning({ id: bots.id })
+    return set.length > 0
+  },
+  setBotOffline: (botId, { idleAt, rejectedCode, sealedToken, ranAs } = {}) =>
+    db.transaction(async (tx) => {
+      const ended = await tx
+        .update(bots)
+        .set({ ...OFFLINE, ...(rejectedCode && { rejectedCode }), updatedAt: sql`now()` })
+        .where(
+          and(
+            eq(bots.id, botId),
+            idleAt === undefined ? undefined : and(sql`not ${held}`, lte(bots.onlineUntil, idleAt)),
+            sealedToken === undefined ? undefined : eq(bots.sealedToken, sealedToken),
+            ranAs?.shardCount === undefined ? undefined : eq(bots.shardCount, ranAs.shardCount),
+            ranAs?.intents === undefined ? undefined : sql`${intents} = ${ranAs.intents}`,
+          ),
+        )
+        .returning({ id: bots.id })
+      if (ended.length === 0) return false
+      await tx.delete(sessions).where(eq(sessions.botId, botId))
+      return true
+    }),
+  loadOnlineBots: async () => {
+    const rows = await db.select(botColumns).from(bots).where(isNotNull(bots.onlineUntil))
+    const stored = await db
+      .select({
+        botId: sessions.botId,
+        shardId: sessions.shardId,
+        sealedSession: sessions.sealedSession,
+      })
+      .from(sessions)
+      .innerJoin(bots, eq(bots.id, sessions.botId))
+      .where(isNotNull(bots.onlineUntil))
+    return rows.flatMap((row) => {
+      const bot = online(row)
+      if (bot === undefined) return []
+      const { id, sealedToken, intents, held, presence } = row
+      const own = stored.filter((session) => session.botId === id)
+      return [{ botId: id, sealedToken, intents, held, presence, ...bot, sessions: own }]
+    })
+  },
+  storeSealedSession: async (botId, shardId, sealedSession, fence) => {
     try {
-      await db
-        .insert(schema.shardSessions)
-        .values({ botId, shardId, sealedSession })
-        .onConflictDoUpdate({
-          target: [schema.shardSessions.botId, schema.shardSessions.shardId],
-          set: { sealedSession, updatedAt: sql`now()` },
-        })
+      await db.execute(sql`
+        with ${lockedLease(fence)}
+        insert into shard_sessions (bot_id, shard_id, sealed_session)
+        select ${botId}, ${shardId}, ${sealedSession} from held
+        on conflict (bot_id, shard_id)
+        do update set sealed_session = excluded.sealed_session, updated_at = now()
+      `)
     } catch (cause) {
       throw new Error(
         `Storing bot ${botId}'s shard ${shardId} session failed: ${rootMessage(cause)}`,
       )
     }
   },
-  deleteSession: async (botId, shardId) => {
-    await db
-      .delete(schema.shardSessions)
-      .where(and(eq(schema.shardSessions.botId, botId), eq(schema.shardSessions.shardId, shardId)))
+  deleteSession: async (botId, shardId, fence) => {
+    await db.execute(sql`
+      with ${lockedLease(fence)}
+      delete from shard_sessions
+      where bot_id = ${botId} and shard_id = ${shardId} and exists (select 1 from held)
+    `)
   },
-  loadSealedSessions: () =>
-    db
-      .select({
-        botId: schema.shardSessions.botId,
-        shardId: schema.shardSessions.shardId,
-        sealedSession: schema.shardSessions.sealedSession,
-        sealedToken: schema.bots.sealedToken,
+
+  claimLease: async (name, holder, now, ttlMs) => {
+    const [claimed] = await db
+      .insert(leases)
+      .values({ name, holder, expiresAt: now + ttlMs })
+      .onConflictDoUpdate({
+        target: leases.name,
+        set: { holder, expiresAt: now + ttlMs },
+        setWhere: sql`${leases.holder} = ${holder} or ${leases.expiresAt} <= ${now}`,
       })
-      .from(schema.shardSessions)
-      .innerJoin(schema.bots, eq(schema.bots.id, schema.shardSessions.botId)),
+      .returning({ holder: leases.holder, expiresAt: leases.expiresAt })
+    if (claimed !== undefined) return claimed
+    const [current] = await db
+      .select({ holder: leases.holder, expiresAt: leases.expiresAt })
+      .from(leases)
+      .where(eq(leases.name, name))
+    // Released between the two queries: free now, so the caller's next claim takes it.
+    return current ?? { holder: '', expiresAt: now }
+  },
+  renewLeases: async (holder, names, now, ttlMs) => {
+    if (names.length === 0) return []
+    const renewed = await db
+      .update(leases)
+      .set({ expiresAt: now + ttlMs })
+      .where(
+        and(eq(leases.holder, holder), inArray(leases.name, [...names]), gt(leases.expiresAt, now)),
+      )
+      .returning({ name: leases.name })
+    return renewed.map(({ name }) => name)
+  },
+  releaseLease: async (name, holder) => {
+    await db.delete(leases).where(and(eq(leases.name, name), eq(leases.holder, holder)))
+  },
+  releaseLeases: async (holder) => {
+    await db.delete(leases).where(eq(leases.holder, holder))
+  },
+  liveLeases: async (prefix, now) => {
+    const live = await db
+      .select({ name: leases.name })
+      .from(leases)
+      .where(
+        and(like(leases.name, `${prefix.replace(/[\\%_]/g, '\\$&')}%`), gt(leases.expiresAt, now)),
+      )
+    return live.map(({ name }) => name)
+  },
 
   publishWorkflow: ({ actorId, botId, name, ...revision }) =>
     db.transaction(async (tx) => {

@@ -55,11 +55,6 @@ export interface ShardSession {
   readonly resumeGatewayUrl: string
   /** The last dispatch's sequence number; Discord replays every dispatch after it. */
   readonly sequence: number
-  /**
-   * How many shards the bot identified with. Every shard of a bot must agree on it, so a bot
-   * resumed from stored sessions keeps it.
-   */
-  readonly shardCount: number
   /** The intents it was identified with. A resumed session delivers only those events. */
   readonly intents: number
   /** The next process must identify afresh rather than resume, but still brings the bot online. */
@@ -75,8 +70,11 @@ export interface ShardOptions {
   readonly shardCount: number
   /** The Gateway intents to identify with, as a bitfield. */
   readonly intents: number
-  /** Paces Identifies across the bot's shards. */
-  readonly identifies: IdentifyGate
+  /**
+   * Paces Identifies across the bot's shards, once the bot's Identify limits are known. Only a
+   * shard with no session to resume waits for them.
+   */
+  readonly identifies: () => Promise<IdentifyGate>
   /** A session to resume instead of identifying, such as one a previous process saved. */
   readonly session?: ShardSession
   /**
@@ -161,8 +159,8 @@ export const startShard = ({
   let cancelTimer = () => {}
   /** Withdraws a connected shard's wait for its turn to identify. */
   let cancelIdentify = () => {}
-  /** The Identify the current connection reserved and has not sent. */
-  let reservation: Reservation | undefined
+  /** The Identify the current connection reserved and has not sent, and the gate it came from. */
+  let reserved: { readonly gate: IdentifyGate; readonly reservation: Reservation } | undefined
 
   // A replacement socket may still be connecting when a deferred presence update fires.
   const send = (payload: Payload) => {
@@ -174,8 +172,8 @@ export const startShard = ({
   const drop = (code: number) => {
     cancelTimer()
     cancelIdentify()
-    reservation?.release()
-    reservation = undefined
+    reserved?.reservation.release()
+    reserved = undefined
     const current = socket
     socket = undefined
     current?.close(code)
@@ -196,11 +194,21 @@ export const startShard = ({
 
   // A connection without a session identifies after Hello, so it reserves an Identify first.
   const connectToIdentify = () => {
-    reservation = identifies.reserve()
-    if (reservation !== undefined) return connect()
-    const waitMs = identifies.reopensIn()
-    onIdentifyBudgetSpent(waitMs)
-    cancelTimer = clock.schedule(connectToIdentify, waitMs)
+    let waiting = true
+    cancelTimer = () => {
+      waiting = false
+    }
+    void identifies().then((gate) => {
+      if (!waiting) return
+      const reservation = gate.reserve()
+      if (reservation !== undefined) {
+        reserved = { gate, reservation }
+        return connect()
+      }
+      const waitMs = gate.reopensIn()
+      onIdentifyBudgetSpent(waitMs)
+      cancelTimer = clock.schedule(connectToIdentify, waitMs)
+    })
   }
 
   const connectAfter = (ms: number) => {
@@ -231,7 +239,6 @@ export const startShard = ({
         sessionId: ready.session_id,
         resumeGatewayUrl: ready.resume_gateway_url,
         sequence,
-        shardCount,
         intents,
       }
       resumeUrlFailed = false
@@ -262,10 +269,13 @@ export const startShard = ({
           })
           return
         }
-        cancelIdentify = identifies.whenFree(shardId, () => {
+        // Without a session, the connection reserved an Identify before connecting.
+        const turn = reserved
+        if (turn === undefined) return
+        cancelIdentify = turn.gate.whenFree(shardId, () => {
           cancelIdentify = () => {}
-          reservation?.spend()
-          reservation = undefined
+          turn.reservation.spend()
+          reserved = undefined
           send({
             op: Op.Identify,
             d: {

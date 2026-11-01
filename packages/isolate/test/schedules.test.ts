@@ -186,6 +186,39 @@ describe('workflow schedules', () => {
     )
   })
 
+  it('keep a tick for later when the host stops serving the bot while taking its lock', async () => {
+    const memory = await inMemoryStorage()
+    cleanup.push(() => memory.close())
+    let losing = false
+    let host: ReturnType<typeof botHost> | undefined
+    const storage: Storage = {
+      ...memory,
+      // The host loses the bot's REST lease while this answer is on its way.
+      lockSchedules: async (botId) => {
+        const locked = await memory.lockSchedules(botId)
+        if (losing) host?.setOnline(false)
+        return locked
+      },
+    }
+    host = botHost(storage)
+    await host.start()
+    await enableSchedules(storage, host.host, ['0 9 * * *'])
+    await host.nextMinute()
+    // At 09:00, with the tick due.
+    losing = true
+    await host.nextMinute()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(host.ticks()).toEqual([])
+
+    // It serves the bot again, and the 09:00 tick it held back runs.
+    losing = false
+    host.setOnline(true)
+    await host.nextMinute()
+    await vi.waitFor(() =>
+      expect(host?.ticks()).toEqual([tick('0 9 * * *', '2026-11-02T09:00:00.000Z')]),
+    )
+  })
+
   it('run the revision another bot host enabled', async () => {
     const storage = await inMemoryStorage()
     cleanup.push(() => storage.close())
@@ -291,6 +324,40 @@ describe('workflow schedules', () => {
         expect(b.ticks()).toEqual([tick('*/5 * * * *', '2026-11-02T09:05:00.000Z')]),
       )
       expect(a.ticks()).toHaveLength(1)
+    },
+  )
+
+  it.skipIf(database === undefined)(
+    'leave the bot’s lock to the bot host that can fire for it',
+    async () => {
+      // Its own database: the test above drops the shared one.
+      const own = await postgresTestDatabase()
+      if (own === undefined) return
+      cleanup.push(own.drop)
+      const storageA = await connectStorage(own.url, () => {})
+      const storageB = await connectStorage(own.url, () => {})
+      cleanup.push(
+        () => storageB.close(),
+        () => storageA.close(),
+      )
+      // Both believe they own the bot, but only A holds its REST traffic, so only A can fire.
+      const a = botHost(storageA)
+      const b = botHost(storageB)
+      b.setOnline(false)
+      await b.start()
+      await enableSchedules(storageB, b.host, ['*/5 * * * *'])
+      // B syncs first, at 08:59, and would take the lock for a bot it can't fire for.
+      await b.nextMinute()
+      await a.start()
+
+      for (let minute = 0; minute < 3; minute += 1) {
+        await b.nextMinute()
+        await a.nextMinute()
+      }
+      await vi.waitFor(() =>
+        expect(a.ticks()).toEqual([tick('*/5 * * * *', '2026-11-02T09:00:00.000Z')]),
+      )
+      expect(b.ticks()).toEqual([])
     },
   )
 })

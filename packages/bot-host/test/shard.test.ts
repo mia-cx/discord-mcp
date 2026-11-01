@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { Clock } from '../src/clock.ts'
 import { createIdentifyGate } from '../src/identify.ts'
 import { PRESENCE_INTERVAL_MS, startShard } from '../src/shard.ts'
 import { DEFAULT_HEARTBEAT_INTERVAL_MS, fakeGateway, manualClock } from '../src/testing.ts'
@@ -11,6 +12,11 @@ const presence = (status: string) => ({ since: null, activities: [], status, afk
 const DAY = 24 * 60 * 60 * 1000
 const LIMIT = { total: 1000, remaining: 1000, resetAfter: DAY, maxConcurrency: 1 }
 const cleanup: Array<() => unknown> = []
+/** Identify limits known from the start. */
+const known = (clock: Clock, limit = LIMIT) => {
+  const gate = createIdentifyGate(clock, limit)
+  return () => Promise.resolve(gate)
+}
 afterEach(async () => {
   for (const step of cleanup.splice(0).reverse()) await step()
 })
@@ -28,10 +34,8 @@ const start = async (saved?: { sessionId: string; sequence: number }) => {
     shardId: 0,
     shardCount: 1,
     intents: 0,
-    identifies: createIdentifyGate(clock, LIMIT),
-    ...(saved && {
-      session: { ...saved, resumeGatewayUrl: `${gateway.url}/resume`, shardCount: 1, intents: 0 },
-    }),
+    identifies: known(clock),
+    ...(saved && { session: { ...saved, resumeGatewayUrl: `${gateway.url}/resume`, intents: 0 } }),
     onSession,
     onReady: () => {},
     onFatal,
@@ -143,7 +147,6 @@ describe('the shard supervisor', () => {
         sessionId: 'fake-session',
         resumeGatewayUrl: gateway.url,
         sequence: 3,
-        shardCount: 1,
         intents: 0,
       }),
     )
@@ -169,15 +172,9 @@ describe('the shard supervisor', () => {
       shardCount: 1,
       // `GUILDS` and `GUILD_VOICE_STATES`.
       intents: 129,
-      identifies: createIdentifyGate(clock, LIMIT),
+      identifies: known(clock),
       // Saved before voice, when the shard identified with no intents.
-      session: {
-        sessionId: 'no-voice',
-        resumeGatewayUrl: gateway.url,
-        sequence: 7,
-        shardCount: 1,
-        intents: 0,
-      },
+      session: { sessionId: 'no-voice', resumeGatewayUrl: gateway.url, sequence: 7, intents: 0 },
       onSession: () => {},
       onReady: () => {},
       onFatal: () => {},
@@ -254,8 +251,8 @@ describe('the shard supervisor', () => {
       shardId: 0,
       shardCount: 1,
       intents: 0,
-      identifies: createIdentifyGate(clock, LIMIT),
-      session: { sessionId: 'saved', resumeGatewayUrl, sequence: 7, shardCount: 1, intents: 0 },
+      identifies: known(clock),
+      session: { sessionId: 'saved', resumeGatewayUrl, sequence: 7, intents: 0 },
       onSession: () => {},
       onReady: () => {},
       onFatal: () => {},
@@ -288,7 +285,6 @@ describe('the shard supervisor', () => {
         sessionId: 'saved',
         resumeGatewayUrl: target.url,
         sequence: 7,
-        shardCount: 1,
         intents: 0,
       }
       const onSession = vi.fn()
@@ -299,7 +295,7 @@ describe('the shard supervisor', () => {
         shardId: 0,
         shardCount: 1,
         intents: 0,
-        identifies: createIdentifyGate(clock, LIMIT),
+        identifies: known(clock),
         ...(source === 'saved' && { session }),
         onSession,
         onReady: () => {},
@@ -371,8 +367,8 @@ describe('the shard supervisor', () => {
       shardId: 0,
       shardCount: 1,
       intents: 0,
-      identifies: createIdentifyGate(clock, LIMIT),
-      session: { sessionId: 'saved', resumeGatewayUrl, sequence: 7, shardCount: 1, intents: 0 },
+      identifies: known(clock),
+      session: { sessionId: 'saved', resumeGatewayUrl, sequence: 7, intents: 0 },
       onSession: () => {},
       onReady: () => {},
       onFatal: () => {},
@@ -406,7 +402,7 @@ describe('the shard supervisor', () => {
       shardCount: 1,
       intents: 0,
       // Room for exactly one Identify.
-      identifies: createIdentifyGate(clock, { ...LIMIT, remaining: 2 }),
+      identifies: known(clock, { ...LIMIT, remaining: 2 }),
       onSession: () => {},
       onReady: () => {},
       onFatal: () => {},

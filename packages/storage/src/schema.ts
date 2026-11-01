@@ -13,17 +13,33 @@ import {
 } from 'drizzle-orm/pg-core'
 import type { WorkflowGrants } from './index.ts'
 
-/** Bots whose tokens the platform holds. `sealedToken` is a token vault envelope, never plaintext. */
+/**
+ * Bots whose tokens the platform holds. `sealedToken` is a token vault envelope, never plaintext.
+ * A bot is online while `onlineUntil` is set: every bot host runs its share of the bot's
+ * `shardCount` shards against `gatewayUrl` until then.
+ */
 export const bots = pgTable('bots', {
   id: text('id').primaryKey(),
   sealedToken: text('sealed_token').notNull(),
+  shardCount: integer('shard_count'),
+  gatewayUrl: text('gateway_url'),
+  /** Milliseconds since the epoch, on the bot hosts' clocks. */
+  onlineUntil: bigint('online_until', { mode: 'number' }),
+  /**
+   * The close code Discord refused this token with, so it stays offline until the token changes,
+   * or for refused intents, until its workflows change.
+   */
+  rejectedCode: integer('rejected_code'),
+  /** Its presence as JSON, or null for plain online. Cleared when it goes offline. */
+  presence: text('presence'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 })
 
 /**
  * Gateway sessions a bot host can resume, one per shard. A row exists only while its shard is
- * online or between a restart and its resume. `sealedSession` is a token vault envelope.
+ * online or between a host stopping and another resuming it. `sealedSession` is a token vault
+ * envelope.
  */
 export const shardSessions = pgTable(
   'shard_sessions',
@@ -145,6 +161,18 @@ export const workflowRuns = pgTable(
   },
   (table) => [index().on(table.workflowId, table.id), index().on(table.finishedAt)],
 )
+
+/**
+ * Named, expiring claims that keep each piece of work on one bot host process at a time: a
+ * host's membership, a shard, a bot's REST traffic, a turn to identify.
+ */
+export const leases = pgTable('leases', {
+  name: text('name').primaryKey(),
+  /** The process holding the lease. */
+  holder: text('holder').notNull(),
+  /** Milliseconds since the epoch, on the holder's clock. */
+  expiresAt: bigint('expires_at', { mode: 'number' }).notNull(),
+})
 
 /**
  * People who opted out of having one bot relay their voice in one server. Personal data: only the

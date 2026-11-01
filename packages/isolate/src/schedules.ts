@@ -58,8 +58,9 @@ const dueTicks = (
 
 /**
  * Fires enabled workflows' cron schedules, once each across every bot host. Each minute it takes
- * a Postgres session advisory lock for every owned bot with schedules, so one process fires each
- * bot's ticks however the hosts disagree about ownership. Then it advances each workflow's cursor
+ * a Postgres session advisory lock for every owned bot with schedules that is online here, and
+ * gives up the rest, so one process fires each bot's ticks however the hosts disagree about
+ * ownership, and the one that can fire them gets the lock. Then it advances each workflow's cursor
  * to now and fires the ticks between, in that order: a crash in between loses those ticks rather
  * than firing them twice.
  */
@@ -80,7 +81,10 @@ export const makeScheduler = ({
 
   const syncOnce = async () => {
     const now = new Date(clock.date())
-    const workflows = (await storage.scheduledWorkflows()).filter(({ botId }) => owns(botId))
+    // Only a bot this process can fire for: one that can't must not hold the lock from one that can.
+    const workflows = (await storage.scheduledWorkflows()).filter(
+      ({ botId }) => owns(botId) && online(botId),
+    )
     const bots = new Set(workflows.map(({ botId }) => botId))
     for (const botId of locked) {
       if (bots.has(botId)) continue
@@ -93,6 +97,7 @@ export const makeScheduler = ({
     }
     for (const workflow of workflows) {
       const { botId, cursor } = workflow
+      // Asked again: it may have stopped being able to fire while the locks were taken.
       if (!locked.has(botId) || !online(botId) || now <= cursor) continue
       if (!(await storage.advanceScheduleCursor(workflow, cursor, now))) continue
       for (const tick of dueTicks(workflow.schedules, cursor, now)) fire(workflow, tick)
